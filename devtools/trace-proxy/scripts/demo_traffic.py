@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import secrets
 from http import HTTPStatus
 from typing import Any
@@ -59,7 +60,69 @@ async def _generate(request: web.Request) -> web.StreamResponse:
 
 
 async def _completions(request: web.Request) -> web.StreamResponse:
+    """Fake chat-completions model, streamed and non-streamed.
+
+    Just enough model behaviour to exercise the openai_agent tool loop
+    offline: when tools are offered, no tool result is present yet, and
+    the user prompt mentions "delegate", the fake model answers with a
+    prompt_agent tool call (targeting agent 'openai', session 'worker');
+    otherwise it replies "stub reply".
+    """
     _record(request)
+    try:
+        body: dict[str, Any] = await request.json()
+    except json.JSONDecodeError:
+        body = {}
+    messages: list[dict[str, Any]] = body.get("messages", [])
+    user_text = " ".join(
+        str(m.get("content", "")) for m in messages if m.get("role") == "user"
+    ).lower()
+    wants_tool = (
+        bool(body.get("tools"))
+        and "delegate" in user_text
+        and not any(m.get("role") == "tool" for m in messages)
+    )
+
+    if not body.get("stream"):
+        if wants_tool:
+            message: dict[str, Any] = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_stub0001",
+                        "type": "function",
+                        "function": {
+                            "name": "prompt_agent",
+                            "arguments": json.dumps(
+                                {
+                                    "agent": "openai",
+                                    "session_name": "worker",
+                                    "prompt": "say hello",
+                                }
+                            ),
+                        },
+                    }
+                ],
+            }
+        else:
+            message = {"role": "assistant", "content": "stub reply"}
+        return web.json_response(
+            {
+                "id": "chatcmpl-stub",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "stub",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": message,
+                        "finish_reason": "tool_calls" if wants_tool else "stop",
+                    }
+                ],
+            }
+        )
+
     # Full chunk shape so strict clients (the official openai SDK) parse it.
     chunk = (
         '{"id":"chatcmpl-stub","object":"chat.completion.chunk","created":0,"model":"stub",'

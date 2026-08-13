@@ -50,7 +50,20 @@ checkout via uv path sources) whose handler answers each prompt with a
 streamed chat completion through the **official `openai` SDK** — the
 exact integration shape a real harness uses: `AsyncOpenAI(base_url=`
 the proxy`)`, plus `extra_headers=stream.trace_headers()` on every
-request:
+request.
+
+The model gets one tool, **`prompt_agent(agent, session_name, prompt)`**,
+which delegates to another agent over NATS — so the model itself can
+spawn real sub-agents. Each tool execution runs inside
+`tool_scope(call.id)` (edges labeled with the model's real tool-call
+id), the spawn auto-records via the ambient trace context, the marker
+fires through the same OpenAI client (`models.list(extra_headers=…)`,
+consumed by the proxy), and the follow-up completion drains the
+`x-agent-spawned` report. Run two instances (`--session-name
+coordinator` / `worker`), prompt the coordinator to delegate, and the
+tree page shows a real model-driven parent→child tree. The demo stub
+plays along keylessly: its fake model requests the tool whenever the
+prompt mentions "delegate".
 
 ```sh
 uv sync --extra agents

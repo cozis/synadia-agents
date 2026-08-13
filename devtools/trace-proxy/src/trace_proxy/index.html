@@ -91,10 +91,13 @@
   .tbox .text { white-space: pre-wrap; overflow-wrap: anywhere; flex: 1; min-width: 0; }
   /* Tool-card container: normal whitespace (block children, no prose). */
   .tbox .tdetail { flex: 1; min-width: 0; }
-  /* The literal tool result: a gray block, no decoration. */
-  .tbox .tres { background: #eef1f6; border-radius: 4px; padding: 5px 9px;
-                font-size: 12.5px; overflow-wrap: anywhere; white-space: pre-wrap;
-                margin-top: 6px; }
+  /* The literal tool result: rendered like a code block. */
+  .tbox .tres {
+    background: #f4f6fa; border: 1px solid var(--line); border-radius: 5px;
+    padding: 6px 10px; margin-top: 6px;
+    font: 12px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color: #46506a; overflow-wrap: anywhere; white-space: pre-wrap;
+  }
   .tname { color: var(--warn); margin-bottom: 2px; }
   .arg { display: flex; gap: 10px; padding: 1px 0; font-size: 12.5px; }
   .arg .argk { flex: none; min-width: 92px; color: var(--muted);

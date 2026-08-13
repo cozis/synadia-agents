@@ -23,11 +23,7 @@
   #status { margin-left: auto; font-size: 13px; color: var(--muted); }
   main { max-width: 1200px; margin: 0 auto; padding: 20px; }
   .empty { color: var(--muted); padding: 40px 0; text-align: center; }
-  .tree-group {
-    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
-    margin-bottom: 16px; padding: 14px 18px; overflow-x: auto;
-  }
-  .tree-group > h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); font-weight: 600; }
+  .tree { margin-bottom: 30px; overflow-x: auto; }
   .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
 
   /* A conversation is a vertical chain of turn boxes on a trunk line;
@@ -37,10 +33,16 @@
     content: ""; position: absolute; left: 26px; top: 12px; bottom: 16px;
     width: 2px; background: var(--line);
   }
+  /* Thread identity rides as a strip attached to the head of the
+     chain's first box (standalone only when the thread has no turns). */
   .thead {
-    position: relative; z-index: 1; display: inline-flex; align-items: center;
-    gap: 7px; background: var(--card); padding-right: 10px; font-size: 12px;
+    position: relative; z-index: 1; display: flex; align-items: center;
+    gap: 7px; background: #f8f9fc; font-size: 12px; max-width: 480px;
+    border: 1px solid var(--line); border-radius: 6px; padding: 3px 11px;
+    margin: 14px 0;
   }
+  .thead:has(+ .tbox) { border-bottom: 0; border-radius: 6px 6px 0 0; margin-bottom: 0; }
+  .thead + .tbox { margin-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
   .dot.ok { background: var(--ok); }
   .dot.err { background: var(--err); }
@@ -68,13 +70,12 @@
   .tbox .role.assistant { color: var(--ok); }
   .tbox .role.tool { color: var(--warn); }
   .tbox .text { white-space: pre-wrap; overflow-wrap: anywhere; flex: 1; min-width: 0; }
-  .chain:not(.expanded) > .tbox > .text {
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-  }
   .tbox.tool { border-left: 3px solid var(--warn); }
-  .tbox .tres { width: 100%; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-  .chain:not(.expanded) > .tbox > .tres {
-    display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden;
+  .tbox .tres { width: 100%; color: var(--muted); font-size: 12px; overflow-wrap: anywhere;
+                white-space: pre-wrap; }
+  /* Only very long texts get compressed (click the chain to expand). */
+  .chain:not(.expanded) > .tbox > .long {
+    display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
   }
 
   /* A spawned conversation branches right, off its tool box, with an
@@ -127,18 +128,26 @@ function dotClass(t) {
   return t.last_status && t.last_status >= 400 ? "dot err" : "dot ok";
 }
 
+// Texts under this length always show whole; longer ones compress to a
+// few lines until the chain is clicked open.
+const LONG_TEXT = 280;
+const longCls = (s) => (s && s.length > LONG_TEXT ? " long" : "");
+
 function turnBox(role, text) {
   return `<div class="tbox">
     <span class="role ${esc(role)}">${esc(role)}</span>
-    <span class="text">${esc(text)}</span>
+    <span class="text${longCls(text)}">${esc(text)}</span>
   </div>`;
 }
 
 function toolBox(call, result) {
+  const head = `${call.name}(${call.arguments})`;
   return `<div class="tbox tool">
     <span class="role tool">tool</span>
-    <span class="text mono">${esc(call.name)}(${esc(call.arguments)})</span>
-    ${result && result.text ? `<span class="tres">→ ${esc(result.text)}</span>` : ""}
+    <span class="text mono${longCls(head)}">${esc(head)}</span>
+    ${result && result.text
+      ? `<span class="tres${longCls(result.text)}">→ ${esc(result.text)}</span>`
+      : ""}
   </div>`;
 }
 
@@ -235,10 +244,7 @@ function render() {
         if (ra !== rb) return ra ? -1 : 1;
         return threads.get(a).first_seen - threads.get(b).first_seen;
       });
-    return `<div class="tree-group">
-      <h2>tree <span class="mono">${short(root)}</span> — ${ids.length} thread(s)</h2>
-      ${top.map(id => chainHTML(id, childIndex, visited)).join("")}
-    </div>`;
+    return `<div class="tree">${top.map(id => chainHTML(id, childIndex, visited)).join("")}</div>`;
   }).join("");
 
   document.getElementById("forest").innerHTML =

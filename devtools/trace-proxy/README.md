@@ -97,6 +97,17 @@ paths — point `--upstream` at it and the SDK examples still run.)
 | `/trace/events.json` | current event log as JSON |
 | everything else | forwarded to `--upstream` per the rule above |
 
+## Traffic dump
+
+Every proxied exchange (markers included) is appended human-readably to
+`dump.txt` (`--dump` to relocate) **and echoed to stdout**: original
+request headers as sent by the agent (i.e. before `x-agent-*`
+stripping), request/response bodies with JSON pretty-printed, upstream
+status, and a note on marker entries saying they were consumed rather
+than forwarded. Credential headers (`Authorization`, cookies, API keys)
+are redacted — the dump is for inspecting trace propagation, not for
+holding secrets on disk. `dump*.txt` and `.env` are gitignored here.
+
 ## Alternatives considered
 
 Generic gateways exist — LiteLLM proxies every provider behind one

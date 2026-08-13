@@ -1,0 +1,4 @@
+# Local credentials for agents/ (loaded via `uv run --env-file .env`).
+.env
+# Proxied-traffic dumps.
+dump*.txt

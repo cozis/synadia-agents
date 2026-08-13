@@ -76,11 +76,16 @@ from .heartbeat import (
 from .messages import Chunk, QueryChunk, ResponseChunk, StatusChunk
 from .subjects import AgentSubject
 from .trace import (
+    HEADER_EVENT,
     HEADER_ROOT_ID,
+    HEADER_SPAWNED,
     HEADER_THREAD_ID,
+    HEADER_TOOL_CALL_ID,
     THREAD_ID_HEX_LEN,
     TraceContext,
     derive_thread_id,
+    format_spawn_entry,
+    spawn_marker_headers,
 )
 
 __all__ = [
@@ -89,8 +94,11 @@ __all__ = [
     "DEFAULT_LIVENESS_SLACK",
     "DEFAULT_PROMPT_MAX_WAIT_S",
     "DEFAULT_STREAM_INACTIVITY_TIMEOUT_S",
+    "HEADER_EVENT",
     "HEADER_ROOT_ID",
+    "HEADER_SPAWNED",
     "HEADER_THREAD_ID",
+    "HEADER_TOOL_CALL_ID",
     "HEARTBEAT_SUBJECT",
     "PROMPT_ENDPOINT_NAME",
     "PROMPT_QUEUE_GROUP",
@@ -133,6 +141,8 @@ __all__ = [
     "decode",
     "derive_thread_id",
     "encode",
+    "format_spawn_entry",
     "load_context_options",
     "parse_nats_url",
+    "spawn_marker_headers",
 ]

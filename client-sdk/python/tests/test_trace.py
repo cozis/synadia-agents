@@ -19,6 +19,7 @@ from synadia_ai.agents import (
     decode,
     derive_thread_id,
     encode,
+    format_spawn_entry,
 )
 
 
@@ -62,3 +63,16 @@ class TestTraceContext:
     def test_frozen_carrier(self) -> None:
         ctx = TraceContext(root_id="b" * 16)
         assert ctx.root_id == "b" * 16
+
+
+class TestFormatSpawnEntry:
+    """The edge policy: edge-type honesty."""
+
+    def test_explicit_tool_id(self) -> None:
+        assert format_spawn_entry("c1", "toolu_x") == "c1:toolu_x:tool_call"
+
+    def test_no_tool_is_programmatic(self) -> None:
+        assert format_spawn_entry("c1") == "c1::programmatic"
+
+    def test_explicit_edge_type_wins(self) -> None:
+        assert format_spawn_entry("c1", None, "handoff") == "c1::handoff"

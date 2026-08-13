@@ -114,13 +114,15 @@ def _tool_calls_text(calls: Any) -> str:
     return f"[tool call: {', '.join(names)}]" if names else ""
 
 
-def conversation_from_request(body: bytes) -> list[dict[str, str]] | None:
+def conversation_from_request(body: bytes) -> list[dict[str, Any]] | None:
     """Best-effort turn list from a completion request body.
 
-    Understands OpenAI-style ``messages`` (string or parts content,
-    tool_calls summarized inline) and Ollama's bare ``prompt``. Each
-    request carries the whole history, so the latest request IS the
-    conversation so far.
+    Understands OpenAI-style ``messages`` (string or parts content) and
+    Ollama's bare ``prompt``. Tool calls stay structured — id, name,
+    arguments per call, and ``tool_call_id`` on result turns — so the
+    dashboard can anchor spawned child threads at the exact tool-call
+    box that spawned them. Each request carries the whole history, so
+    the latest request IS the conversation so far.
     """
     try:
         payload = json.loads(body)
@@ -133,14 +135,33 @@ def conversation_from_request(body: bytes) -> list[dict[str, str]] | None:
     messages = payload.get("messages")
     if not isinstance(messages, list):
         return None
-    turns: list[dict[str, str]] = []
+    turns: list[dict[str, Any]] = []
     for message in messages:
         if not isinstance(message, dict):
             continue
-        text = _content_text(message.get("content"))
-        calls = _tool_calls_text(message.get("tool_calls"))
-        combined = f"{text} {calls}".strip()
-        turns.append({"role": str(message.get("role", "?")), "text": _clip(combined)})
+        turn: dict[str, Any] = {
+            "role": str(message.get("role", "?")),
+            "text": _clip(_content_text(message.get("content"))),
+        }
+        calls = message.get("tool_calls")
+        if isinstance(calls, list):
+            structured = []
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                fn = call.get("function") or {}
+                structured.append(
+                    {
+                        "id": str(call.get("id") or ""),
+                        "name": str(fn.get("name") or "?"),
+                        "arguments": _clip(str(fn.get("arguments") or "")),
+                    }
+                )
+            if structured:
+                turn["tool_calls"] = structured
+        if message.get("tool_call_id"):  # a tool-result turn
+            turn["tool_call_id"] = str(message["tool_call_id"])
+        turns.append(turn)
     return turns[-_TURNS_LIMIT:] or None
 
 
@@ -316,7 +337,7 @@ class ThreadStore:
         root_id: str | None,
         spawned: list[dict[str, str | None]],
         path: str,
-        conversation: list[dict[str, str]] | None = None,
+        conversation: list[dict[str, Any]] | None = None,
     ) -> None:
         """Fold one proxied request (or consumed marker) into the forest."""
         if thread_id is None:

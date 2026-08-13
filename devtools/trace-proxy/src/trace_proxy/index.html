@@ -8,6 +8,7 @@
   :root {
     --bg: #f6f7f9; --card: #ffffff; --ink: #1c2330; --muted: #68738a;
     --line: #e2e6ee; --accent: #3757c4; --ok: #2f8a4c; --warn: #b3661d; --err: #b03636;
+    --box: #f2f5fb;
   }
   * { box-sizing: border-box; }
   body {
@@ -46,26 +47,30 @@
   .badge.prog { color: var(--warn); border-color: var(--warn); }
   .badge.pending { color: var(--err); border-color: var(--err); }
   .stats { color: var(--muted); font-size: 12.5px; }
-  .task { color: var(--ink); font-size: 12.5px; font-style: italic; overflow: hidden;
-          text-overflow: ellipsis; white-space: nowrap; max-width: 46ch; }
-  .last { color: var(--muted); font-size: 12px; margin-left: 18px; }
   .convo { margin: 4px 0 4px 18px; font-size: 12.5px; }
-  .convo summary { cursor: pointer; color: var(--muted); font-size: 12px; }
-  .turn { display: flex; gap: 8px; padding: 3px 0; border-bottom: 1px dashed var(--line); }
-  .turn:last-child { border-bottom: none; }
+  .turn { display: flex; gap: 8px; padding: 3px 0; }
   .turn .role { flex: none; width: 70px; font-size: 11px; text-transform: uppercase;
                 letter-spacing: 0.04em; color: var(--muted); padding-top: 1px; }
   .turn .role.user { color: var(--accent); }
   .turn .role.assistant { color: var(--ok); }
   .turn .role.tool { color: var(--warn); }
   .turn .text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .toolbox {
+    border: 1px solid var(--line); border-left: 3px solid var(--warn);
+    background: var(--box); border-radius: 6px;
+    margin: 5px 0 5px 78px; padding: 6px 10px;
+  }
+  .tool-head { color: var(--warn); overflow-wrap: anywhere; }
+  .tool-head .tool-id { color: var(--muted); font-size: 11px; margin-left: 6px; }
+  .toolbox .turn .role { width: 54px; }
+  .tool-kids { margin-top: 4px; border-top: 1px dashed var(--line); padding-top: 4px; }
   #untraced { color: var(--muted); font-size: 13px; margin-top: 18px; }
 </style>
 </head>
 <body>
 <header>
   <h1>trace-proxy</h1>
-  <span class="sub">conversation trees — threads buffered by id, edges from parent-reported spawns</span>
+  <span class="sub">conversation trees — child threads attach at the tool call that spawned them</span>
   <span id="status">connecting…</span>
 </header>
 <main>
@@ -79,15 +84,6 @@
 // a full thread record (an upsert) or a {type:"meta"} counter update.
 const threads = new Map();
 let untraced = 0;
-
-// Which conversations the viewer has expanded — survives re-renders.
-// `toggle` doesn't bubble, so listen in the capture phase.
-const openConvos = new Set();
-document.addEventListener("toggle", (e) => {
-  const tid = e.target && e.target.dataset ? e.target.dataset.tid : null;
-  if (!tid) return;
-  if (e.target.open) openConvos.add(tid); else openConvos.delete(tid);
-}, true);
 
 function short(id) { return id ? id.slice(0, 16) : "?"; }
 
@@ -113,8 +109,8 @@ function edgeBadge(t) {
   if (t.thread_id === t.root_id) return '<span class="badge root">root</span>';
   if (!t.edge) return '<span class="badge pending">position pending</span>';
   return t.edge.edge_type === "tool_call"
-    ? `<span class="badge tool">via ${t.edge.tool_call_id || "?"} · tool_call</span>`
-    : `<span class="badge prog">${t.edge.edge_type}</span>`;
+    ? `<span class="badge tool">via ${esc(t.edge.tool_call_id || "?")} · tool_call</span>`
+    : `<span class="badge prog">${esc(t.edge.edge_type)}</span>`;
 }
 
 function statsLine(t) {
@@ -123,55 +119,79 @@ function statsLine(t) {
   return `${calls}${markers} · ${ago(t.last_seen)}`;
 }
 
-function lastLine(t) {
-  if (!t.last_path) return "";
-  const st = t.last_status === null ? "…" : t.last_status;
-  return `<div class="last mono">last: ${esc(t.last_path)} → ${st}</div>`;
+function turnRow(role, text) {
+  return `<div class="turn">
+    <span class="role ${esc(role)}">${esc(role)}</span>
+    <span class="text">${esc(text)}</span>
+  </div>`;
 }
 
-function turnsOf(t) {
-  const turns = (t.conversation || []).slice();
-  if (t.reply) turns.push({ role: "assistant", text: t.reply });
-  else if (t.last_status === null && t.requests > 0)
-    turns.push({ role: "assistant", text: "…" });
-  return turns;
-}
-
-function taskSnippet(t) {
-  const user = (t.conversation || []).find(u => u.role === "user");
-  return user ? `<span class="task">“${esc(user.text)}”</span>` : "";
-}
-
-function convoBlock(t) {
-  const turns = turnsOf(t);
-  if (!turns.length) return "";
-  const rows = turns.map(u => `
-    <div class="turn">
-      <span class="role ${esc(u.role)}">${esc(u.role)}</span>
-      <span class="text">${esc(u.text)}</span>
-    </div>`).join("");
-  const open = openConvos.has(t.thread_id) ? " open" : "";
-  return `<details class="convo" data-tid="${esc(t.thread_id)}"${open}>
-    <summary>conversation · ${turns.length} turn${turns.length === 1 ? "" : "s"}</summary>
-    ${rows}
-  </details>`;
+// One tool-call box: the call itself, its result (if the follow-up
+// request revealed it), and any child threads whose spawn edge carries
+// this exact tool-call id — the tree grows out of the conversation.
+function toolBox(call, result, kidIds, childIndex) {
+  const kids = kidIds.length
+    ? `<div class="tool-kids">${kidIds.map(k => renderNode(k, childIndex)).join("")}</div>`
+    : "";
+  return `<div class="toolbox">
+    <div class="tool-head mono">⚙ ${esc(call.name)}(${esc(call.arguments)})
+      <span class="tool-id">${esc(call.id)}</span></div>
+    ${result && result.text ? turnRow("tool", result.text) : ""}
+    ${kids}
+  </div>`;
 }
 
 function renderNode(id, childIndex) {
   const t = threads.get(id);
   const kids = childIndex.get(id) || [];
+  const turns = t.conversation || [];
+
+  // Tool results leave the flow: each renders inside its call's box.
+  const resultsByCall = new Map();
+  const flow = [];
+  for (const u of turns) {
+    if (u.role === "tool" && u.tool_call_id) resultsByCall.set(u.tool_call_id, u);
+    else flow.push(u);
+  }
+
+  // Anchor children at their spawning tool call when the parent's
+  // conversation already shows that call; until then (or for
+  // programmatic spawns) they attach below the conversation.
+  const callIds = new Set();
+  for (const u of flow) for (const c of (u.tool_calls || [])) if (c.id) callIds.add(c.id);
+  const anchored = new Map();
+  const loose = [];
+  for (const k of kids) {
+    const edge = threads.get(k).edge;
+    const callId = edge && edge.tool_call_id;
+    if (callId && callIds.has(callId)) {
+      if (!anchored.has(callId)) anchored.set(callId, []);
+      anchored.get(callId).push(k);
+    } else {
+      loose.push(k);
+    }
+  }
+
+  const turnHtml = flow.map(u => {
+    let html = u.text ? turnRow(u.role, u.text) : "";
+    for (const c of (u.tool_calls || []))
+      html += toolBox(c, resultsByCall.get(c.id), anchored.get(c.id) || [], childIndex);
+    return html;
+  }).join("");
+  const replyRow = t.reply
+    ? turnRow("assistant", t.reply)
+    : (t.last_status === null && t.requests > 0 ? turnRow("assistant", "…") : "");
+
   return `
     <div class="node">
       <div class="node-line">
         <span class="${dotClass(t)}"></span>
         <span class="mono">${short(id)}</span>
         ${edgeBadge(t)}
-        ${taskSnippet(t)}
         <span class="stats">${statsLine(t)}</span>
       </div>
-      ${convoBlock(t)}
-      ${lastLine(t)}
-      ${kids.length ? `<div class="kids">${kids.map(k => renderNode(k, childIndex)).join("")}</div>` : ""}
+      ${(turnHtml || replyRow) ? `<div class="convo">${turnHtml}${replyRow}</div>` : ""}
+      ${loose.length ? `<div class="kids">${loose.map(k => renderNode(k, childIndex)).join("")}</div>` : ""}
     </div>`;
 }
 

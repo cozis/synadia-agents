@@ -91,8 +91,10 @@
   .tbox .text { white-space: pre-wrap; overflow-wrap: anywhere; flex: 1; min-width: 0; }
   /* Tool-card container: normal whitespace (block children, no prose). */
   .tbox .tdetail { flex: 1; min-width: 0; }
-  .tbox .tres { color: var(--muted); font-size: 12px; overflow-wrap: anywhere;
-                white-space: pre-wrap; margin-top: 3px; }
+  /* The literal tool result: a gray block, no decoration. */
+  .tbox .tres { background: #eef1f6; border-radius: 4px; padding: 5px 9px;
+                font-size: 12.5px; overflow-wrap: anywhere; white-space: pre-wrap;
+                margin-top: 6px; }
   .tname { color: var(--warn); margin-bottom: 2px; }
   .arg { display: flex; gap: 10px; padding: 1px 0; font-size: 12.5px; }
   .arg .argk { flex: none; min-width: 92px; color: var(--muted);
@@ -194,7 +196,7 @@ function toolBox(call, result) {
       <div class="mono tname">${esc(call.name)}</div>
       ${argRows(call.arguments)}
       ${result && result.text
-        ? `<div class="tres${longCls(result.text)}">→ ${esc(result.text)}</div>`
+        ? `<div class="tres${longCls(result.text)}">${esc(result.text)}</div>`
         : ""}
     </div>
   </div>`;

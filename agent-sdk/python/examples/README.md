@@ -16,7 +16,7 @@ They form a ladder — each rung is the one before plus a little more:
 | [`03-openrouter.py`](03-openrouter.py) | Same shape again, but the backend is the hosted, OpenAI-compatible OpenRouter API (needs a key). |
 | [`04-combined.py`](04-combined.py) | Ollama **or** OpenRouter, auto-selected from the env; model access factored into [`llm.py`](llm.py). |
 | [`05-tools.py`](05-tools.py) | Gives the LLM a `read_sensor` tool wired to a NATS microservice, then reasons over the reading. |
-| [`06-subagent.py`](06-subagent.py) | The capability is another **agent**: a coordinator delegates each prompt to a worker agent, wiring the parent→child trace edge. |
+| [`06-subagent.py`](06-subagent.py) | The capability is another **agent**: a coordinator delegates each prompt to a worker agent; the parent→child trace edge is recorded automatically. |
 
 The spec-compliant [`_reference_agent.py`](_reference_agent.py) (a stateful echo
 with per-session memory) lives here too — it's what the

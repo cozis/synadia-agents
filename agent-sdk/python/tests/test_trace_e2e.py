@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from synadia_ai.agents import Agents, ResponseChunk, TraceContext
+from synadia_ai.agents import Agents, DiscoverFilter, ResponseChunk, TraceContext, tool_scope
 
 from synadia_ai.agent_service import AgentService, PromptStream
 
@@ -108,3 +108,87 @@ async def test_thread_identity_and_root_forwarding(
     finally:
         await agents.close()
         await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_ambient_nested_spawn(nc: NATSClient, evidence: EvidenceRecorder) -> None:
+    """A parent handler spawns a child with ZERO explicit trace plumbing.
+
+    The agent-sdk binds the ambient ActiveTrace around the handler; the
+    client-sdk's prompt() picks it up (root forwarding + spawn edge with
+    the ambient tool_scope id) — the core of the implicit-correlation
+    layer, over a real broker.
+    """
+    agents = Agents(nc=nc)
+    child_obs: dict[str, Any] = {}
+    parent_obs: dict[str, Any] = {}
+
+    async def child_handler(envelope: Envelope, stream: PromptStream) -> None:
+        child_obs.update(thread_id=stream.thread_id, root_id=stream.root_id, is_root=stream.is_root)
+        await stream.send("child ok")
+
+    async def parent_handler(envelope: Envelope, stream: PromptStream) -> None:
+        found = await agents.discover(filter=DiscoverFilter(session_name="child"))
+        assert found, "child agent not discovered"
+
+        # Scopeless ambient spawn — edge is honest about having no tool.
+        scopeless = found[0].prompt("fire and observe")
+        async for _ in scopeless:
+            pass
+        assert scopeless.spawn_marker_headers is not None
+        expected_programmatic = f"{scopeless.thread_id}::programmatic"
+        assert scopeless.spawn_marker_headers["x-agent-spawned"] == expected_programmatic
+        stream.trace_headers()  # drain the programmatic entry before the scoped one
+
+        with tool_scope("toolu_ambient"):
+            # No trace=, no record_spawn — everything ambient.
+            handle = found[0].prompt("sub-task")
+            async for _ in handle:
+                pass
+        parent_obs.update(
+            thread_id=stream.thread_id,
+            root_id=stream.root_id,
+            child_handle_thread=handle.thread_id,
+            marker=handle.spawn_marker_headers,
+            headers_after=stream.trace_headers(),
+        )
+        await stream.send("parent ok")
+
+    child_svc = AgentService(
+        agent=AGENT, owner=OWNER, session_name="child", nc=nc, heartbeat_interval_s=30
+    )
+    child_svc.on_prompt(child_handler)
+    parent_svc = AgentService(
+        agent=AGENT, owner=OWNER, session_name="parent", nc=nc, heartbeat_interval_s=30
+    )
+    parent_svc.on_prompt(parent_handler)
+    await child_svc.start()
+    await parent_svc.start()
+
+    outer = Agents(nc=nc)
+    try:
+        found = await outer.discover(filter=DiscoverFilter(session_name="parent"))
+        assert len(found) == 1
+        root_handle = found[0].prompt("do the thing")
+        async for _ in root_handle:
+            pass
+
+        # Tree: root prompt -> parent thread -> (ambient spawn) -> child thread.
+        assert parent_obs["thread_id"] == root_handle.thread_id
+        assert parent_obs["root_id"] == root_handle.thread_id  # parent is the root
+        assert child_obs["root_id"] == parent_obs["root_id"]  # forwarded implicitly
+        assert child_obs["thread_id"] == parent_obs["child_handle_thread"]
+        assert child_obs["is_root"] is False
+
+        # Edge auto-recorded with the ambient tool id, on both channels.
+        expected_edge = f"{child_obs['thread_id']}:toolu_ambient:tool_call"
+        assert parent_obs["marker"]["x-agent-event"] == "spawn"
+        assert parent_obs["marker"]["x-agent-spawned"] == expected_edge
+        assert parent_obs["headers_after"]["x-agent-spawned"] == expected_edge
+
+        evidence.write_json("ambient-nested-spawn.json", {"parent": parent_obs, "child": child_obs})
+    finally:
+        await outer.close()
+        await agents.close()
+        await parent_svc.stop()
+        await child_svc.stop()

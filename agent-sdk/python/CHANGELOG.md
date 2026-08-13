@@ -17,6 +17,12 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
   and `record_spawn()` / `child_trace()` for reporting sub-agent
   spawn edges. Requires `synadia-ai-agents` with `derive_thread_id` /
   `TraceContext`.
+- **Ambient trace binding** — `AgentService` binds the client-sdk's
+  `ActiveTrace` (contextvars) around each prompt-handler invocation:
+  `Agent.prompt()` calls inside a handler join the thread's tree and
+  auto-record spawn edges with no explicit plumbing;
+  `trace_headers()` defaults its tool id from the ambient
+  `tool_scope()`.
 
 - **Agent-ladder examples** (`examples/01-echo.py` … `05-tools.py`,
   plus the shared `examples/llm.py` base) — the Python mirror of

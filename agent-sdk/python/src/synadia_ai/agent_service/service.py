@@ -35,6 +35,7 @@ from synadia_ai.agents import (
     SERVICE_NAME,
     STATUS_ENDPOINT_NAME,
     STATUS_QUEUE_GROUP,
+    ActiveTrace,
     AgentSubject,
     Attachment,
     Chunk,
@@ -45,6 +46,8 @@ from synadia_ai.agents import (
     ResponseChunk,
     StatusChunk,
     TraceContext,
+    bind_active_trace,
+    current_tool_call_id,
     decode,
     derive_thread_id,
     format_spawn_entry,
@@ -181,9 +184,12 @@ class PromptStream:
 
         Includes thread + root identity, any spawn edges recorded since
         the previous call (drained — the marker channel provides the
-        redundant delivery), and, when given, the tool invocation this
-        outbound call serves.
+        redundant delivery), and the tool invocation this outbound call
+        serves — ``tool_call_id`` explicitly, else the ambient
+        :func:`~synadia_ai.agents.tool_scope` when inside one.
         """
+        if tool_call_id is None:
+            tool_call_id = current_tool_call_id()
         headers = self._identity_headers()
         if tool_call_id is not None:
             headers[HEADER_TOOL_CALL_ID] = tool_call_id
@@ -210,8 +216,10 @@ class PromptStream:
         without forwarding them upstream.
 
         Defaults follow :func:`~synadia_ai.agents.format_spawn_entry`:
-        an unspecified ``edge_type`` is ``tool_call`` iff a tool id was
-        given, else ``programmatic``.
+        ``tool_call_id`` resolves from the ambient
+        :func:`~synadia_ai.agents.tool_scope`, and an unspecified
+        ``edge_type`` is ``tool_call`` iff a tool id resolved, else
+        ``programmatic`` — so explicit and ambient call sites agree.
         """
         entry = format_spawn_entry(child_thread_id, tool_call_id, edge_type)
         self._pending_spawns[entry] = None  # idempotent insert, order preserved
@@ -220,6 +228,28 @@ class PromptStream:
     def child_trace(self) -> TraceContext:
         """Trace context to pass to ``Agent.prompt(trace=...)`` when spawning."""
         return TraceContext(root_id=self._root_id)
+
+    def _as_active_trace(self) -> ActiveTrace:
+        """Ambient-context view of this stream (bound around the handler).
+
+        Captures only the identity strings and the pending-spawns dict —
+        deliberately NOT ``self`` — so a handler-spawned task that
+        outlives the request doesn't pin the ``Request``/``Msg`` (and
+        its attachment payload) via the contextvar binding.
+        """
+        thread_id, root_id = self._thread_id, self._root_id
+        pending = self._pending_spawns
+
+        def _record(child_thread_id: str) -> dict[str, str]:
+            entry = format_spawn_entry(child_thread_id)
+            pending[entry] = None
+            return spawn_marker_headers(thread_id, root_id, entry)
+
+        return ActiveTrace(
+            thread_id=thread_id,
+            root_id=root_id,
+            record_spawn=_record,
+        )
 
     async def send(self, chunk: str | Chunk) -> None:
         """Publish one chunk to the caller's reply subject.
@@ -583,7 +613,15 @@ class AgentService:
                 )
 
             try:
-                await handler(envelope, stream)
+                # Bind the ambient trace context (PEP 567 contextvars) for
+                # the handler's entire async call tree: Agent.prompt()
+                # calls inside it join this thread's tree and auto-record
+                # spawn edges without explicit plumbing. Inherited by
+                # tasks the handler spawns; scoped strictly to this
+                # request — concurrent handlers (TS today, Python after
+                # the concurrency fix) each see their own binding.
+                with bind_active_trace(stream._as_active_trace()):
+                    await handler(envelope, stream)
             except ProtocolError as exc:
                 log.warning(
                     "prompt handler rejected protocol input on %s: %s",

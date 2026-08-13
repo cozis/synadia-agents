@@ -9,11 +9,18 @@
 #
 # The observability story: every prompt execution (a "thread") has a derived
 # id, and the coordinator's delegation is a parent→child edge an observing
-# proxy reconstructs into an activity tree. This example wires the trace
-# explicitly:
+# proxy reconstructs into an activity tree. The SDK binds this thread's
+# trace context around the handler, so the delegation needs ZERO explicit
+# plumbing — prompting the worker from inside the handler automatically
+# joins the tree and records the spawn edge. tool_scope(...) labels the
+# edge with the tool invocation it serves:
 #
-#   handle = worker.prompt(text, trace=stream.child_trace())  # join the tree
-#   marker = stream.record_spawn(handle.thread_id, ...)       # report the edge
+#   with tool_scope("delegate-1"):
+#       handle = worker.prompt(text)   # joins the tree, edge auto-recorded
+#
+# (The explicit equivalent — worker.prompt(text, trace=stream.child_trace())
+# plus stream.record_spawn(handle.thread_id) — remains available for spawns
+# outside a handler's context.)
 #
 # Try it — run this file, then prompt the coordinator from
 # client-sdk/python/examples (the worker serves session "worker", so
@@ -39,7 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from synadia_ai.agents import Agents, DiscoverFilter, Envelope, ResponseChunk
+from synadia_ai.agents import Agents, DiscoverFilter, Envelope, ResponseChunk, tool_scope
 
 from examples._connect_cli import (
     add_agent_identity_flags,
@@ -98,16 +105,18 @@ async def main() -> None:
             raise ValueError("worker agent not found — did its registration fail?")
         worker = found[0]
 
-        # Spawn the worker as a child thread of this one, explicitly:
-        # child_trace() forwards this thread's tree root so the worker joins
-        # our tree, and record_spawn() registers the parent→child edge. The
-        # edge travels on two channels — the returned marker headers (fired
-        # through the harness's LLM client as fire-and-forget telemetry) and
-        # the next trace_headers() call, which drains pending edges.
-        handle = worker.prompt(envelope.prompt, trace=stream.child_trace())
-        marker = stream.record_spawn(handle.thread_id, tool_call_id="delegate-1")
+        # Spawn the worker as a child thread of this one — zero plumbing:
+        # the SDK bound this thread's trace context around the handler, so
+        # prompt() forwards the tree root and records the parent→child edge
+        # automatically. tool_scope() labels the edge as the tool invocation
+        # it serves; without it the edge is honestly `programmatic`. The
+        # handle carries the spawn-marker headers (fired through the
+        # harness's LLM client as fire-and-forget telemetry); the same edge
+        # also drains into this thread's next trace_headers() call.
+        with tool_scope("delegate-1"):
+            handle = worker.prompt(envelope.prompt)
         print(f"delegating to worker thread {handle.thread_id}")
-        print(f"  spawn marker: {marker}")
+        print(f"  spawn marker: {handle.spawn_marker_headers}")
 
         async for msg in handle:
             if isinstance(msg, ResponseChunk):

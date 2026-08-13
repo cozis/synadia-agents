@@ -41,7 +41,9 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2")
 
 
-async def ollama_tokens(prompt: str) -> AsyncGenerator[str, None]:
+async def ollama_tokens(
+    prompt: str, headers: dict[str, str] | None = None
+) -> AsyncGenerator[str, None]:
     # Ollama's /api/generate returns newline-delimited JSON — one object per line,
     # each carrying the next `response` fragment. httpx.aiter_lines() hands us
     # those lines as they arrive, so tokens flow out as the model produces them.
@@ -52,6 +54,7 @@ async def ollama_tokens(prompt: str) -> AsyncGenerator[str, None]:
         client.stream(
             "POST",
             f"{OLLAMA_URL}/api/generate",
+            headers=headers,
             json={"model": MODEL, "prompt": prompt, "stream": True},
         ) as resp,
     ):
@@ -88,9 +91,10 @@ async def main() -> None:
     )
 
     # Same handler shape as the echo agent: instead of one reply, we send each
-    # token as Ollama emits it.
+    # token as Ollama emits it. Every outbound model request carries the
+    # thread's trace headers so an observing proxy can correlate it.
     async def handler(envelope: Envelope, stream: PromptStream) -> None:
-        async for token in ollama_tokens(envelope.prompt):
+        async for token in ollama_tokens(envelope.prompt, stream.trace_headers()):
             await stream.send(token)
 
     service.on_prompt(handler)

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 from nats.micro import ServiceConfig, add_service
 from nats.micro.service import EndpointConfig
 from synadia_ai.agents import (
+    HEADER_THREAD_ID,
     PROMPT_ENDPOINT_NAME,
     PROMPT_QUEUE_GROUP,
     SERVICE_NAME,
@@ -41,6 +42,7 @@ from synadia_ai.agents import (
     ResponseChunk,
     StatusChunk,
     decode,
+    derive_thread_id,
 )
 from synadia_ai.agents.messages import encode_chunk
 
@@ -112,15 +114,34 @@ class PromptStream:
     terminator per §6.5). Handlers should ``send(...)`` zero or more
     chunks and return; raising an exception converts to a service error
     per §9.
+
+    Also carries the request's observability identity:
+    :attr:`thread_id` is derived from the request's reply subject;
+    :meth:`trace_headers` yields the HTTP headers a harness passes on
+    every outbound model request.
     """
 
     def __init__(
         self,
         request: Request,
         nc: NATSClient,
+        *,
+        reply_subject: str,
     ) -> None:
         self._request = request
         self._nc = nc
+        self._thread_id = derive_thread_id(reply_subject)
+
+    # --- observability identity ----------------------------------------
+
+    @property
+    def thread_id(self) -> str:
+        """This prompt execution's derived thread id."""
+        return self._thread_id
+
+    def trace_headers(self) -> dict[str, str]:
+        """Headers for an outbound model request issued by this thread."""
+        return {HEADER_THREAD_ID: self._thread_id}
 
     async def send(self, chunk: str | Chunk) -> None:
         """Publish one chunk to the caller's reply subject.
@@ -464,7 +485,14 @@ class AgentService:
             except Exception:
                 log.exception("failed to emit leading ack on %s", request.subject)
 
-            stream = PromptStream(request, self._nc)
+            # nats.micro's Request has no public reply accessor — this is
+            # the one place we reach into its Msg, at the framework
+            # boundary, so PromptStream stays constructible from plain data.
+            stream = PromptStream(
+                request,
+                self._nc,
+                reply_subject=request._msg.reply,
+            )
             handler = self._prompt_handler
             if handler is None:  # pragma: no cover — start() rejects this path
                 raise RuntimeError("prompt handler invoked before on_prompt() registered one")

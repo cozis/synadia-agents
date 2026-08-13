@@ -26,13 +26,18 @@ class OllamaClient:
         self.model = os.environ.get("OLLAMA_MODEL", "llama3.2")
         self.label = f"ollama/{self.model}"
 
-    async def chat_stream(self, messages: list[ChatMessage]) -> AsyncGenerator[str, None]:
+    async def chat_stream(
+        self, messages: list[ChatMessage], headers: dict[str, str] | None = None
+    ) -> AsyncGenerator[str, None]:
         # /api/chat returns newline-delimited JSON, each line `{message: {content}}`.
+        # `headers` carries the agent's trace identity (PromptStream.trace_headers())
+        # so an observing proxy can correlate this request to its prompt thread.
         async with (
             httpx.AsyncClient(timeout=None) as client,
             client.stream(
                 "POST",
                 f"{self.url}/api/chat",
+                headers=headers,
                 json={"model": self.model, "messages": messages, "stream": True},
             ) as resp,
         ):
@@ -55,15 +60,23 @@ class OpenRouterClient:
         self.model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
         self.label = f"openrouter/{self.model}"
 
-    async def chat_stream(self, messages: list[ChatMessage]) -> AsyncGenerator[str, None]:
+    async def chat_stream(
+        self, messages: list[ChatMessage], headers: dict[str, str] | None = None
+    ) -> AsyncGenerator[str, None]:
         # OpenAI SSE: `data: {json}` lines (+ keep-alive comments), then `data: [DONE]`.
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        # `headers` carries the agent's trace identity (PromptStream.trace_headers()).
+        request_headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        if headers:
+            request_headers |= headers
         async with (
             httpx.AsyncClient(timeout=None) as client,
             client.stream(
                 "POST",
                 "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
+                headers=request_headers,
                 json={"model": self.model, "messages": messages, "stream": True},
             ) as resp,
         ):

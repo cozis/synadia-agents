@@ -22,55 +22,65 @@
   header h1 { font-size: 16px; margin: 0; }
   header .sub { color: var(--muted); font-size: 13px; }
   #status { margin-left: auto; font-size: 13px; color: var(--muted); }
-  main { max-width: 980px; margin: 0 auto; padding: 20px; }
+  main { max-width: 1400px; margin: 0 auto; padding: 20px; }
   .empty { color: var(--muted); padding: 40px 0; text-align: center; }
   .tree-group {
     background: var(--card); border: 1px solid var(--line); border-radius: 8px;
-    margin-bottom: 16px; padding: 14px 18px;
+    margin-bottom: 16px; padding: 14px 18px; overflow-x: auto;
   }
-  .tree-group > h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); font-weight: 600; }
-  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; }
-  .node { padding: 4px 0; }
-  .node .kids { margin-left: 14px; border-left: 2px solid var(--line); padding-left: 16px; }
-  .node-line { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+  .tree-group > h2 { font-size: 13px; margin: 0 0 12px; color: var(--muted); font-weight: 600; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+  .graph { position: relative; }
+  .graph svg { position: absolute; top: 0; left: 0; pointer-events: none; }
+  .gnode {
+    position: absolute; width: 300px; background: var(--card);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
+    box-shadow: 0 1px 3px rgba(28, 35, 48, 0.07); cursor: pointer;
+  }
+  .gnode.root { border-left: 3px solid var(--accent); }
+  .gnode.pending { border-left: 3px solid var(--err); }
+  .node-line { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 4px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
   .dot.ok { background: var(--ok); }
   .dot.err { background: var(--err); }
   .dot.busy { background: var(--warn); animation: pulse 1s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: 0.35; } }
   .badge {
-    font-size: 11px; padding: 1px 8px; border-radius: 999px;
+    font-size: 10.5px; padding: 0 7px; border-radius: 999px;
     border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
   }
   .badge.root { color: var(--accent); border-color: var(--accent); }
-  .badge.tool { color: var(--ok); border-color: var(--ok); }
-  .badge.prog { color: var(--warn); border-color: var(--warn); }
   .badge.pending { color: var(--err); border-color: var(--err); }
-  .stats { color: var(--muted); font-size: 12.5px; }
-  .convo { margin: 4px 0 4px 18px; font-size: 12.5px; }
-  .turn { display: flex; gap: 8px; padding: 3px 0; }
-  .turn .role { flex: none; width: 70px; font-size: 11px; text-transform: uppercase;
+  .stats { color: var(--muted); font-size: 11.5px; width: 100%; }
+  .turn { display: flex; gap: 7px; padding: 2px 0; font-size: 12px; }
+  .turn .role { flex: none; width: 58px; font-size: 10.5px; text-transform: uppercase;
                 letter-spacing: 0.04em; color: var(--muted); padding-top: 1px; }
   .turn .role.user { color: var(--accent); }
   .turn .role.assistant { color: var(--ok); }
   .turn .role.tool { color: var(--warn); }
   .turn .text { white-space: pre-wrap; overflow-wrap: anywhere; }
-  .toolbox {
-    border: 1px solid var(--line); border-left: 3px solid var(--warn);
-    background: var(--box); border-radius: 6px;
-    margin: 5px 0 5px 78px; padding: 6px 10px;
+  .gnode:not(.expanded) .turn .text {
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   }
-  .tool-head { color: var(--warn); overflow-wrap: anywhere; }
-  .tool-head .tool-id { color: var(--muted); font-size: 11px; margin-left: 6px; }
-  .toolbox .turn .role { width: 54px; }
-  .tool-kids { margin-top: 4px; border-top: 1px dashed var(--line); padding-top: 4px; }
+  .tcall {
+    border: 1px solid var(--line); border-left: 3px solid var(--warn);
+    background: var(--box); border-radius: 6px; margin: 4px 0; padding: 4px 8px;
+    font-size: 12px;
+  }
+  .tcall .tool-head { color: var(--warn); overflow-wrap: anywhere; }
+  .gnode:not(.expanded) .tcall .tool-head {
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .edge-tool { stroke: var(--ok); }
+  .edge-prog { stroke: var(--warn); stroke-dasharray: 5 4; }
+  .edge-label { font: 10.5px ui-monospace, Menlo, Consolas, monospace; fill: var(--muted); }
   #untraced { color: var(--muted); font-size: 13px; margin-top: 18px; }
 </style>
 </head>
 <body>
 <header>
   <h1>trace-proxy</h1>
-  <span class="sub">conversation trees — child threads attach at the tool call that spawned them</span>
+  <span class="sub">agent graph — edges leave the tool call that spawned the child · click a card to expand</span>
   <span id="status">connecting…</span>
 </header>
 <main>
@@ -84,6 +94,9 @@
 // a full thread record (an upsert) or a {type:"meta"} counter update.
 const threads = new Map();
 let untraced = 0;
+const expanded = new Set(); // card ids the viewer expanded (survives re-renders)
+
+const CARD_W = 300, X_GAP = 70, Y_GAP = 20;
 
 function short(id) { return id ? id.slice(0, 16) : "?"; }
 
@@ -100,23 +113,9 @@ function ago(ts) {
 }
 
 function dotClass(t) {
-  if (t.requests === 0 && t.markers === 0) return "dot";      // spawned, nothing observed yet
-  if (t.last_status === null && t.requests > 0) return "dot busy"; // request in flight
+  if (t.requests === 0 && t.markers === 0) return "dot";
+  if (t.last_status === null && t.requests > 0) return "dot busy";
   return t.last_status && t.last_status >= 400 ? "dot err" : "dot ok";
-}
-
-function edgeBadge(t) {
-  if (t.thread_id === t.root_id) return '<span class="badge root">root</span>';
-  if (!t.edge) return '<span class="badge pending">position pending</span>';
-  return t.edge.edge_type === "tool_call"
-    ? `<span class="badge tool">via ${esc(t.edge.tool_call_id || "?")} · tool_call</span>`
-    : `<span class="badge prog">${esc(t.edge.edge_type)}</span>`;
-}
-
-function statsLine(t) {
-  const calls = `${t.requests} model call${t.requests === 1 ? "" : "s"}`;
-  const markers = t.markers ? ` · ${t.markers} marker${t.markers === 1 ? "" : "s"}` : "";
-  return `${calls}${markers} · <span data-ago="${t.last_seen}">${ago(t.last_seen)}</span>`;
 }
 
 function turnRow(role, text) {
@@ -126,110 +125,172 @@ function turnRow(role, text) {
   </div>`;
 }
 
-// One tool-call box: the call itself, its result (if the follow-up
-// request revealed it), and any child threads whose spawn edge carries
-// this exact tool-call id — the tree grows out of the conversation.
-function toolBox(call, result, kidIds, childIndex) {
-  const kids = kidIds.length
-    ? `<div class="tool-kids">${kidIds.map(k => renderNode(k, childIndex)).join("")}</div>`
-    : "";
-  return `<div class="toolbox">
-    <div class="tool-head mono">⚙ ${esc(call.name)}(${esc(call.arguments)})
-      <span class="tool-id">${esc(call.id)}</span></div>
-    ${result && result.text ? turnRow("tool", result.text) : ""}
-    ${kids}
-  </div>`;
-}
-
-function renderNode(id, childIndex) {
-  const t = threads.get(id);
-  const kids = childIndex.get(id) || [];
+// One thread card. Tool calls render as rows carrying data-call, so
+// edges can be drawn from the exact row that spawned the child.
+function cardHTML(t) {
+  const isRoot = t.thread_id === t.root_id;
+  const orphan = !isRoot && !t.parent;
   const turns = t.conversation || [];
-
-  // Tool results leave the flow: each renders inside its call's box.
   const resultsByCall = new Map();
   const flow = [];
   for (const u of turns) {
     if (u.role === "tool" && u.tool_call_id) resultsByCall.set(u.tool_call_id, u);
     else flow.push(u);
   }
-
-  // Anchor children at their spawning tool call when the parent's
-  // conversation already shows that call; until then (or for
-  // programmatic spawns) they attach below the conversation.
-  const callIds = new Set();
-  for (const u of flow) for (const c of (u.tool_calls || [])) if (c.id) callIds.add(c.id);
-  const anchored = new Map();
-  const loose = [];
-  for (const k of kids) {
-    const edge = threads.get(k).edge;
-    const callId = edge && edge.tool_call_id;
-    if (callId && callIds.has(callId)) {
-      if (!anchored.has(callId)) anchored.set(callId, []);
-      anchored.get(callId).push(k);
-    } else {
-      loose.push(k);
+  let body = "";
+  for (const u of flow) {
+    if (u.text) body += turnRow(u.role, u.text);
+    for (const c of (u.tool_calls || [])) {
+      const res = resultsByCall.get(c.id);
+      body += `<div class="tcall" data-call="${esc(c.id)}">
+        <div class="tool-head mono">⚙ ${esc(c.name)}(${esc(c.arguments)})</div>
+        ${res && res.text ? turnRow("tool", res.text) : ""}
+      </div>`;
     }
   }
+  if (t.reply) body += turnRow("assistant", t.reply);
+  else if (t.last_status === null && t.requests > 0) body += turnRow("assistant", "…");
 
-  const turnHtml = flow.map(u => {
-    let html = u.text ? turnRow(u.role, u.text) : "";
-    for (const c of (u.tool_calls || []))
-      html += toolBox(c, resultsByCall.get(c.id), anchored.get(c.id) || [], childIndex);
-    return html;
-  }).join("");
-  const replyRow = t.reply
-    ? turnRow("assistant", t.reply)
-    : (t.last_status === null && t.requests > 0 ? turnRow("assistant", "…") : "");
-
-  return `
-    <div class="node">
-      <div class="node-line">
-        <span class="${dotClass(t)}"></span>
-        <span class="mono">${short(id)}</span>
-        ${edgeBadge(t)}
-        <span class="stats">${statsLine(t)}</span>
-      </div>
-      ${(turnHtml || replyRow) ? `<div class="convo">${turnHtml}${replyRow}</div>` : ""}
-      ${loose.length ? `<div class="kids">${loose.map(k => renderNode(k, childIndex)).join("")}</div>` : ""}
-    </div>`;
+  const markers = t.markers ? ` · ${t.markers} marker${t.markers === 1 ? "" : "s"}` : "";
+  return `<div class="gnode${isRoot ? " root" : ""}${orphan ? " pending" : ""}${expanded.has(t.thread_id) ? " expanded" : ""}"
+       data-tid="${esc(t.thread_id)}">
+    <div class="node-line">
+      <span class="${dotClass(t)}"></span>
+      <span class="mono">${short(t.thread_id)}</span>
+      ${isRoot ? '<span class="badge root">root</span>' : ""}
+      ${orphan ? '<span class="badge pending">position pending</span>' : ""}
+      <span class="stats">${t.requests} call${t.requests === 1 ? "" : "s"}${markers}
+        · <span data-ago="${t.last_seen}">${ago(t.last_seen)}</span></span>
+    </div>
+    ${body}
+  </div>`;
 }
 
-function render() {
-  const groups = new Map();      // root_id -> thread ids
-  const childIndex = new Map();  // parent thread_id -> child ids
-  for (const [id, t] of threads) {
-    if (!groups.has(t.root_id)) groups.set(t.root_id, []);
-    groups.get(t.root_id).push(id);
-    if (t.parent) {
-      if (!childIndex.has(t.parent)) childIndex.set(t.parent, []);
-      childIndex.get(t.parent).push(id);
+// Layered layout: column = depth, siblings stacked; a parent centers on
+// its children but never collides with earlier cards in its column.
+function layoutGraph(graphEl, ids) {
+  const inGroup = new Set(ids);
+  const cards = new Map();
+  for (const el of graphEl.querySelectorAll(".gnode")) cards.set(el.dataset.tid, el);
+
+  const childIndex = new Map();
+  for (const id of ids) {
+    const p = threads.get(id).parent;
+    if (p && inGroup.has(p)) {
+      if (!childIndex.has(p)) childIndex.set(p, []);
+      childIndex.get(p).push(id);
     }
   }
   for (const kids of childIndex.values())
     kids.sort((a, b) => threads.get(a).first_seen - threads.get(b).first_seen);
 
+  const depthOf = (id) => {
+    let d = 0, t = threads.get(id);
+    while (t.parent && inGroup.has(t.parent)) { d++; t = threads.get(t.parent); }
+    return d;
+  };
+
+  const colCursor = [];
+  const pos = new Map();
+  function place(id) {
+    const d = depthOf(id);
+    const el = cards.get(id);
+    const h = el.offsetHeight;
+    colCursor[d] = colCursor[d] || 0;
+    const kids = childIndex.get(id) || [];
+    let y;
+    if (kids.length) {
+      const spans = kids.map(place);
+      const mid = (spans[0].top + spans[spans.length - 1].bottom) / 2;
+      y = Math.max(mid - h / 2, colCursor[d]);
+    } else {
+      y = colCursor[d];
+    }
+    colCursor[d] = y + h + Y_GAP;
+    pos.set(id, { x: d * (CARD_W + X_GAP), y, h });
+    el.style.left = pos.get(id).x + "px";
+    el.style.top = y + "px";
+    return { top: y, bottom: y + h };
+  }
+
+  const top = ids
+    .filter(id => id === threads.get(id).root_id || !inGroup.has(threads.get(id).parent))
+    .sort((a, b) => {
+      const ra = a === threads.get(a).root_id, rb = b === threads.get(b).root_id;
+      if (ra !== rb) return ra ? -1 : 1; // the root leads its group
+      return threads.get(a).first_seen - threads.get(b).first_seen;
+    });
+  for (const id of top) place(id);
+
+  const width = (Math.max(...ids.map(depthOf)) + 1) * (CARD_W + X_GAP) - X_GAP;
+  const height = Math.max(...colCursor.filter(Boolean), 1);
+  graphEl.style.width = width + "px";
+  graphEl.style.height = height + "px";
+
+  // Edges: from the spawning tool-call row inside the parent card (or
+  // its header, when the edge has no tool call) to the child card.
+  const svg = graphEl.querySelector("svg");
+  svg.setAttribute("width", width);
+  svg.setAttribute("height", height);
+  let paths = "";
+  for (const id of ids) {
+    const t = threads.get(id);
+    if (!t.parent || !inGroup.has(t.parent)) continue;
+    const p = pos.get(t.parent), c = pos.get(id);
+    if (!p || !c) continue;
+    const parentEl = cards.get(t.parent);
+    const callId = t.edge && t.edge.tool_call_id;
+    const row = callId
+      ? parentEl.querySelector(`[data-call="${CSS.escape(callId)}"]`)
+      : null;
+    const sy = p.y + (row ? row.offsetTop + row.offsetHeight / 2 : 16);
+    const sx = p.x + CARD_W;
+    const ey = c.y + 16;
+    const ex = c.x;
+    const cls = t.edge && t.edge.edge_type === "tool_call" ? "edge-tool" : "edge-prog";
+    paths += `<path class="${cls}" fill="none" stroke-width="1.6"
+      d="M ${sx} ${sy} C ${sx + X_GAP / 2} ${sy}, ${ex - X_GAP / 2} ${ey}, ${ex} ${ey}"
+      marker-end="url(#arrow)"/>`;
+    if (t.edge && t.edge.edge_type !== "tool_call")
+      paths += `<text class="edge-label" x="${(sx + ex) / 2}" y="${(sy + ey) / 2 - 5}"
+        text-anchor="middle">${esc(t.edge.edge_type)}</text>`;
+  }
+  svg.innerHTML = `<defs><marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4"
+      markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 z" fill="#68738a"/></marker></defs>${paths}`;
+}
+
+function render() {
+  const groups = new Map(); // root_id -> thread ids
+  for (const [id, t] of threads) {
+    if (!groups.has(t.root_id)) groups.set(t.root_id, []);
+    groups.get(t.root_id).push(id);
+  }
   const orderedGroups = [...groups.entries()].sort((a, b) => {
     const fa = Math.min(...a[1].map(id => threads.get(id).first_seen));
     const fb = Math.min(...b[1].map(id => threads.get(id).first_seen));
     return fb - fa; // newest tree first
   });
 
-  const html = orderedGroups.map(([root, ids]) => {
-    // Top level: the root itself plus threads with no claimed parent yet.
-    const top = ids
-      .filter(id => id === root || !threads.get(id).parent)
-      .sort((a, b) => (a === root ? -1 : b === root ? 1 : 0));
-    return `<div class="tree-group">
+  const html = orderedGroups.map(([root, ids]) => `
+    <div class="tree-group">
       <h2>tree <span class="mono">${short(root)}</span> — ${ids.length} thread(s)</h2>
-      ${top.map(id => renderNode(id, childIndex)).join("")}
-    </div>`;
-  }).join("");
+      <div class="graph" data-root="${esc(root)}">
+        <svg></svg>
+        ${ids.map(id => cardHTML(threads.get(id))).join("")}
+      </div>
+    </div>`).join("");
 
   document.getElementById("forest").innerHTML =
     html || '<div class="empty">no traced traffic yet</div>';
   document.getElementById("untraced").textContent =
     untraced ? `${untraced} request(s) passed through without trace headers` : "";
+
+  // Second pass: cards are in the DOM and measurable — position + wire.
+  for (const [root, ids] of orderedGroups) {
+    const el = document.querySelector(`.graph[data-root="${CSS.escape(root)}"]`);
+    if (el) layoutGraph(el, ids);
+  }
 }
 
 let renderQueued = false;
@@ -238,6 +299,15 @@ function queueRender() {
   renderQueued = true;
   requestAnimationFrame(() => { renderQueued = false; render(); });
 }
+
+// Click a card to toggle full conversation text (re-laid out to fit).
+document.addEventListener("click", (e) => {
+  const card = e.target.closest(".gnode");
+  if (!card) return;
+  const tid = card.dataset.tid;
+  if (expanded.has(tid)) expanded.delete(tid); else expanded.add(tid);
+  queueRender();
+});
 
 const source = new EventSource("/trace/threads");
 const statusEl = document.getElementById("status");
@@ -249,9 +319,8 @@ source.onmessage = (msg) => {
   else threads.set(data.thread_id, data);
   queueRender();
 };
-// Refresh relative timestamps in place — no full re-render, so the DOM
-// only rebuilds when a thread actually changes (keeps animations and
-// scroll position steady).
+
+// Refresh relative timestamps in place — no full re-render.
 setInterval(() => {
   for (const el of document.querySelectorAll("[data-ago]"))
     el.textContent = ago(Number(el.dataset.ago));

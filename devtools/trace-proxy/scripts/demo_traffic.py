@@ -60,9 +60,14 @@ async def _generate(request: web.Request) -> web.StreamResponse:
 
 async def _completions(request: web.Request) -> web.StreamResponse:
     _record(request)
+    # Full chunk shape so strict clients (the official openai SDK) parse it.
+    chunk = (
+        '{"id":"chatcmpl-stub","object":"chat.completion.chunk","created":0,"model":"stub",'
+        '"choices":[{"index":0,"delta":{"content":"stub reply"},"finish_reason":null}]}'
+    )
     resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
     await resp.prepare(request)
-    await resp.write(b'data: {"choices":[{"delta":{"content":"stub reply"}}]}\n\n')
+    await resp.write(f"data: {chunk}\n\n".encode())
     await resp.write(b"data: [DONE]\n\n")
     await resp.write_eof()
     return resp

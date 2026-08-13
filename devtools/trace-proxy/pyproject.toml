@@ -7,8 +7,17 @@ requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 dependencies = ["aiohttp>=3.9"]
 
+[project.optional-dependencies]
+# `agents/` — real protocol agents for exercising the proxy, wired to
+# the local SDK checkouts (uv path sources below).
+agents = ["synadia-ai-agent-service", "synadia-ai-agents", "openai>=1.40"]
+
 [project.scripts]
 trace-proxy = "trace_proxy.server:main"
+
+[tool.uv.sources]
+synadia-ai-agent-service = { path = "../../agent-sdk/python", editable = true }
+synadia-ai-agents = { path = "../../client-sdk/python", editable = true }
 
 [build-system]
 requires = ["hatchling"]
@@ -23,7 +32,7 @@ dev = ["ruff>=0.5", "mypy>=1.10"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-src = ["src", "scripts"]
+src = ["src", "scripts", "agents"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "PL", "RUF"]
@@ -32,6 +41,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "PL", "RUF"]
 # Demo one-shots may run long linear setups; the traffic helpers mirror
 # the full header surface as keyword args.
 "scripts/**" = ["PLR0915", "PLR0913"]
+"agents/**" = ["PLR0915", "PLR0913"]
 
 [tool.mypy]
 strict = true

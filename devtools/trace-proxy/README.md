@@ -43,6 +43,34 @@ root → worker (labeled `tool_call` edge) → sub-worker (`programmatic`).
 `GET http://127.0.0.1:8199/_seen` shows what actually reached the
 "provider" — no markers, no `x-agent-*` headers.
 
+## Real agent against a real (cheap) OpenAI model
+
+`agents/openai_agent.py` is a full protocol agent (local agent-sdk
+checkout via uv path sources) whose handler answers each prompt with a
+streamed chat completion through the **official `openai` SDK** — the
+exact integration shape a real harness uses: `AsyncOpenAI(base_url=`
+the proxy`)`, plus `extra_headers=stream.trace_headers()` on every
+request:
+
+```sh
+uv sync --extra agents
+
+# Terminal 1 — proxy in front of the real API:
+uv run trace-proxy --port 8100 --upstream https://api.openai.com
+
+# Terminal 2 — the agent (OPENAI_MODEL overrides gpt-4o-mini):
+OPENAI_API_KEY=sk-... uv run python agents/openai_agent.py --url nats://127.0.0.1:4222
+
+# Terminal 3 — prompt it from client-sdk/python/examples:
+uv run python examples/02-prompt-text.py "say hi" --url nats://127.0.0.1:4222
+```
+
+Each prompt shows up on `/trace` as a thread whose id matches what both
+the client and the agent printed, with its `/v1/chat/completions` call
+underneath. No key handy? Point `--upstream` at the demo stub
+(`http://127.0.0.1:8199`, keep `scripts/demo_traffic.py` running, any
+`OPENAI_API_KEY` value) — the wire shape is identical.
+
 ## With the real SDK examples
 
 The agent-sdk examples read `OLLAMA_URL`, so putting the proxy in the

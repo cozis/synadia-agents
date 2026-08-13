@@ -61,11 +61,14 @@ def format_spawn_entry(
 ) -> str:
     """Format one spawn-edge claim: ``<child>:<tool_call_id>:<edge_type>``.
 
-    This is where the edge policy lives, so every entry point agrees: an
+    This is where the edge policy lives, so every entry point agrees:
+    ``tool_call_id`` defaults from the ambient :func:`tool_scope`, and an
     unspecified ``edge_type`` is honest about what was observed —
-    ``tool_call`` when a tool id was given, ``programmatic`` when none
-    was (don't claim a tool edge with no tool to point at).
+    ``tool_call`` when a tool id resolved, ``programmatic`` when none did
+    (don't claim a tool edge with no tool to point at).
     """
+    if tool_call_id is None:
+        tool_call_id = current_tool_call_id()
     if edge_type is None:
         edge_type = "tool_call" if tool_call_id is not None else "programmatic"
     return f"{child_thread_id}:{tool_call_id or ''}:{edge_type}"

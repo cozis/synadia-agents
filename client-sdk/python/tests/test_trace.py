@@ -11,10 +11,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from unittest.mock import MagicMock
 
 from synadia_ai.agents import (
+    HEADER_EVENT,
+    HEADER_SPAWNED,
     THREAD_ID_HEX_LEN,
     ActiveTrace,
+    Agent,
     Envelope,
     TraceContext,
     active_trace,
@@ -24,8 +28,10 @@ from synadia_ai.agents import (
     derive_thread_id,
     encode,
     format_spawn_entry,
+    spawn_marker_headers,
     tool_scope,
 )
+from tests.harness.agent_info import make_agent_info
 
 
 class TestDeriveThreadId:
@@ -71,10 +77,14 @@ class TestTraceContext:
 
 
 class TestFormatSpawnEntry:
-    """The edge policy: edge-type honesty."""
+    """The edge policy: ambient tool default + edge-type honesty."""
 
     def test_explicit_tool_id(self) -> None:
         assert format_spawn_entry("c1", "toolu_x") == "c1:toolu_x:tool_call"
+
+    def test_ambient_tool_id(self) -> None:
+        with tool_scope("toolu_ambient"):
+            assert format_spawn_entry("c1") == "c1:toolu_ambient:tool_call"
 
     def test_no_tool_is_programmatic(self) -> None:
         assert format_spawn_entry("c1") == "c1::programmatic"
@@ -83,8 +93,13 @@ class TestFormatSpawnEntry:
         assert format_spawn_entry("c1", None, "handoff") == "c1::handoff"
 
 
+def _make_agent(nc: MagicMock) -> Agent:
+    nc.max_payload = 0  # "not declared" — §5.4 validator falls back to endpoint value
+    return Agent(nc, make_agent_info("agents.prompt.test.pytest.s"))
+
+
 class TestAmbientContext:
-    """The contextvars layer: binding, scoping, reset."""
+    """The contextvars layer: fallback, auto-record, tool scope."""
 
     def test_no_ambient_outside_binding(self) -> None:
         assert active_trace() is None
@@ -100,3 +115,51 @@ class TestAmbientContext:
                 assert current_tool_call_id() == "toolu_outer"
             assert current_tool_call_id() is None
         assert active_trace() is None
+
+    def test_prompt_joins_ambient_tree_and_auto_records(self) -> None:
+        # The recorder runs synchronously in the spawner's context, so it
+        # resolves the ambient tool scope itself — record what it saw.
+        recorded: list[tuple[str, str | None]] = []
+
+        def recorder(child: str) -> dict[str, str]:
+            recorded.append((child, current_tool_call_id()))
+            return spawn_marker_headers("parent01", "root0001", format_spawn_entry(child))
+
+        agent = _make_agent(MagicMock())
+        with (
+            bind_active_trace(
+                ActiveTrace(thread_id="parent01", root_id="root0001", record_spawn=recorder)
+            ),
+            tool_scope("toolu_x"),
+        ):
+            handle = agent.prompt("hi")
+
+        assert handle.root_id == "root0001"
+        assert recorded == [(handle.thread_id, "toolu_x")]
+        assert handle.spawn_marker_headers is not None
+        assert handle.spawn_marker_headers[HEADER_EVENT] == "spawn"
+        assert (
+            handle.spawn_marker_headers[HEADER_SPAWNED] == f"{handle.thread_id}:toolu_x:tool_call"
+        )
+
+    def test_explicit_trace_wins_and_disables_auto_record(self) -> None:
+        recorded: list[tuple[str, str | None]] = []
+
+        def recorder(child: str) -> dict[str, str]:
+            recorded.append((child, current_tool_call_id()))
+            return {}
+
+        agent = _make_agent(MagicMock())
+        with bind_active_trace(
+            ActiveTrace(thread_id="parent01", root_id="ambient1", record_spawn=recorder)
+        ):
+            handle = agent.prompt("hi", trace=TraceContext(root_id="explicit"))
+
+        assert handle.root_id == "explicit"
+        assert recorded == []
+        assert handle.spawn_marker_headers is None
+
+    def test_prompt_without_any_context_roots_itself(self) -> None:
+        handle = _make_agent(MagicMock()).prompt("hi")
+        assert handle.root_id == handle.thread_id
+        assert handle.spawn_marker_headers is None

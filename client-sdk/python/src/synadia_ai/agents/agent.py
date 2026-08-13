@@ -28,7 +28,7 @@ from .errors import (
     StreamStalledError,
 )
 from .messages import QueryChunk, ResponseChunk, StatusChunk, decode_chunk
-from .trace import TraceContext, derive_thread_id
+from .trace import ActiveTrace, TraceContext, active_trace, derive_thread_id
 from .validation import (
     assert_attachments_allowed,
     assert_prompt_non_empty,
@@ -118,10 +118,12 @@ class PromptHandle:
         *,
         thread_id: str,
         root_id: str,
+        spawn_marker_headers: dict[str, str] | None = None,
     ) -> None:
         self._stream = stream
         self._thread_id = thread_id
         self._root_id = root_id
+        self._spawn_marker_headers = spawn_marker_headers
 
     @property
     def thread_id(self) -> str:
@@ -132,6 +134,18 @@ class PromptHandle:
     def root_id(self) -> str:
         """Root thread id of the tree this prompt belongs to."""
         return self._root_id
+
+    @property
+    def spawn_marker_headers(self) -> dict[str, str] | None:
+        """Headers for the spawn-time idempotent marker request.
+
+        Populated when this prompt was auto-recorded as a spawn via the
+        ambient :class:`~synadia_ai.agents.trace.ActiveTrace` (i.e. it
+        was issued from inside a prompt handler without an explicit
+        ``trace=``). Fire it through any provider client as
+        fire-and-forget telemetry; None when there is nothing to mark.
+        """
+        return self._spawn_marker_headers
 
     def __aiter__(self) -> PromptHandle:
         return self
@@ -265,10 +279,18 @@ class Agent:
         the envelope (per §5.1).
 
         ``trace`` forwards a parent thread's
-        :class:`TraceContext` when an agent spawns a sub-agent — the
-        child joins the parent's tree instead of rooting a new one.
-        Precedence: explicit ``root_id`` on a caller-constructed
-        :class:`Envelope` > ``trace=`` > new tree rooted at this prompt.
+        :class:`TraceContext` explicitly. Usually unnecessary: when this
+        call happens inside a prompt handler, the ambient
+        :class:`~synadia_ai.agents.trace.ActiveTrace` bound by the
+        agent-sdk is used automatically — the child joins the parent's
+        tree and the spawn edge is recorded on the parent stream (with
+        the ambient :func:`~synadia_ai.agents.trace.tool_scope` id, when
+        inside one); the returned handle then carries
+        ``spawn_marker_headers``. Precedence: explicit ``root_id`` on a
+        caller-constructed :class:`Envelope` > ``trace=`` > ambient
+        context > new tree rooted at this prompt. Passing ``trace=``
+        disables the ambient auto-record — the caller manages edge
+        reporting themselves.
 
         Under v0.3 the session is the 5th subject token, not a kwarg —
         callers pick a session by discovering the agent whose
@@ -340,12 +362,16 @@ class Agent:
         token = mux.mint_token()
         thread_id = derive_thread_id(mux.reply_subject_for(token))
 
-        # Root resolution: explicit envelope field > explicit trace= > new tree.
+        # Root resolution: explicit envelope field > explicit trace= >
+        # ambient ActiveTrace (we're inside a prompt handler) > new tree.
         explicit_root = text.root_id if isinstance(text, Envelope) else None
+        ambient: ActiveTrace | None = None
         if explicit_root is not None:
             root_id = explicit_root
         elif trace is not None:
             root_id = trace.root_id
+        elif (ambient := active_trace()) is not None:
+            root_id = ambient.root_id
         else:
             root_id = thread_id  # this prompt starts a new tree
 
@@ -381,12 +407,22 @@ class Agent:
         conn_limit = getattr(self._nc, "max_payload", 0) or None
         assert_within_max_payload(len(encoded), ep.max_payload_bytes, conn_limit)
 
+        # Auto-record the ambient spawn edge only now, after validation —
+        # a prompt that fails §5.4 never publishes, so it must not leave
+        # a phantom edge in the parent's pending reports. The recorder
+        # runs in this same context, so it resolves the ambient
+        # tool_scope itself.
+        spawn_marker: dict[str, str] | None = None
+        if ambient is not None and ambient.record_spawn is not None:
+            spawn_marker = ambient.record_spawn(thread_id)
+
         effective_timeout = timeout if timeout is not None else self._default_inactivity_timeout
         effective_max_wait = max_wait_s if max_wait_s is not None else self._default_max_wait_s
         return PromptHandle(
             self._stream_prompt(mux, token, encoded, effective_timeout, effective_max_wait),
             thread_id=thread_id,
             root_id=root_id,
+            spawn_marker_headers=spawn_marker,
         )
 
     async def _wait_for_chunk(

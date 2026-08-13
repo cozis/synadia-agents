@@ -46,7 +46,19 @@
   .badge.prog { color: var(--warn); border-color: var(--warn); }
   .badge.pending { color: var(--err); border-color: var(--err); }
   .stats { color: var(--muted); font-size: 12.5px; }
+  .task { color: var(--ink); font-size: 12.5px; font-style: italic; overflow: hidden;
+          text-overflow: ellipsis; white-space: nowrap; max-width: 46ch; }
   .last { color: var(--muted); font-size: 12px; margin-left: 18px; }
+  .convo { margin: 4px 0 4px 18px; font-size: 12.5px; }
+  .convo summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  .turn { display: flex; gap: 8px; padding: 3px 0; border-bottom: 1px dashed var(--line); }
+  .turn:last-child { border-bottom: none; }
+  .turn .role { flex: none; width: 70px; font-size: 11px; text-transform: uppercase;
+                letter-spacing: 0.04em; color: var(--muted); padding-top: 1px; }
+  .turn .role.user { color: var(--accent); }
+  .turn .role.assistant { color: var(--ok); }
+  .turn .role.tool { color: var(--warn); }
+  .turn .text { white-space: pre-wrap; overflow-wrap: anywhere; }
   #untraced { color: var(--muted); font-size: 13px; margin-top: 18px; }
 </style>
 </head>
@@ -68,7 +80,21 @@
 const threads = new Map();
 let untraced = 0;
 
+// Which conversations the viewer has expanded — survives re-renders.
+// `toggle` doesn't bubble, so listen in the capture phase.
+const openConvos = new Set();
+document.addEventListener("toggle", (e) => {
+  const tid = e.target && e.target.dataset ? e.target.dataset.tid : null;
+  if (!tid) return;
+  if (e.target.open) openConvos.add(tid); else openConvos.delete(tid);
+}, true);
+
 function short(id) { return id ? id.slice(0, 16) : "?"; }
+
+function esc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
 
 function ago(ts) {
   const s = Math.max(0, (Date.now() / 1000) - ts);
@@ -100,7 +126,35 @@ function statsLine(t) {
 function lastLine(t) {
   if (!t.last_path) return "";
   const st = t.last_status === null ? "…" : t.last_status;
-  return `<div class="last mono">last: ${t.last_path} → ${st}</div>`;
+  return `<div class="last mono">last: ${esc(t.last_path)} → ${st}</div>`;
+}
+
+function turnsOf(t) {
+  const turns = (t.conversation || []).slice();
+  if (t.reply) turns.push({ role: "assistant", text: t.reply });
+  else if (t.last_status === null && t.requests > 0)
+    turns.push({ role: "assistant", text: "…" });
+  return turns;
+}
+
+function taskSnippet(t) {
+  const user = (t.conversation || []).find(u => u.role === "user");
+  return user ? `<span class="task">“${esc(user.text)}”</span>` : "";
+}
+
+function convoBlock(t) {
+  const turns = turnsOf(t);
+  if (!turns.length) return "";
+  const rows = turns.map(u => `
+    <div class="turn">
+      <span class="role ${esc(u.role)}">${esc(u.role)}</span>
+      <span class="text">${esc(u.text)}</span>
+    </div>`).join("");
+  const open = openConvos.has(t.thread_id) ? " open" : "";
+  return `<details class="convo" data-tid="${esc(t.thread_id)}"${open}>
+    <summary>conversation · ${turns.length} turn${turns.length === 1 ? "" : "s"}</summary>
+    ${rows}
+  </details>`;
 }
 
 function renderNode(id, childIndex) {
@@ -112,8 +166,10 @@ function renderNode(id, childIndex) {
         <span class="${dotClass(t)}"></span>
         <span class="mono">${short(id)}</span>
         ${edgeBadge(t)}
+        ${taskSnippet(t)}
         <span class="stats">${statsLine(t)}</span>
       </div>
+      ${convoBlock(t)}
       ${lastLine(t)}
       ${kids.length ? `<div class="kids">${kids.map(k => renderNode(k, childIndex)).join("")}</div>` : ""}
     </div>`;

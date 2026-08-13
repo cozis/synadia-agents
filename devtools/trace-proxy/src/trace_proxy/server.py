@@ -80,6 +80,118 @@ def parse_spawned(value: str) -> list[dict[str, str | None]]:
     return edges
 
 
+# Conversation extraction is best-effort display material: turns are
+# clipped so the dashboard stays readable, and any parse failure just
+# means "no contents shown", never a proxy error.
+_TURN_TEXT_LIMIT = 600
+_TURNS_LIMIT = 30
+
+
+def _clip(text: str) -> str:
+    text = text.strip()
+    return text if len(text) <= _TURN_TEXT_LIMIT else text[:_TURN_TEXT_LIMIT] + " …"
+
+
+def _content_text(content: Any) -> str:
+    """Flatten a chat `content` field (string or typed parts) to text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [p.get("text", "") for p in content if isinstance(p, dict)]
+        return " ".join(p for p in parts if p)
+    return ""
+
+
+def _tool_calls_text(calls: Any) -> str:
+    if not isinstance(calls, list):
+        return ""
+    names = []
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") or {}
+        names.append(f"{fn.get('name', '?')}({fn.get('arguments', '')})")
+    return f"[tool call: {', '.join(names)}]" if names else ""
+
+
+def conversation_from_request(body: bytes) -> list[dict[str, str]] | None:
+    """Best-effort turn list from a completion request body.
+
+    Understands OpenAI-style ``messages`` (string or parts content,
+    tool_calls summarized inline) and Ollama's bare ``prompt``. Each
+    request carries the whole history, so the latest request IS the
+    conversation so far.
+    """
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if isinstance(payload.get("prompt"), str):  # Ollama /api/generate
+        return [{"role": "user", "text": _clip(payload["prompt"])}]
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return None
+    turns: list[dict[str, str]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        text = _content_text(message.get("content"))
+        calls = _tool_calls_text(message.get("tool_calls"))
+        combined = f"{text} {calls}".strip()
+        turns.append({"role": str(message.get("role", "?")), "text": _clip(combined)})
+    return turns[-_TURNS_LIMIT:] or None
+
+
+def reply_from_response(content_type: str, body: bytes) -> str | None:
+    """Best-effort assistant text from a completion response body.
+
+    Handles OpenAI SSE streams, Ollama NDJSON streams, and plain JSON
+    bodies from either provider shape.
+    """
+    text = body.decode("utf-8", "replace")
+    kind = content_type.lower()
+    parts: list[str] = []
+    if "text/event-stream" in kind:
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[len("data:") :].strip()
+            if data in ("", "[DONE]"):
+                continue
+            with contextlib.suppress(json.JSONDecodeError, KeyError, IndexError, TypeError):
+                token = json.loads(data)["choices"][0]["delta"].get("content")
+                if token:
+                    parts.append(token)
+        return _clip("".join(parts)) or None
+    if "ndjson" in kind:
+        for raw in text.splitlines():
+            with contextlib.suppress(json.JSONDecodeError, AttributeError, TypeError):
+                obj = json.loads(raw)
+                token = obj.get("response") or (obj.get("message") or {}).get("content")
+                if token:
+                    parts.append(str(token))
+        return _clip("".join(parts)) or None
+    with contextlib.suppress(json.JSONDecodeError, KeyError, IndexError, TypeError):
+        obj = json.loads(text)
+        choices = obj.get("choices")
+        if isinstance(choices, list) and choices:  # OpenAI non-streamed
+            message = choices[0].get("message") or {}
+            combined = (
+                f"{_content_text(message.get('content'))} "
+                f"{_tool_calls_text(message.get('tool_calls'))}"
+            ).strip()
+            return _clip(combined) or None
+        message = obj.get("message")  # Ollama /api/chat non-streamed
+        if isinstance(message, dict):
+            return _clip(_content_text(message.get("content"))) or None
+        if isinstance(obj.get("response"), str):  # Ollama /api/generate
+            return _clip(obj["response"]) or None
+    return None
+
+
 def _dump_headers(prefix: str, headers: Iterable[tuple[str, str]]) -> list[str]:
     lines = []
     for k, v in headers:
@@ -190,11 +302,13 @@ class ThreadStore:
                 "last_seen": now,
                 "last_path": None,
                 "last_status": None,
+                "conversation": None,
+                "reply": None,
             }
             self._threads[thread_id] = thread
         return thread
 
-    def observe(
+    def observe(  # noqa: PLR0913 — one kwarg per header-derived fact
         self,
         *,
         kind: str,
@@ -202,6 +316,7 @@ class ThreadStore:
         root_id: str | None,
         spawned: list[dict[str, str | None]],
         path: str,
+        conversation: list[dict[str, str]] | None = None,
     ) -> None:
         """Fold one proxied request (or consumed marker) into the forest."""
         if thread_id is None:
@@ -215,7 +330,11 @@ class ThreadStore:
             thread["markers"] += 1
         else:
             thread["requests"] += 1
-            thread["last_status"] = None  # in flight until note_status()
+            thread["last_status"] = None  # in flight until note_response()
+        if conversation is not None:
+            # Each model request carries the whole history — the latest
+            # request is the fullest snapshot of this conversation.
+            thread["conversation"] = conversation
         for edge in spawned:
             child_id = edge["child"]
             if not child_id:
@@ -233,13 +352,15 @@ class ThreadStore:
                 self._broadcast(dict(child))
         self._broadcast(dict(thread))
 
-    def note_status(self, thread_id: str | None, status: int) -> None:
+    def note_response(self, thread_id: str | None, status: int, reply: str | None) -> None:
         if thread_id is None:
             return
         thread = self._threads.get(thread_id)
         if thread is None:
             return
         thread["last_status"] = status
+        if reply is not None:
+            thread["reply"] = reply
         self._broadcast(dict(thread))
 
 
@@ -366,12 +487,14 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
     dumper: TrafficDumper = request.app["dumper"]
     body = await request.read()  # completion payloads are small; no need to stream up
 
+    is_marker = HEADER_EVENT in trace
     threads.observe(
-        kind="marker" if HEADER_EVENT in trace else "request",
+        kind="marker" if is_marker else "request",
         thread_id=base["thread_id"],
         root_id=base["root_id"],
         spawned=base["spawned"],
         path=request.path_qs,
+        conversation=None if is_marker else conversation_from_request(body),
     )
 
     # §1.5 discrimination rule: a marker request is consumed — recorded,
@@ -408,7 +531,6 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
             store.record(
                 {"kind": "status", "for_seq": event["seq"], "status": upstream_resp.status}
             )
-            threads.note_status(base["thread_id"], upstream_resp.status)
             resp = web.StreamResponse(status=upstream_resp.status)
             for k, v in upstream_resp.headers.items():
                 if k.lower() not in _SKIP_HEADERS:
@@ -419,6 +541,13 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
                 response_body.extend(chunk)
                 await resp.write(chunk)
             await resp.write_eof()
+            threads.note_response(
+                base["thread_id"],
+                upstream_resp.status,
+                reply_from_response(
+                    upstream_resp.headers.get("Content-Type", ""), bytes(response_body)
+                ),
+            )
             await dumper.write(
                 dumper.format_entry(
                     seq=event["seq"],
@@ -433,7 +562,7 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
             return resp
     except (ClientError, OSError) as exc:
         store.record({"kind": "status", "for_seq": event["seq"], "status": 502, "error": str(exc)})
-        threads.note_status(base["thread_id"], 502)
+        threads.note_response(base["thread_id"], 502, None)
         await dumper.write(
             dumper.format_entry(
                 seq=event["seq"],

@@ -19,11 +19,19 @@ otherwise                    → record, strip x-agent-*, forward upstream
 
 So spawn-time marker requests (`x-agent-event: spawn`) terminate here and
 are never billed upstream, while ordinary completion requests pass through
-with their trace headers recorded and removed. Reconstruction follows the
-plan's accumulating-forest model: threads group by `root_id` immediately,
-edges attach as claims arrive (marker channel or the drained
-`x-agent-spawned` report — idempotent, same entry), roots are exact via
-the root test, and unclaimed non-root threads show as "position pending".
+with their trace headers recorded and removed.
+
+Reconstruction follows the plan's accumulating-forest model and lives
+**server-side** in a `ThreadStore`: threads are buffered by id and
+updated as information arrives — request counts, in-flight/last status,
+markers — and every spawn claim (marker channel or the drained
+`x-agent-spawned` report; idempotent, same edge) immediately buffers the
+child thread and attaches it under its parent, labeled with the tool
+call id. Threads group by `root_id`, roots are exact via the root test,
+and unclaimed non-root threads show as "position pending". The dashboard
+renders this as high-level conversation trees — one node per thread with
+its edge label, activity stats and a live status dot — updated over SSE
+(each message is a full thread record, an upsert).
 
 ## Quickstart (offline, no LLM needed)
 
@@ -105,9 +113,11 @@ paths — point `--upstream` at it and the SDK examples still run.)
 
 | Path | What |
 | --- | --- |
-| `/` and `/trace` | live tree page |
-| `/trace/events` | SSE stream (full replay, then live) |
-| `/trace/events.json` | current event log as JSON |
+| `/` and `/trace` | live conversation-tree page |
+| `/trace/threads` | SSE stream of thread upserts (full replay, then live) |
+| `/trace/threads.json` | current thread forest as JSON |
+| `/trace/events` | SSE stream of raw proxied events (debugging) |
+| `/trace/events.json` | current raw event log as JSON |
 | everything else | forwarded to `--upstream` per the rule above |
 
 ## Traffic dump

@@ -21,44 +21,39 @@
   header h1 { font-size: 16px; margin: 0; }
   header .sub { color: var(--muted); font-size: 13px; }
   #status { margin-left: auto; font-size: 13px; color: var(--muted); }
-  main { max-width: 1080px; margin: 0 auto; padding: 20px; }
+  main { max-width: 980px; margin: 0 auto; padding: 20px; }
   .empty { color: var(--muted); padding: 40px 0; text-align: center; }
   .tree-group {
     background: var(--card); border: 1px solid var(--line); border-radius: 8px;
-    margin-bottom: 16px; padding: 12px 16px;
+    margin-bottom: 16px; padding: 14px 18px;
   }
-  .tree-group > h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+  .tree-group > h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); font-weight: 600; }
   .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; }
-  .thread { margin: 6px 0 6px 0; }
-  .thread .kids { margin-left: 26px; border-left: 2px solid var(--line); padding-left: 14px; }
-  .thread summary {
-    cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px;
-    padding: 3px 0; flex-wrap: wrap;
-  }
-  .thread summary::before { content: "▸"; color: var(--muted); font-size: 11px; }
-  .thread details[open] > summary::before { content: "▾"; }
+  .node { padding: 4px 0; }
+  .node .kids { margin-left: 14px; border-left: 2px solid var(--line); padding-left: 16px; }
+  .node-line { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.ok { background: var(--ok); }
+  .dot.err { background: var(--err); }
+  .dot.busy { background: var(--warn); animation: pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.35; } }
   .badge {
-    font-size: 11px; padding: 1px 7px; border-radius: 999px;
+    font-size: 11px; padding: 1px 8px; border-radius: 999px;
     border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
   }
   .badge.root { color: var(--accent); border-color: var(--accent); }
   .badge.tool { color: var(--ok); border-color: var(--ok); }
   .badge.prog { color: var(--warn); border-color: var(--warn); }
   .badge.pending { color: var(--err); border-color: var(--err); }
-  table { border-collapse: collapse; margin: 4px 0 8px 22px; width: calc(100% - 22px); }
-  td { padding: 2px 10px 2px 0; vertical-align: top; font-size: 12.5px; }
-  td.seq { color: var(--muted); width: 3em; }
-  .kind-marker { color: var(--accent); font-weight: 600; }
-  .kind-request { color: var(--ink); }
-  td .hdr { color: var(--muted); }
-  .st-ok { color: var(--ok); } .st-err { color: var(--err); } .st-none { color: var(--muted); }
-  #untraced { color: var(--muted); font-size: 13px; margin-top: 20px; }
+  .stats { color: var(--muted); font-size: 12.5px; }
+  .last { color: var(--muted); font-size: 12px; margin-left: 18px; }
+  #untraced { color: var(--muted); font-size: 13px; margin-top: 18px; }
 </style>
 </head>
 <body>
 <header>
   <h1>trace-proxy</h1>
-  <span class="sub">x-agent-* capture — threads grouped by root, edges from parent-reported claims</span>
+  <span class="sub">conversation trees — threads buffered by id, edges from parent-reported spawns</span>
   <span id="status">connecting…</span>
 </header>
 <main>
@@ -68,100 +63,97 @@
 <script>
 "use strict";
 
-const threads = new Map();   // thread_id -> {rootId, parent, events: []}
-const bySeq = new Map();     // seq -> event (for status patches)
-let untracedCount = 0;
-
-function ensureThread(id, rootId) {
-  if (!threads.has(id)) threads.set(id, { rootId, parent: null, events: [] });
-  const t = threads.get(id);
-  if (!t.rootId && rootId) t.rootId = rootId;
-  return t;
-}
-
-function apply(e) {
-  if (e.kind === "status") {
-    const target = bySeq.get(e.for_seq);
-    if (target) { target.status = e.status; target.error = e.error; }
-    return;
-  }
-  bySeq.set(e.seq, e);
-  if (!e.thread_id) { untracedCount++; return; }
-  ensureThread(e.thread_id, e.root_id).events.push(e);
-  for (const edge of e.spawned || []) {
-    const child = ensureThread(edge.child, e.root_id);
-    // Idempotent claims: marker and drained report describe the same edge.
-    child.parent = { id: e.thread_id, tool: edge.tool_call_id, type: edge.edge_type };
-  }
-}
+// Server-side ThreadStore is the source of truth; every SSE message is
+// a full thread record (an upsert) or a {type:"meta"} counter update.
+const threads = new Map();
+let untraced = 0;
 
 function short(id) { return id ? id.slice(0, 16) : "?"; }
 
-function statusCell(e) {
-  if (e.kind === "marker") return '<span class="st-ok">consumed</span>';
-  if (e.status == null) return '<span class="st-none">…</span>';
-  const cls = e.status < 400 ? "st-ok" : "st-err";
-  return `<span class="${cls}">${e.status}</span>`;
+function ago(ts) {
+  const s = Math.max(0, (Date.now() / 1000) - ts);
+  if (s < 60) return `${Math.floor(s)}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
 }
 
-function eventRows(t) {
-  const rows = t.events.map(e => `
-    <tr>
-      <td class="seq mono">#${e.seq}</td>
-      <td class="mono kind-${e.kind}">${e.kind === "marker" ? "marker·" + (e.event || "") : "request"}</td>
-      <td class="mono">${e.method} ${e.path}</td>
-      <td class="mono hdr">${e.tool_call_id ? "tool " + e.tool_call_id : ""}
-        ${(e.spawned || []).map(s => "spawned " + short(s.child)).join(" ")}</td>
-      <td>${statusCell(e)}</td>
-    </tr>`).join("");
-  return `<table>${rows}</table>`;
+function dotClass(t) {
+  if (t.requests === 0 && t.markers === 0) return "dot";      // spawned, nothing observed yet
+  if (t.last_status === null && t.requests > 0) return "dot busy"; // request in flight
+  return t.last_status && t.last_status >= 400 ? "dot err" : "dot ok";
 }
 
 function edgeBadge(t) {
-  if (!t.parent) return "";
-  return t.parent.type === "tool_call"
-    ? `<span class="badge tool">via ${t.parent.tool || "?"} (tool_call)</span>`
-    : `<span class="badge prog">${t.parent.type}</span>`;
+  if (t.thread_id === t.root_id) return '<span class="badge root">root</span>';
+  if (!t.edge) return '<span class="badge pending">position pending</span>';
+  return t.edge.edge_type === "tool_call"
+    ? `<span class="badge tool">via ${t.edge.tool_call_id || "?"} · tool_call</span>`
+    : `<span class="badge prog">${t.edge.edge_type}</span>`;
 }
 
-function renderThread(id, group) {
+function statsLine(t) {
+  const calls = `${t.requests} model call${t.requests === 1 ? "" : "s"}`;
+  const markers = t.markers ? ` · ${t.markers} marker${t.markers === 1 ? "" : "s"}` : "";
+  return `${calls}${markers} · ${ago(t.last_seen)}`;
+}
+
+function lastLine(t) {
+  if (!t.last_path) return "";
+  const st = t.last_status === null ? "…" : t.last_status;
+  return `<div class="last mono">last: ${t.last_path} → ${st}</div>`;
+}
+
+function renderNode(id, childIndex) {
   const t = threads.get(id);
-  const isRoot = t.rootId === id;
-  const kids = [...threads.entries()]
-    .filter(([, v]) => v.parent && v.parent.id === id && (v.rootId || id) === t.rootId)
-    .map(([kid]) => kid);
+  const kids = childIndex.get(id) || [];
   return `
-    <div class="thread"><details open>
-      <summary>
+    <div class="node">
+      <div class="node-line">
+        <span class="${dotClass(t)}"></span>
         <span class="mono">${short(id)}</span>
-        ${isRoot ? '<span class="badge root">root</span>' : edgeBadge(t) ||
-          '<span class="badge pending">position pending</span>'}
-        <span class="badge">${t.events.length} req</span>
-      </summary>
-      ${eventRows(t)}
-      <div class="kids">${kids.map(k => renderThread(k, group)).join("")}</div>
-    </details></div>`;
+        ${edgeBadge(t)}
+        <span class="stats">${statsLine(t)}</span>
+      </div>
+      ${lastLine(t)}
+      ${kids.length ? `<div class="kids">${kids.map(k => renderNode(k, childIndex)).join("")}</div>` : ""}
+    </div>`;
 }
 
 function render() {
-  const groups = new Map(); // root_id -> thread ids
+  const groups = new Map();      // root_id -> thread ids
+  const childIndex = new Map();  // parent thread_id -> child ids
   for (const [id, t] of threads) {
-    const root = t.rootId || id;
-    if (!groups.has(root)) groups.set(root, []);
-    groups.get(root).push(id);
+    if (!groups.has(t.root_id)) groups.set(t.root_id, []);
+    groups.get(t.root_id).push(id);
+    if (t.parent) {
+      if (!childIndex.has(t.parent)) childIndex.set(t.parent, []);
+      childIndex.get(t.parent).push(id);
+    }
   }
-  const html = [...groups.entries()].map(([root, ids]) => {
-    // Top level: the root itself plus any thread with no claimed parent yet.
-    const top = ids.filter(id => id === root || !threads.get(id).parent);
+  for (const kids of childIndex.values())
+    kids.sort((a, b) => threads.get(a).first_seen - threads.get(b).first_seen);
+
+  const orderedGroups = [...groups.entries()].sort((a, b) => {
+    const fa = Math.min(...a[1].map(id => threads.get(id).first_seen));
+    const fb = Math.min(...b[1].map(id => threads.get(id).first_seen));
+    return fb - fa; // newest tree first
+  });
+
+  const html = orderedGroups.map(([root, ids]) => {
+    // Top level: the root itself plus threads with no claimed parent yet.
+    const top = ids
+      .filter(id => id === root || !threads.get(id).parent)
+      .sort((a, b) => (a === root ? -1 : b === root ? 1 : 0));
     return `<div class="tree-group">
       <h2>tree <span class="mono">${short(root)}</span> — ${ids.length} thread(s)</h2>
-      ${top.map(id => renderThread(id, root)).join("")}
+      ${top.map(id => renderNode(id, childIndex)).join("")}
     </div>`;
   }).join("");
+
   document.getElementById("forest").innerHTML =
     html || '<div class="empty">no traced traffic yet</div>';
   document.getElementById("untraced").textContent =
-    untracedCount ? `${untracedCount} request(s) passed through without trace headers` : "";
+    untraced ? `${untraced} request(s) passed through without trace headers` : "";
 }
 
 let renderQueued = false;
@@ -171,11 +163,17 @@ function queueRender() {
   requestAnimationFrame(() => { renderQueued = false; render(); });
 }
 
-const source = new EventSource("/trace/events");
+const source = new EventSource("/trace/threads");
 const statusEl = document.getElementById("status");
 source.onopen = () => { statusEl.textContent = "live"; };
 source.onerror = () => { statusEl.textContent = "reconnecting…"; };
-source.onmessage = (msg) => { apply(JSON.parse(msg.data)); queueRender(); };
+source.onmessage = (msg) => {
+  const data = JSON.parse(msg.data);
+  if (data.type === "meta") untraced = data.untraced;
+  else threads.set(data.thread_id, data);
+  queueRender();
+};
+setInterval(queueRender, 5000); // keep the relative timestamps fresh
 </script>
 </body>
 </html>

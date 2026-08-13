@@ -140,6 +140,109 @@ class TrafficDumper:
                 f.write(entry)
 
 
+class ThreadStore:
+    """The plan's accumulating forest, buffered server-side by thread id.
+
+    Threads are upserted as claims arrive: identity from request/marker
+    headers, parent edges from ``x-agent-spawned`` entries. Edge claims
+    are idempotent — the spawn-time marker and the drained report
+    describe the same edge, so the first claim wins. Every change
+    broadcasts the full thread record; SSE consumers treat messages as
+    upserts, so replay/live races are harmless.
+    """
+
+    def __init__(self) -> None:
+        self._threads: dict[str, dict[str, Any]] = {}
+        self._untraced = 0
+        self._queues: set[asyncio.Queue[dict[str, Any]]] = set()
+
+    def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._queues.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        self._queues.discard(queue)
+
+    def _broadcast(self, msg: dict[str, Any]) -> None:
+        for queue in self._queues:
+            queue.put_nowait(msg)
+
+    def _meta(self) -> dict[str, Any]:
+        return {"type": "meta", "untraced": self._untraced}
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        return [self._meta(), *(dict(t) for t in self._threads.values())]
+
+    def _ensure(self, thread_id: str, root_id: str | None) -> dict[str, Any]:
+        thread = self._threads.get(thread_id)
+        if thread is None:
+            now = time.time()
+            thread = {
+                "type": "thread",
+                "thread_id": thread_id,
+                "root_id": root_id or thread_id,
+                "parent": None,
+                "edge": None,
+                "requests": 0,
+                "markers": 0,
+                "first_seen": now,
+                "last_seen": now,
+                "last_path": None,
+                "last_status": None,
+            }
+            self._threads[thread_id] = thread
+        return thread
+
+    def observe(
+        self,
+        *,
+        kind: str,
+        thread_id: str | None,
+        root_id: str | None,
+        spawned: list[dict[str, str | None]],
+        path: str,
+    ) -> None:
+        """Fold one proxied request (or consumed marker) into the forest."""
+        if thread_id is None:
+            self._untraced += 1
+            self._broadcast(self._meta())
+            return
+        thread = self._ensure(thread_id, root_id)
+        thread["last_seen"] = time.time()
+        thread["last_path"] = path
+        if kind == "marker":
+            thread["markers"] += 1
+        else:
+            thread["requests"] += 1
+            thread["last_status"] = None  # in flight until note_status()
+        for edge in spawned:
+            child_id = edge["child"]
+            if not child_id:
+                continue
+            # A spawn claim: buffer the child immediately (it may not have
+            # made a model request yet) and attach it under this thread.
+            child = self._ensure(child_id, thread["root_id"])
+            if child["parent"] is None:
+                child["parent"] = thread_id
+                child["edge"] = {
+                    "tool_call_id": edge["tool_call_id"],
+                    "edge_type": edge["edge_type"],
+                    "via": kind,
+                }
+                self._broadcast(dict(child))
+        self._broadcast(dict(thread))
+
+    def note_status(self, thread_id: str | None, status: int) -> None:
+        if thread_id is None:
+            return
+        thread = self._threads.get(thread_id)
+        if thread is None:
+            return
+        thread["last_status"] = status
+        self._broadcast(dict(thread))
+
+
 class TraceStore:
     """Append-only in-memory event log with SSE fan-out."""
 
@@ -213,8 +316,41 @@ async def _events_sse(request: web.Request) -> web.StreamResponse:
         store.unsubscribe(queue)
 
 
+async def _threads_json(request: web.Request) -> web.Response:
+    threads: ThreadStore = request.app["threads"]
+    return web.json_response(threads.snapshot())
+
+
+async def _threads_sse(request: web.Request) -> web.StreamResponse:
+    """Replay every thread record, then stream live upserts (SSE)."""
+    threads: ThreadStore = request.app["threads"]
+    resp = web.StreamResponse(
+        headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"}
+    )
+    await resp.prepare(request)
+
+    # Subscribe before snapshotting; thread messages are idempotent
+    # upserts, so a record delivered by both paths is harmless.
+    queue = threads.subscribe()
+    try:
+        for msg in threads.snapshot():
+            await _sse_write(resp, msg)
+        while True:
+            try:
+                msg = await asyncio.wait_for(queue.get(), timeout=15)
+            except TimeoutError:
+                await resp.write(b": keep-alive\n\n")
+                continue
+            await _sse_write(resp, msg)
+    except (ConnectionResetError, ConnectionError):
+        return resp
+    finally:
+        threads.unsubscribe(queue)
+
+
 async def _proxy(request: web.Request) -> web.StreamResponse:
     store: TraceStore = request.app["store"]
+    threads: ThreadStore = request.app["threads"]
     trace = {
         k.lower(): v for k, v in request.headers.items() if k.lower().startswith(HEADER_PREFIX)
     }
@@ -229,6 +365,14 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
 
     dumper: TrafficDumper = request.app["dumper"]
     body = await request.read()  # completion payloads are small; no need to stream up
+
+    threads.observe(
+        kind="marker" if HEADER_EVENT in trace else "request",
+        thread_id=base["thread_id"],
+        root_id=base["root_id"],
+        spawned=base["spawned"],
+        path=request.path_qs,
+    )
 
     # §1.5 discrimination rule: a marker request is consumed — recorded,
     # answered locally, never forwarded (so it is never billed upstream).
@@ -264,6 +408,7 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
             store.record(
                 {"kind": "status", "for_seq": event["seq"], "status": upstream_resp.status}
             )
+            threads.note_status(base["thread_id"], upstream_resp.status)
             resp = web.StreamResponse(status=upstream_resp.status)
             for k, v in upstream_resp.headers.items():
                 if k.lower() not in _SKIP_HEADERS:
@@ -288,6 +433,7 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
             return resp
     except (ClientError, OSError) as exc:
         store.record({"kind": "status", "for_seq": event["seq"], "status": 502, "error": str(exc)})
+        threads.note_status(base["thread_id"], 502)
         await dumper.write(
             dumper.format_entry(
                 seq=event["seq"],
@@ -312,6 +458,7 @@ async def _client_ctx(app: web.Application) -> AsyncIterator[None]:
 def make_app(upstream: str, dump_path: Path) -> web.Application:
     app = web.Application()
     app["store"] = TraceStore()
+    app["threads"] = ThreadStore()
     app["upstream"] = upstream.rstrip("/")
     app["dumper"] = TrafficDumper(dump_path)
     app.cleanup_ctx.append(_client_ctx)
@@ -322,6 +469,8 @@ def make_app(upstream: str, dump_path: Path) -> web.Application:
     app.router.add_get("/trace", _index)
     app.router.add_get("/trace/events", _events_sse)
     app.router.add_get("/trace/events.json", _events_json)
+    app.router.add_get("/trace/threads", _threads_sse)
+    app.router.add_get("/trace/threads.json", _threads_json)
     app.router.add_route("*", "/{tail:.*}", _proxy)
     return app
 

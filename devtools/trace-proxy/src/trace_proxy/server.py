@@ -102,16 +102,24 @@ def _content_text(content: Any) -> str:
     return ""
 
 
-def _tool_calls_text(calls: Any) -> str:
+def _structured_tool_calls(calls: Any) -> list[dict[str, Any]] | None:
+    """Normalize a tool_calls array to [{id, name, arguments}] — shared by
+    the request-side and response-side extractors so anchoring ids match."""
     if not isinstance(calls, list):
-        return ""
-    names = []
+        return None
+    structured = []
     for call in calls:
         if not isinstance(call, dict):
             continue
         fn = call.get("function") or {}
-        names.append(f"{fn.get('name', '?')}({fn.get('arguments', '')})")
-    return f"[tool call: {', '.join(names)}]" if names else ""
+        structured.append(
+            {
+                "id": str(call.get("id") or ""),
+                "name": str(fn.get("name") or "?"),
+                "arguments": _clip(str(fn.get("arguments") or "")),
+            }
+        )
+    return structured or None
 
 
 def conversation_from_request(body: bytes) -> list[dict[str, Any]] | None:
@@ -143,74 +151,100 @@ def conversation_from_request(body: bytes) -> list[dict[str, Any]] | None:
             "role": str(message.get("role", "?")),
             "text": _clip(_content_text(message.get("content"))),
         }
-        calls = message.get("tool_calls")
-        if isinstance(calls, list):
-            structured = []
-            for call in calls:
-                if not isinstance(call, dict):
-                    continue
-                fn = call.get("function") or {}
-                structured.append(
-                    {
-                        "id": str(call.get("id") or ""),
-                        "name": str(fn.get("name") or "?"),
-                        "arguments": _clip(str(fn.get("arguments") or "")),
-                    }
-                )
-            if structured:
-                turn["tool_calls"] = structured
+        structured = _structured_tool_calls(message.get("tool_calls"))
+        if structured:
+            turn["tool_calls"] = structured
         if message.get("tool_call_id"):  # a tool-result turn
             turn["tool_call_id"] = str(message["tool_call_id"])
         turns.append(turn)
     return turns[-_TURNS_LIMIT:] or None
 
 
-def reply_from_response(content_type: str, body: bytes) -> str | None:
-    """Best-effort assistant text from a completion response body.
+def _parse_sse_response(text: str) -> tuple[str | None, list[dict[str, Any]] | None]:
+    """Assemble (reply, tool calls) from an OpenAI SSE stream.
+
+    Streamed tool calls arrive fragmented — id and name once, arguments
+    split across deltas keyed by index — so accumulate per slot.
+    """
+    parts: list[str] = []
+    slots: dict[int, dict[str, Any]] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[len("data:") :].strip()
+        if data in ("", "[DONE]"):
+            continue
+        try:
+            delta = json.loads(data)["choices"][0]["delta"]
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+            continue
+        if not isinstance(delta, dict):
+            continue
+        token = delta.get("content")
+        if token:
+            parts.append(str(token))
+        for fragment in delta.get("tool_calls") or []:
+            if not isinstance(fragment, dict):
+                continue
+            slot = slots.setdefault(
+                int(fragment.get("index") or 0), {"id": "", "name": "", "arguments": ""}
+            )
+            if fragment.get("id"):
+                slot["id"] = str(fragment["id"])
+            fn = fragment.get("function") or {}
+            if fn.get("name"):
+                slot["name"] = str(fn["name"])
+            if fn.get("arguments"):
+                slot["arguments"] += str(fn["arguments"])
+    calls = [
+        {"id": s["id"], "name": s["name"] or "?", "arguments": _clip(s["arguments"])}
+        for _, s in sorted(slots.items())
+    ]
+    return _clip("".join(parts)) or None, calls or None
+
+
+def parse_response(
+    content_type: str, body: bytes
+) -> tuple[str | None, list[dict[str, Any]] | None]:
+    """Best-effort (assistant reply, structured tool calls) from a response.
 
     Handles OpenAI SSE streams, Ollama NDJSON streams, and plain JSON
-    bodies from either provider shape.
+    bodies from either provider shape. Tool calls are the interesting
+    half: the response is where the model DECIDES to call a tool, one
+    request earlier than the decision shows up in the conversation — so
+    surfacing them here lets spawned children anchor immediately.
     """
     text = body.decode("utf-8", "replace")
     kind = content_type.lower()
-    parts: list[str] = []
     if "text/event-stream" in kind:
-        for raw in text.splitlines():
-            line = raw.strip()
-            if not line.startswith("data:"):
-                continue
-            data = line[len("data:") :].strip()
-            if data in ("", "[DONE]"):
-                continue
-            with contextlib.suppress(json.JSONDecodeError, KeyError, IndexError, TypeError):
-                token = json.loads(data)["choices"][0]["delta"].get("content")
-                if token:
-                    parts.append(token)
-        return _clip("".join(parts)) or None
+        return _parse_sse_response(text)
     if "ndjson" in kind:
+        parts: list[str] = []
+        calls: list[dict[str, Any]] | None = None
         for raw in text.splitlines():
             with contextlib.suppress(json.JSONDecodeError, AttributeError, TypeError):
                 obj = json.loads(raw)
-                token = obj.get("response") or (obj.get("message") or {}).get("content")
+                message = obj.get("message") or {}
+                token = obj.get("response") or message.get("content")
                 if token:
                     parts.append(str(token))
-        return _clip("".join(parts)) or None
+                calls = calls or _structured_tool_calls(message.get("tool_calls"))
+        return _clip("".join(parts)) or None, calls
     with contextlib.suppress(json.JSONDecodeError, KeyError, IndexError, TypeError):
         obj = json.loads(text)
         choices = obj.get("choices")
         if isinstance(choices, list) and choices:  # OpenAI non-streamed
             message = choices[0].get("message") or {}
-            combined = (
-                f"{_content_text(message.get('content'))} "
-                f"{_tool_calls_text(message.get('tool_calls'))}"
-            ).strip()
-            return _clip(combined) or None
+            reply = _clip(_content_text(message.get("content"))) or None
+            return reply, _structured_tool_calls(message.get("tool_calls"))
         message = obj.get("message")  # Ollama /api/chat non-streamed
         if isinstance(message, dict):
-            return _clip(_content_text(message.get("content"))) or None
+            reply = _clip(_content_text(message.get("content"))) or None
+            return reply, _structured_tool_calls(message.get("tool_calls"))
         if isinstance(obj.get("response"), str):  # Ollama /api/generate
-            return _clip(obj["response"]) or None
-    return None
+            return _clip(obj["response"]) or None, None
+    return None, None
 
 
 def _dump_headers(prefix: str, headers: Iterable[tuple[str, str]]) -> list[str]:
@@ -373,7 +407,13 @@ class ThreadStore:
                 self._broadcast(dict(child))
         self._broadcast(dict(thread))
 
-    def note_response(self, thread_id: str | None, status: int, reply: str | None) -> None:
+    def note_response(
+        self,
+        thread_id: str | None,
+        status: int,
+        reply: str | None,
+        tool_calls: list[dict[str, Any]] | None = None,
+    ) -> None:
         if thread_id is None:
             return
         thread = self._threads.get(thread_id)
@@ -382,6 +422,15 @@ class ThreadStore:
         thread["last_status"] = status
         if reply is not None:
             thread["reply"] = reply
+        if tool_calls:
+            # The model just DECIDED these calls. Buffer the assistant turn
+            # now so spawned children can anchor in their tool-call box
+            # immediately — one request before the parent's follow-up
+            # re-states the same turn (which then simply replaces this
+            # snapshot; no duplication, no visual snap).
+            convo = list(thread.get("conversation") or [])
+            convo.append({"role": "assistant", "text": "", "tool_calls": tool_calls})
+            thread["conversation"] = convo
         self._broadcast(dict(thread))
 
 
@@ -562,13 +611,10 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
                 response_body.extend(chunk)
                 await resp.write(chunk)
             await resp.write_eof()
-            threads.note_response(
-                base["thread_id"],
-                upstream_resp.status,
-                reply_from_response(
-                    upstream_resp.headers.get("Content-Type", ""), bytes(response_body)
-                ),
+            reply, tool_calls = parse_response(
+                upstream_resp.headers.get("Content-Type", ""), bytes(response_body)
             )
+            threads.note_response(base["thread_id"], upstream_resp.status, reply, tool_calls)
             await dumper.write(
                 dumper.format_entry(
                     seq=event["seq"],
@@ -583,7 +629,7 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
             return resp
     except (ClientError, OSError) as exc:
         store.record({"kind": "status", "for_seq": event["seq"], "status": 502, "error": str(exc)})
-        threads.note_response(base["thread_id"], 502, None)
+        threads.note_response(base["thread_id"], 502, None, None)
         await dumper.write(
             dumper.format_entry(
                 seq=event["seq"],

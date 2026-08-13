@@ -116,7 +116,7 @@ function edgeBadge(t) {
 function statsLine(t) {
   const calls = `${t.requests} model call${t.requests === 1 ? "" : "s"}`;
   const markers = t.markers ? ` · ${t.markers} marker${t.markers === 1 ? "" : "s"}` : "";
-  return `${calls}${markers} · ${ago(t.last_seen)}`;
+  return `${calls}${markers} · <span data-ago="${t.last_seen}">${ago(t.last_seen)}</span>`;
 }
 
 function turnRow(role, text) {
@@ -249,7 +249,13 @@ source.onmessage = (msg) => {
   else threads.set(data.thread_id, data);
   queueRender();
 };
-setInterval(queueRender, 5000); // keep the relative timestamps fresh
+// Refresh relative timestamps in place — no full re-render, so the DOM
+// only rebuilds when a thread actually changes (keeps animations and
+// scroll position steady).
+setInterval(() => {
+  for (const el of document.querySelectorAll("[data-ago]"))
+    el.textContent = ago(Number(el.dataset.ago));
+}, 5000);
 </script>
 </body>
 </html>

@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>trace-proxy</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #1c2330; --muted: #68738a;
+    --line: #e2e6ee; --accent: #3757c4; --ok: #2f8a4c; --warn: #b3661d; --err: #b03636;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 12px;
+    padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--card);
+  }
+  header h1 { font-size: 16px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  #status { margin-left: auto; font-size: 13px; color: var(--muted); }
+  main { max-width: 1080px; margin: 0 auto; padding: 20px; }
+  .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+  .tree-group {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    margin-bottom: 16px; padding: 12px 16px;
+  }
+  .tree-group > h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; }
+  .thread { margin: 6px 0 6px 0; }
+  .thread .kids { margin-left: 26px; border-left: 2px solid var(--line); padding-left: 14px; }
+  .thread summary {
+    cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px;
+    padding: 3px 0; flex-wrap: wrap;
+  }
+  .thread summary::before { content: "▸"; color: var(--muted); font-size: 11px; }
+  .thread details[open] > summary::before { content: "▾"; }
+  .badge {
+    font-size: 11px; padding: 1px 7px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
+  }
+  .badge.root { color: var(--accent); border-color: var(--accent); }
+  .badge.tool { color: var(--ok); border-color: var(--ok); }
+  .badge.prog { color: var(--warn); border-color: var(--warn); }
+  .badge.pending { color: var(--err); border-color: var(--err); }
+  table { border-collapse: collapse; margin: 4px 0 8px 22px; width: calc(100% - 22px); }
+  td { padding: 2px 10px 2px 0; vertical-align: top; font-size: 12.5px; }
+  td.seq { color: var(--muted); width: 3em; }
+  .kind-marker { color: var(--accent); font-weight: 600; }
+  .kind-request { color: var(--ink); }
+  td .hdr { color: var(--muted); }
+  .st-ok { color: var(--ok); } .st-err { color: var(--err); } .st-none { color: var(--muted); }
+  #untraced { color: var(--muted); font-size: 13px; margin-top: 20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>trace-proxy</h1>
+  <span class="sub">x-agent-* capture — threads grouped by root, edges from parent-reported claims</span>
+  <span id="status">connecting…</span>
+</header>
+<main>
+  <div id="forest"><div class="empty">no traced traffic yet</div></div>
+  <div id="untraced"></div>
+</main>
+<script>
+"use strict";
+
+const threads = new Map();   // thread_id -> {rootId, parent, events: []}
+const bySeq = new Map();     // seq -> event (for status patches)
+let untracedCount = 0;
+
+function ensureThread(id, rootId) {
+  if (!threads.has(id)) threads.set(id, { rootId, parent: null, events: [] });
+  const t = threads.get(id);
+  if (!t.rootId && rootId) t.rootId = rootId;
+  return t;
+}
+
+function apply(e) {
+  if (e.kind === "status") {
+    const target = bySeq.get(e.for_seq);
+    if (target) { target.status = e.status; target.error = e.error; }
+    return;
+  }
+  bySeq.set(e.seq, e);
+  if (!e.thread_id) { untracedCount++; return; }
+  ensureThread(e.thread_id, e.root_id).events.push(e);
+  for (const edge of e.spawned || []) {
+    const child = ensureThread(edge.child, e.root_id);
+    // Idempotent claims: marker and drained report describe the same edge.
+    child.parent = { id: e.thread_id, tool: edge.tool_call_id, type: edge.edge_type };
+  }
+}
+
+function short(id) { return id ? id.slice(0, 16) : "?"; }
+
+function statusCell(e) {
+  if (e.kind === "marker") return '<span class="st-ok">consumed</span>';
+  if (e.status == null) return '<span class="st-none">…</span>';
+  const cls = e.status < 400 ? "st-ok" : "st-err";
+  return `<span class="${cls}">${e.status}</span>`;
+}
+
+function eventRows(t) {
+  const rows = t.events.map(e => `
+    <tr>
+      <td class="seq mono">#${e.seq}</td>
+      <td class="mono kind-${e.kind}">${e.kind === "marker" ? "marker·" + (e.event || "") : "request"}</td>
+      <td class="mono">${e.method} ${e.path}</td>
+      <td class="mono hdr">${e.tool_call_id ? "tool " + e.tool_call_id : ""}
+        ${(e.spawned || []).map(s => "spawned " + short(s.child)).join(" ")}</td>
+      <td>${statusCell(e)}</td>
+    </tr>`).join("");
+  return `<table>${rows}</table>`;
+}
+
+function edgeBadge(t) {
+  if (!t.parent) return "";
+  return t.parent.type === "tool_call"
+    ? `<span class="badge tool">via ${t.parent.tool || "?"} (tool_call)</span>`
+    : `<span class="badge prog">${t.parent.type}</span>`;
+}
+
+function renderThread(id, group) {
+  const t = threads.get(id);
+  const isRoot = t.rootId === id;
+  const kids = [...threads.entries()]
+    .filter(([, v]) => v.parent && v.parent.id === id && (v.rootId || id) === t.rootId)
+    .map(([kid]) => kid);
+  return `
+    <div class="thread"><details open>
+      <summary>
+        <span class="mono">${short(id)}</span>
+        ${isRoot ? '<span class="badge root">root</span>' : edgeBadge(t) ||
+          '<span class="badge pending">position pending</span>'}
+        <span class="badge">${t.events.length} req</span>
+      </summary>
+      ${eventRows(t)}
+      <div class="kids">${kids.map(k => renderThread(k, group)).join("")}</div>
+    </details></div>`;
+}
+
+function render() {
+  const groups = new Map(); // root_id -> thread ids
+  for (const [id, t] of threads) {
+    const root = t.rootId || id;
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(id);
+  }
+  const html = [...groups.entries()].map(([root, ids]) => {
+    // Top level: the root itself plus any thread with no claimed parent yet.
+    const top = ids.filter(id => id === root || !threads.get(id).parent);
+    return `<div class="tree-group">
+      <h2>tree <span class="mono">${short(root)}</span> — ${ids.length} thread(s)</h2>
+      ${top.map(id => renderThread(id, root)).join("")}
+    </div>`;
+  }).join("");
+  document.getElementById("forest").innerHTML =
+    html || '<div class="empty">no traced traffic yet</div>';
+  document.getElementById("untraced").textContent =
+    untracedCount ? `${untracedCount} request(s) passed through without trace headers` : "";
+}
+
+let renderQueued = false;
+function queueRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; render(); });
+}
+
+const source = new EventSource("/trace/events");
+const statusEl = document.getElementById("status");
+source.onopen = () => { statusEl.textContent = "live"; };
+source.onerror = () => { statusEl.textContent = "reconnecting…"; };
+source.onmessage = (msg) => { apply(JSON.parse(msg.data)); queueRender(); };
+</script>
+</body>
+</html>

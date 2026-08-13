@@ -126,6 +126,12 @@ async def main() -> None:
         default=None,
         help="optional persona: prepended to every conversation as the system message",
     )
+    parser.add_argument(
+        "--no-tool-scope",
+        action="store_true",
+        help="simulate a harness that does NOT annotate tool executions: spawns "
+        "then record honest 'programmatic' edges instead of tool-call edges",
+    )
     args = parser.parse_args()
 
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -252,9 +258,12 @@ async def main() -> None:
                 else:
                     # The harness contract: each tool execution runs inside
                     # tool_scope(call.id) so spawns inside it get labeled
-                    # with the model's REAL tool-call id.
+                    # with the model's REAL tool-call id. --no-tool-scope
+                    # skips the annotation to show the degraded (but
+                    # honest) 'programmatic' edges a lazy harness gets.
                     print(f"tool {call.id}: prompt_agent({fn.arguments})", flush=True)
-                    with tool_scope(call.id):
+                    scope = contextlib.nullcontext() if args.no_tool_scope else tool_scope(call.id)
+                    with scope:
                         result = await run_prompt_agent(fn.arguments)
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
 

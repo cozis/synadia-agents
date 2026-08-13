@@ -21,8 +21,12 @@ reference shape for the whole trace story:
 - the follow-up completion (returning the tool result to the model)
   drains the ``x-agent-spawned`` report on its headers.
 
-One round of tool calls per prompt (plenty for the demo), then a final
-streamed answer.
+The tool loop runs multiple rounds (up to ``MAX_TOOL_ROUNDS``), so the
+model can delegate sequentially — e.g. gather facts from one agent,
+then hand them to another. Each round's request also drains the
+pending ``x-agent-spawned`` report from the previous round's spawns.
+``--system`` gives the agent a persona (see ``team.py`` for a
+ready-made multi-agent team built from this file).
 
 Environment:
 
@@ -73,6 +77,11 @@ from synadia_ai.agents import Agents, DiscoverFilter, Envelope, ResponseChunk, t
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_BASE_URL = "http://127.0.0.1:8100/v1"
 
+# Ceiling on model round-trips per prompt: enough for plan → delegate →
+# delegate → summarize flows, small enough that a confused model can't
+# burn tokens forever.
+MAX_TOOL_ROUNDS = 6
+
 TOOLS: list[ChatCompletionToolParam] = [
     {
         "type": "function",
@@ -112,6 +121,11 @@ async def main() -> None:
     parser.add_argument("--owner", default=os.environ.get("NATS_AGENT_OWNER") or getpass.getuser())
     parser.add_argument("--session-name", default="main")
     parser.add_argument("--heartbeat-interval", type=float, default=30.0)
+    parser.add_argument(
+        "--system",
+        default=None,
+        help="optional persona: prepended to every conversation as the system message",
+    )
     args = parser.parse_args()
 
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -187,65 +201,64 @@ async def main() -> None:
             f"prompt thread={stream.thread_id} root={stream.root_id} is_root={stream.is_root}",
             flush=True,
         )
-        messages: list[ChatCompletionMessageParam] = [{"role": "user", "content": envelope.prompt}]
+        messages: list[ChatCompletionMessageParam] = []
+        if args.system:
+            messages.append({"role": "system", "content": args.system})
+        messages.append({"role": "user", "content": envelope.prompt})
 
-        # Round 1 — non-streamed with tools, so tool_calls come back whole.
-        first = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=TOOLS,
-            extra_headers=stream.trace_headers(),
-        )
-        decision = first.choices[0].message
-        tool_calls = decision.tool_calls or []
-        if not tool_calls:
-            if decision.content:
-                await stream.send(decision.content)
-            return
+        # Multi-round tool loop: keep going while the model delegates.
+        # Every request carries this thread's trace headers, so each
+        # round also drains the previous round's x-agent-spawned report.
+        for _ in range(MAX_TOOL_ROUNDS):
+            completion = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=TOOLS,
+                extra_headers=stream.trace_headers(),
+            )
+            decision = completion.choices[0].message
+            tool_calls = decision.tool_calls or []
+            if not tool_calls:
+                if decision.content:
+                    await stream.send(decision.content)
+                return
 
-        messages.append(
-            {
-                "role": "assistant",
-                "content": decision.content,
-                "tool_calls": [
-                    {
-                        "id": c.id,
-                        "type": "function",
-                        "function": {
-                            "name": c.function.name,
-                            "arguments": c.function.arguments,
-                        },
-                    }
-                    for c in tool_calls
-                    if isinstance(c, ChatCompletionMessageFunctionToolCall)
-                ],
-            }
-        )
-        for call in tool_calls:
-            fn = call.function if isinstance(call, ChatCompletionMessageFunctionToolCall) else None
-            if fn is None or fn.name != "prompt_agent":
-                result = f"error: unknown tool {getattr(fn, 'name', call.type)!r}"
-            else:
-                # The harness contract: each tool execution runs inside
-                # tool_scope(call.id) so spawns inside it get labeled with
-                # the model's REAL tool-call id.
-                print(f"tool {call.id}: prompt_agent({fn.arguments})", flush=True)
-                with tool_scope(call.id):
-                    result = await run_prompt_agent(fn.arguments)
-            messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": decision.content,
+                    "tool_calls": [
+                        {
+                            "id": c.id,
+                            "type": "function",
+                            "function": {
+                                "name": c.function.name,
+                                "arguments": c.function.arguments,
+                            },
+                        }
+                        for c in tool_calls
+                        if isinstance(c, ChatCompletionMessageFunctionToolCall)
+                    ],
+                }
+            )
+            for call in tool_calls:
+                fn = (
+                    call.function
+                    if isinstance(call, ChatCompletionMessageFunctionToolCall)
+                    else None
+                )
+                if fn is None or fn.name != "prompt_agent":
+                    result = f"error: unknown tool {getattr(fn, 'name', call.type)!r}"
+                else:
+                    # The harness contract: each tool execution runs inside
+                    # tool_scope(call.id) so spawns inside it get labeled
+                    # with the model's REAL tool-call id.
+                    print(f"tool {call.id}: prompt_agent({fn.arguments})", flush=True)
+                    with tool_scope(call.id):
+                        result = await run_prompt_agent(fn.arguments)
+                messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
 
-        # Final round — streamed. Its headers also drain the x-agent-spawned
-        # report for the edges recorded above (the redundant edge channel).
-        completion = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            stream=True,
-            extra_headers=stream.trace_headers(),
-        )
-        async for chunk in completion:
-            token = chunk.choices[0].delta.content if chunk.choices else None
-            if token:
-                await stream.send(token)
+        await stream.send("(stopped: tool-round limit reached)")
 
     service.on_prompt(handler)
     await service.start()

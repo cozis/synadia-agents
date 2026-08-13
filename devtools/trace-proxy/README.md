@@ -96,6 +96,32 @@ underneath. No key handy? Point `--upstream` at the demo stub
 (`http://127.0.0.1:8199`, keep `scripts/demo_traffic.py` running, any
 `OPENAI_API_KEY` value) — the wire shape is identical.
 
+### A multi-agent team
+
+`agents/team.py` launches four of these agents with personas on one
+broker: **planner** (the front door, session `entry`), **researcher**,
+**writer** — whose persona tells it to get every piece reviewed — and
+**critic** (all session `team`). Prompt the planner with a task that
+names the others:
+
+```sh
+OPENAI_API_KEY=sk-... uv run python agents/team.py --url nats://127.0.0.1:4222
+# from client-sdk/python:
+uv run python examples/02-prompt-text.py --session entry \
+  "Delegate to the agent 'researcher': ask for three short facts about NATS. \
+  Then delegate to the agent 'writer': pass along those facts, ask for a \
+  four-line poem, and tell it to get the poem reviewed before answering." \
+  --url nats://127.0.0.1:4222
+```
+
+and the dashboard draws a three-level, model-driven tree — planner →
+researcher and writer in parallel branches, critic under the writer —
+every edge labeled with a real tool-call id. The agent's tool loop runs
+up to `MAX_TOOL_ROUNDS` model rounds, so sequential delegations (facts
+first, then the poem) work. Against the stub, the fake model delegates
+to every `agent '<name>'` the prompt mentions, so the fan-out level of
+the tree renders offline too.
+
 ## With the real SDK examples
 
 The agent-sdk examples read `OLLAMA_URL`, so putting the proxy in the

@@ -25,6 +25,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import re
 import secrets
 from http import HTTPStatus
 from typing import Any
@@ -101,24 +102,32 @@ async def _completions(request: web.Request) -> web.StreamResponse:
 
     if not body.get("stream"):
         if wants_tool:
+            # Fan out to every `agent '<name>'` the prompt mentions (with
+            # an optional `in session '<name>'`); fall back to the classic
+            # single openai/worker target so older demo commands keep
+            # working. One tool call per target → parallel branches.
+            targets = re.findall(r"agent '([a-z0-9-]+)'(?: in session '([a-z0-9-]+)')?", user_text)
+            if not targets:
+                targets = [("openai", "worker")]
             message: dict[str, Any] = {
                 "role": "assistant",
                 "content": None,
                 "tool_calls": [
                     {
-                        "id": "call_stub0001",
+                        "id": f"call_stub{i:04d}",
                         "type": "function",
                         "function": {
                             "name": "prompt_agent",
                             "arguments": json.dumps(
                                 {
-                                    "agent": "openai",
-                                    "session_name": "worker",
+                                    "agent": agent,
+                                    **({"session_name": session} if session else {}),
                                     "prompt": "say hello",
                                 }
                             ),
                         },
                     }
+                    for i, (agent, session) in enumerate(targets, start=1)
                 ],
             }
         else:

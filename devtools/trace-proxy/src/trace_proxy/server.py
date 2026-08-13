@@ -592,47 +592,85 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
         for k, v in request.headers.items()
         if k.lower() not in _SKIP_HEADERS and not k.lower().startswith(HEADER_PREFIX)
     }
+    return await _forward(
+        request,
+        event_seq=event["seq"],
+        thread_id=base["thread_id"],
+        body=body,
+        forward_headers=forward_headers,
+    )
+
+
+async def _relay(
+    request: web.Request, resp: web.StreamResponse, upstream_resp: Any
+) -> tuple[bytes, str | None, bool]:
+    """Relay the upstream body to the client, draining it fully even if
+    the client goes away. Returns (captured body, note, cancelled)."""
+    note: str | None = None
+    response_body = bytearray()
+    client_gone = False
+    cancelled = False
+    try:
+        try:
+            await resp.prepare(request)
+        except OSError:
+            client_gone = True
+        async for chunk in upstream_resp.content.iter_chunked(8192):
+            response_body.extend(chunk)
+            if client_gone:
+                continue  # keep draining upstream so the capture is complete
+            try:
+                await resp.write(chunk)
+            except OSError:
+                client_gone = True
+        if not client_gone:
+            with contextlib.suppress(OSError):
+                await resp.write_eof()
+    except (ClientError, OSError) as exc:
+        note = f"upstream stream aborted mid-response: {exc}"
+    except asyncio.CancelledError:
+        # aiohttp cancels the handler when the peer disconnects hard;
+        # the caller bookkeeps, then re-raises the cancellation.
+        client_gone = True
+        cancelled = True
+    if client_gone and note is None:
+        note = "agent disconnected before end of stream (upstream drained for capture)"
+    return bytes(response_body), note, cancelled
+
+
+async def _forward(
+    request: web.Request,
+    *,
+    event_seq: int,
+    thread_id: str | None,
+    body: bytes,
+    forward_headers: dict[str, str],
+) -> web.StreamResponse:
+    """Stream one request upstream and back, recording as we go.
+
+    Failure domains are separate on purpose. Upstream unreachable → 502.
+    But a DOWNSTREAM disconnect (the agent's SDK closes its socket the
+    moment it has consumed the stream terminator, racing our last write)
+    is not an upstream failure: keep the real status, drain the rest of
+    the stream, and still record the reply — otherwise every race loses
+    the conversation's final entry and paints the thread red.
+    """
+    store: TraceStore = request.app["store"]
+    threads: ThreadStore = request.app["threads"]
+    dumper: TrafficDumper = request.app["dumper"]
     client: ClientSession = request.app["client"]
     upstream: str = request.app["upstream"]
     try:
-        async with client.request(
+        upstream_ctx = client.request(
             request.method, upstream + request.path_qs, headers=forward_headers, data=body
-        ) as upstream_resp:
-            store.record(
-                {"kind": "status", "for_seq": event["seq"], "status": upstream_resp.status}
-            )
-            resp = web.StreamResponse(status=upstream_resp.status)
-            for k, v in upstream_resp.headers.items():
-                if k.lower() not in _SKIP_HEADERS:
-                    resp.headers[k] = v
-            await resp.prepare(request)
-            response_body = bytearray()
-            async for chunk in upstream_resp.content.iter_chunked(8192):
-                response_body.extend(chunk)
-                await resp.write(chunk)
-            await resp.write_eof()
-            reply, tool_calls = parse_response(
-                upstream_resp.headers.get("Content-Type", ""), bytes(response_body)
-            )
-            threads.note_response(base["thread_id"], upstream_resp.status, reply, tool_calls)
-            await dumper.write(
-                dumper.format_entry(
-                    seq=event["seq"],
-                    request=request,
-                    request_body=body,
-                    note=None,
-                    status=upstream_resp.status,
-                    response_headers=upstream_resp.headers.items(),
-                    response_body=bytes(response_body),
-                )
-            )
-            return resp
+        )
+        upstream_resp = await upstream_ctx.__aenter__()
     except (ClientError, OSError) as exc:
-        store.record({"kind": "status", "for_seq": event["seq"], "status": 502, "error": str(exc)})
-        threads.note_response(base["thread_id"], 502, None, None)
+        store.record({"kind": "status", "for_seq": event_seq, "status": 502, "error": str(exc)})
+        threads.note_response(thread_id, 502, None, None)
         await dumper.write(
             dumper.format_entry(
-                seq=event["seq"],
+                seq=event_seq,
                 request=request,
                 request_body=body,
                 note=f"upstream request failed: {exc}",
@@ -642,6 +680,35 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
             )
         )
         return web.json_response({"error": f"upstream request failed: {exc}"}, status=502)
+
+    store.record({"kind": "status", "for_seq": event_seq, "status": upstream_resp.status})
+    resp = web.StreamResponse(status=upstream_resp.status)
+    for k, v in upstream_resp.headers.items():
+        if k.lower() not in _SKIP_HEADERS:
+            resp.headers[k] = v
+
+    try:
+        response_body, note, cancelled = await _relay(request, resp, upstream_resp)
+    finally:
+        await upstream_ctx.__aexit__(None, None, None)
+    reply, tool_calls = parse_response(
+        upstream_resp.headers.get("Content-Type", ""), bytes(response_body)
+    )
+    threads.note_response(thread_id, upstream_resp.status, reply, tool_calls)
+    await dumper.write(
+        dumper.format_entry(
+            seq=event_seq,
+            request=request,
+            request_body=body,
+            note=note,
+            status=upstream_resp.status,
+            response_headers=upstream_resp.headers.items(),
+            response_body=bytes(response_body),
+        )
+    )
+    if cancelled:
+        raise asyncio.CancelledError
+    return resp
 
 
 async def _client_ctx(app: web.Application) -> AsyncIterator[None]:

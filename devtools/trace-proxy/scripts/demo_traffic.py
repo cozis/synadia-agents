@@ -51,10 +51,26 @@ async def _chat(request: web.Request) -> web.Response:
 
 async def _generate(request: web.Request) -> web.StreamResponse:
     _record(request)
+    try:
+        payload: dict[str, Any] = await request.json()
+    except json.JSONDecodeError:
+        payload = {}
+    # Test knobs: `stub_chunks` / `stub_delay_s` in the request body turn
+    # the reply into a slow N-chunk stream — used to exercise proxy
+    # behaviour when a client disconnects mid-stream.
+    chunks = int(payload.get("stub_chunks") or 0)
+    delay = float(payload.get("stub_delay_s") or 0)
     resp = web.StreamResponse(headers={"Content-Type": "application/x-ndjson"})
     await resp.prepare(request)
-    await resp.write(b'{"response": "stub "}\n')
-    await resp.write(b'{"response": "reply", "done": true}\n')
+    if chunks:
+        for i in range(chunks - 1):
+            await resp.write(f'{{"response": "tok{i} "}}\n'.encode())
+            if delay:
+                await asyncio.sleep(delay)
+        await resp.write(b'{"response": "end", "done": true}\n')
+    else:
+        await resp.write(b'{"response": "stub "}\n')
+        await resp.write(b'{"response": "reply", "done": true}\n')
     await resp.write_eof()
     return resp
 

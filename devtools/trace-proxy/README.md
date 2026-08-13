@@ -29,12 +29,13 @@ markers — and every spawn claim (marker channel or the drained
 child thread and attaches it under its parent, labeled with the tool
 call id. Threads group by `root_id`, roots are exact via the root test,
 and unclaimed non-root threads show as "position pending". The dashboard
-renders this as conversation trees with contents: each thread node shows
-its turns, and a child thread attaches **inside the exact tool-call box
-that spawned it** (matched by tool-call id, with the tool result in the
-same box); programmatic or not-yet-anchored children attach below the
-conversation. Updated over SSE — each message is a full thread record,
-an upsert.
+renders each conversation as a vertical chain of turn boxes (user /
+tool / assistant) on a trunk line, and a spawned sub-agent's chain
+**branches right off the exact tool box that spawned it** (matched by
+tool-call id) while the parent's trunk continues down to its final
+answer; programmatic or not-yet-anchored children hang off the chain's
+end. Updated over SSE — each message is a full thread record, an
+upsert. Click a chain to expand clipped text.
 
 ## Quickstart (offline, no LLM needed)
 

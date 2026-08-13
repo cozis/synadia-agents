@@ -167,23 +167,34 @@ class MuxInbox:
                 log.exception("mux: route message hook failed (subject=%s)", subject)
         route.queue.put_nowait(msg)
 
-    def register(
-        self, *, on_msg: Callable[[Msg], None] | None = None
-    ) -> tuple[str, asyncio.Queue[object]]:
-        """Reserve a per-stream token + queue.
+    def mint_token(self) -> str:
+        """Generate (but do not register) a fresh per-stream token.
 
-        Returns ``(token, queue)``. The caller publishes its request
+        Lets callers know a stream's reply subject — and anything derived
+        from it, e.g. the observability thread id — *before* the stream
+        is registered and published. Pass the token to :meth:`register`.
+        """
+        return _nuid.next().decode()
+
+    def register(
+        self,
+        token: str,
+        *,
+        on_msg: Callable[[Msg], None] | None = None,
+    ) -> asyncio.Queue[object]:
+        """Reserve the routing slot for a token minted via :meth:`mint_token`.
+
+        Returns the per-stream queue. The caller publishes its request
         with ``reply=mux.reply_subject_for(token)`` and pulls inbound
-        chunks from ``queue``. ``on_msg`` is an optional synchronous
+        chunks from the queue. ``on_msg`` is an optional synchronous
         hook for arrival-side lifecycle bookkeeping such as cancelling
         a max-wait timer when the caller recognises a terminator. After
         the stream completes (or is cancelled), the caller MUST call
         :meth:`unregister` to free the slot.
         """
-        token = _nuid.next().decode()
         queue: asyncio.Queue[object] = asyncio.Queue()
         self._routes[token] = _Route(queue=queue, on_msg=on_msg)
-        return token, queue
+        return queue
 
     def unregister(self, token: str) -> None:
         """Drop the routing entry for ``token``. Idempotent."""

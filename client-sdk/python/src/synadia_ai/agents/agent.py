@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeAlias
 
@@ -28,6 +28,7 @@ from .errors import (
     StreamStalledError,
 )
 from .messages import QueryChunk, ResponseChunk, StatusChunk, decode_chunk
+from .trace import derive_thread_id
 from .validation import (
     assert_attachments_allowed,
     assert_prompt_non_empty,
@@ -37,6 +38,8 @@ from .validation import (
 if TYPE_CHECKING:
     from nats.aio.client import Client as NATSClient
     from nats.aio.msg import Msg
+
+    from ._mux import MuxInbox
 
 log = get_logger(__name__)
 
@@ -89,6 +92,47 @@ class Query:
 
 StreamMessage: TypeAlias = ResponseChunk | StatusChunk | Query
 """One item yielded by :meth:`Agent.prompt`'s async iterator."""
+
+
+class PromptHandle:
+    """The value returned by :meth:`Agent.prompt` — an async iterator plus
+    the prompt's observability identity.
+
+    Iterates exactly like the bare async generator it wraps
+    (``async for msg in handle:`` / ``await handle.aclose()``), so existing
+    call sites are unaffected. Additionally exposes:
+
+    - :attr:`thread_id` — the spawned thread's id, derived from the
+      stream's reply subject. A spawning harness reads this to report the
+      parent→child edge to the observing proxy.
+
+    It is known synchronously, before the first chunk — the underlying
+    request is published lazily on first iteration, unchanged.
+    """
+
+    def __init__(
+        self,
+        stream: AsyncGenerator[StreamMessage, None],
+        *,
+        thread_id: str,
+    ) -> None:
+        self._stream = stream
+        self._thread_id = thread_id
+
+    @property
+    def thread_id(self) -> str:
+        """Derived id of the thread this prompt spawned."""
+        return self._thread_id
+
+    def __aiter__(self) -> PromptHandle:
+        return self
+
+    async def __anext__(self) -> StreamMessage:
+        return await self._stream.__anext__()
+
+    async def aclose(self) -> None:
+        """Close the underlying stream (frees the mux slot deterministically)."""
+        await self._stream.aclose()
 
 
 class Agent:
@@ -203,8 +247,8 @@ class Agent:
         attachments: list[Attachment] | None = None,
         timeout: float | None = None,
         max_wait_s: float | None = None,
-    ) -> AsyncIterator[StreamMessage]:
-        """Send a prompt and return an async iterator of streamed messages.
+    ) -> PromptHandle:
+        """Send a prompt and return a :class:`PromptHandle` (async iterator).
 
         ``text`` is either a bare string or a fully-constructed
         :class:`Envelope`. ``attachments``, when provided, are attached to
@@ -271,6 +315,15 @@ class Agent:
                 f"max_wait_s must be > 0 (got {max_wait_s!r}); pass None to use the default."
             )
 
+        # Mint this stream's mux token up front (pure, no wire I/O) so the
+        # reply subject — and the thread id derived from it — are known
+        # before the envelope is built. Registration and the publish stay
+        # lazy inside `_stream_prompt`, so an unconsumed handle costs
+        # nothing and leaks nothing.
+        mux = mux_for(self._nc)
+        token = mux.mint_token()
+        thread_id = derive_thread_id(mux.reply_subject_for(token))
+
         if isinstance(text, Envelope):
             merged_attachments: list[Attachment] | None
             if attachments:
@@ -289,7 +342,6 @@ class Agent:
             )
 
         # §5.4: local validation happens synchronously BEFORE any wire I/O.
-        # Raising here means callers don't even allocate a reply subject.
         encoded = encode(envelope)
         assert_prompt_non_empty(envelope.prompt)
         ep = self._info.prompt_endpoint
@@ -304,7 +356,10 @@ class Agent:
 
         effective_timeout = timeout if timeout is not None else self._default_inactivity_timeout
         effective_max_wait = max_wait_s if max_wait_s is not None else self._default_max_wait_s
-        return self._stream_prompt(envelope, encoded, effective_timeout, effective_max_wait)
+        return PromptHandle(
+            self._stream_prompt(mux, token, encoded, effective_timeout, effective_max_wait),
+            thread_id=thread_id,
+        )
 
     async def _wait_for_chunk(
         self,
@@ -416,17 +471,15 @@ class Agent:
             raise ProtocolError(f"prompt stream cancelled: owning Agents is closed (reply={reply})")
 
     async def _stream_prompt(
-        self, envelope: Envelope, encoded: bytes, timeout: float, max_wait_s: float
-    ) -> AsyncIterator[StreamMessage]:
-        del envelope  # retained for readability at the call site; not needed here
+        self, mux: MuxInbox, token: str, encoded: bytes, timeout: float, max_wait_s: float
+    ) -> AsyncGenerator[StreamMessage, None]:
+        # ``mux`` and ``token`` were resolved in `prompt()` (the thread id
+        # derives from the token's reply subject); this generator
+        # registers and frees the token.
         # Pre-flight: refuse outright if the owning Agents is already
         # closed. This catches the "called prompt() after close()" case
         # cleanly, before any wire I/O or mux state mutation.
         self._raise_if_closed()
-
-        # Per-nc mux singleton — shared across every Agent on the same
-        # connection. See `_mux.py`'s INTERIM-NATSPY-REQUEST-MANY note.
-        mux = mux_for(self._nc)
         await mux.start()  # idempotent; pays SUB+flush on the first prompt
         # `max_wait_s > 0` is enforced at the public boundary (Agent.prompt
         # and the constructors), so we treat it as an invariant here.
@@ -438,7 +491,7 @@ class Agent:
             if msg.data == b"" and not (msg.headers or {}):
                 max_wait_handle.cancel()
 
-        token, queue = mux.register(on_msg=on_msg)
+        queue = mux.register(token, on_msg=on_msg)
         try:
             reply = mux.reply_subject_for(token)
             subject = self._info.prompt_endpoint.subject
@@ -509,6 +562,7 @@ __all__ = [
     "DEFAULT_PROMPT_MAX_WAIT_S",
     "DEFAULT_STREAM_INACTIVITY_TIMEOUT_S",
     "Agent",
+    "PromptHandle",
     "Query",
     "StreamMessage",
 ]

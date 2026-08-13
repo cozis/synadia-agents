@@ -27,7 +27,9 @@ from nats.micro import ServiceConfig, add_service
 from nats.micro.service import EndpointConfig
 from synadia_ai.agents import (
     HEADER_ROOT_ID,
+    HEADER_SPAWNED,
     HEADER_THREAD_ID,
+    HEADER_TOOL_CALL_ID,
     PROMPT_ENDPOINT_NAME,
     PROMPT_QUEUE_GROUP,
     SERVICE_NAME,
@@ -45,6 +47,8 @@ from synadia_ai.agents import (
     TraceContext,
     decode,
     derive_thread_id,
+    format_spawn_entry,
+    spawn_marker_headers,
 )
 from synadia_ai.agents.messages import encode_chunk
 
@@ -123,7 +127,8 @@ class PromptStream:
     ``root_id`` field (falling back to :attr:`thread_id` for legacy
     callers — a provisional root). :meth:`trace_headers` yields the
     HTTP headers a harness passes on every outbound model request;
-    :meth:`child_trace` supports spawning sub-agents in the same tree.
+    :meth:`record_spawn` / :meth:`child_trace` support spawning
+    sub-agents with correct edge reporting.
     """
 
     def __init__(
@@ -138,6 +143,11 @@ class PromptStream:
         self._nc = nc
         self._thread_id = derive_thread_id(reply_subject)
         self._root_id = root_id if root_id is not None else self._thread_id
+        # Edges recorded via record_spawn(), drained by the next
+        # trace_headers() call (the parent's next model request).
+        # Dict-as-ordered-set: O(1) idempotent inserts, insertion order
+        # preserved for the drained report.
+        self._pending_spawns: dict[str, None] = {}
 
     # --- observability identity ----------------------------------------
 
@@ -166,9 +176,46 @@ class PromptStream:
             HEADER_ROOT_ID: self._root_id,
         }
 
-    def trace_headers(self) -> dict[str, str]:
-        """Headers for an outbound model request issued by this thread."""
-        return self._identity_headers()
+    def trace_headers(self, *, tool_call_id: str | None = None) -> dict[str, str]:
+        """Headers for an outbound model request issued by this thread.
+
+        Includes thread + root identity, any spawn edges recorded since
+        the previous call (drained — the marker channel provides the
+        redundant delivery), and, when given, the tool invocation this
+        outbound call serves.
+        """
+        headers = self._identity_headers()
+        if tool_call_id is not None:
+            headers[HEADER_TOOL_CALL_ID] = tool_call_id
+        if self._pending_spawns:
+            headers[HEADER_SPAWNED] = ",".join(self._pending_spawns)
+            self._pending_spawns.clear()
+        return headers
+
+    def record_spawn(
+        self,
+        child_thread_id: str,
+        *,
+        tool_call_id: str | None = None,
+        edge_type: str | None = None,
+    ) -> dict[str, str]:
+        """Record a spawned child thread; returns spawn-marker headers.
+
+        Registers the edge for the completion-report channel (the next
+        :meth:`trace_headers` call) and returns the headers for the
+        spawn-time idempotent marker request (``x-agent-event: spawn``)
+        — fire it through any provider client, e.g.
+        ``client.models.list(extra_headers=...)``, as fire-and-forget
+        telemetry. An observing proxy consumes marker-tagged requests
+        without forwarding them upstream.
+
+        Defaults follow :func:`~synadia_ai.agents.format_spawn_entry`:
+        an unspecified ``edge_type`` is ``tool_call`` iff a tool id was
+        given, else ``programmatic``.
+        """
+        entry = format_spawn_entry(child_thread_id, tool_call_id, edge_type)
+        self._pending_spawns[entry] = None  # idempotent insert, order preserved
+        return spawn_marker_headers(self._thread_id, self._root_id, entry)
 
     def child_trace(self) -> TraceContext:
         """Trace context to pass to ``Agent.prompt(trace=...)`` when spawning."""

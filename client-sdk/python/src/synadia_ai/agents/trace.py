@@ -6,6 +6,13 @@ A **thread** is one prompt execution: one request published to
 inbox (the caller mints it; the agent receives it as the request's reply
 subject), and it is unique per prompt, so a hash of it identifies the
 thread with zero extra wire surface.
+
+``root_id`` is the thread_id of the tree's *root* thread, forwarded down
+the tree via an optional envelope field (§5.6 tolerates unknown fields).
+It is always the hash — never the raw inbox subject, which would hand
+every descendant the root caller's live reply subject (an injection
+surface). Root test: a thread is root iff its ``root_id`` equals the hash
+of its own reply subject.
 """
 
 from __future__ import annotations

@@ -80,6 +80,13 @@ class Envelope(BaseModel):
 
     prompt: str
     attachments: list[Attachment] | None = None
+    # Observability: thread_id of the tree's ROOT thread —
+    # always the derived hash, never a raw inbox subject. Set by the
+    # client SDK on every prompt it publishes; absent (None) for legacy
+    # / plain-NATS callers. Omitted from the wire when None
+    # (`encode` uses exclude_none), so the compact §5.1 form is
+    # unchanged for callers that don't trace. See `trace.py`.
+    root_id: str | None = None
 
 
 def encode(envelope: Envelope) -> bytes:

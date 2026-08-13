@@ -22,6 +22,9 @@ observing HTTP proxy. See the agent-sdk's ``PromptStream.trace_headers``.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 # Length (hex chars) of derived thread ids. 16 hex chars = 64 bits —
@@ -89,3 +92,81 @@ class TraceContext:
     """
 
     root_id: str
+
+
+# --- ambient (async-context) layer -------------------------------------
+#
+# The explicit API above is the foundation; this layer makes correlation
+# implicit where threading arguments through is impossible or noisy. It
+# is plain PEP 567 contextvars — cooperative and deterministic (values
+# are inherited by tasks at creation and scoped by the context managers
+# below), the same mechanism OpenTelemetry's Python context uses. No
+# call-stack inspection, no monkeypatching.
+#
+# The agent-sdk binds an :class:`ActiveTrace` around each prompt-handler
+# invocation; :meth:`Agent.prompt` consults it when no explicit ``trace``
+# is passed, so a spawn from inside a handler joins the parent's tree
+# and records its edge automatically.
+
+SpawnRecorder = Callable[[str], dict[str, str]]
+"""``(child_thread_id) -> spawn-marker headers`` — the parent stream's
+edge recorder, bound into the ambient context. Runs synchronously in the
+spawner's context, so it resolves the ambient tool scope itself (via
+:func:`format_spawn_entry`)."""
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveTrace:
+    """The prompt execution currently running in this async context."""
+
+    thread_id: str
+    root_id: str
+    record_spawn: SpawnRecorder | None = None
+
+
+_active_trace: ContextVar[ActiveTrace | None] = ContextVar(
+    "synadia_agents_active_trace", default=None
+)
+_active_tool_call: ContextVar[str | None] = ContextVar(
+    "synadia_agents_active_tool_call", default=None
+)
+
+
+def active_trace() -> ActiveTrace | None:
+    """The ambient :class:`ActiveTrace`, or None outside a bound handler."""
+    return _active_trace.get()
+
+
+def current_tool_call_id() -> str | None:
+    """The innermost ambient :func:`tool_scope` id, or None outside one."""
+    return _active_tool_call.get()
+
+
+@contextmanager
+def bind_active_trace(trace: ActiveTrace) -> Iterator[None]:
+    """Bind ``trace`` as the ambient context for the enclosed scope.
+
+    Called by the agent-sdk around each prompt-handler invocation;
+    harnesses normally never call this themselves.
+    """
+    token = _active_trace.set(trace)
+    try:
+        yield
+    finally:
+        _active_trace.reset(token)
+
+
+@contextmanager
+def tool_scope(tool_call_id: str) -> Iterator[None]:
+    """Mark the enclosed scope as executing one tool invocation.
+
+    Wrap each tool-implementation call in the harness's dispatch loop:
+    ambient spawns inside the scope pick up ``tool_call_id`` as their
+    edge label, and ``PromptStream.trace_headers()`` uses it as the
+    default ``x-agent-tool-call-id``. Scopes nest; the innermost wins.
+    """
+    token = _active_tool_call.set(tool_call_id)
+    try:
+        yield
+    finally:
+        _active_tool_call.reset(token)

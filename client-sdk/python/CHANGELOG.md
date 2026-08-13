@@ -15,6 +15,9 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
   omitted when unset); `Agent.prompt(trace=...)` now returns a
   `PromptHandle` (drop-in async iterator) exposing `thread_id` /
   `root_id` for parent-side edge reporting.
+- **Ambient trace context (contextvars)** — `ActiveTrace` +
+  `bind_active_trace()` (bound by the agent-sdk around handlers),
+  `tool_scope()` / `current_tool_call_id()`.
 
 ## [0.7.1] - 2026-05-12
 

@@ -82,10 +82,15 @@ from .trace import (
     HEADER_THREAD_ID,
     HEADER_TOOL_CALL_ID,
     THREAD_ID_HEX_LEN,
+    ActiveTrace,
     TraceContext,
+    active_trace,
+    bind_active_trace,
+    current_tool_call_id,
     derive_thread_id,
     format_spawn_entry,
     spawn_marker_headers,
+    tool_scope,
 )
 
 __all__ = [
@@ -106,6 +111,7 @@ __all__ = [
     "STATUS_ENDPOINT_NAME",
     "STATUS_QUEUE_GROUP",
     "THREAD_ID_HEX_LEN",
+    "ActiveTrace",
     "Agent",
     "AgentInfo",
     "AgentNotFound",
@@ -137,7 +143,10 @@ __all__ = [
     "StreamStalledError",
     "TraceContext",
     "ValidationError",
+    "active_trace",
+    "bind_active_trace",
     "build_agent_info",
+    "current_tool_call_id",
     "decode",
     "derive_thread_id",
     "encode",
@@ -145,4 +154,5 @@ __all__ = [
     "load_context_options",
     "parse_nats_url",
     "spawn_marker_headers",
+    "tool_scope",
 ]

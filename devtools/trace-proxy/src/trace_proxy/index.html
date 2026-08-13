@@ -21,10 +21,29 @@
   header h1 { font-size: 16px; margin: 0; }
   header .sub { color: var(--muted); font-size: 13px; }
   #status { margin-left: auto; font-size: 13px; color: var(--muted); }
-  main { max-width: 1200px; margin: 0 auto; padding: 20px; }
+  main { display: flex; align-items: flex-start; }
   .empty { color: var(--muted); padding: 40px 0; text-align: center; }
-  .tree { margin-bottom: 30px; overflow-x: auto; }
   .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+
+  /* Left: the thread list. Right: only the selected tree's graph. */
+  #threadlist {
+    flex: none; width: 300px; border-right: 1px solid var(--line);
+    background: var(--card); position: sticky; top: 0;
+    max-height: calc(100vh - 60px); overflow-y: auto;
+  }
+  .titem {
+    padding: 10px 14px; border-bottom: 1px solid var(--line); cursor: pointer;
+  }
+  .titem:hover { background: #f0f3f9; }
+  .titem.selected { background: #e9eefb; box-shadow: inset 3px 0 0 var(--accent); }
+  .titem .row { display: flex; align-items: center; gap: 7px; }
+  .titem .snippet {
+    color: var(--muted); font-size: 12px; margin-top: 2px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .titem .meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  #untraced { color: var(--muted); font-size: 12px; padding: 10px 14px; }
+  #detail { flex: 1; min-width: 0; padding: 18px 24px; overflow-x: auto; }
 
   /* A conversation is a vertical chain of turn boxes on a trunk line;
      the trunk runs behind the boxes, so gaps read as connectors. */
@@ -96,8 +115,8 @@
   <span id="status">connecting…</span>
 </header>
 <main>
-  <div id="forest"><div class="empty">no traced traffic yet</div></div>
-  <div id="untraced"></div>
+  <nav id="threadlist"><div class="empty">no threads yet</div></nav>
+  <section id="detail"><div class="empty">no traced traffic yet</div></section>
 </main>
 <script>
 "use strict";
@@ -107,6 +126,7 @@
 const threads = new Map();
 let untraced = 0;
 const expanded = new Set(); // chains the viewer expanded (survives re-renders)
+let selectedRoot = null;    // which tree the detail pane shows
 
 function short(id) { return id ? id.slice(0, 16) : "?"; }
 
@@ -214,6 +234,30 @@ function chainHTML(id, childIndex, visited) {
   return `<div class="${cls}" data-tid="${esc(id)}">${threadHeader(t)}${body}</div>`;
 }
 
+function snippetOf(ids) {
+  for (const id of ids) {
+    const t = threads.get(id);
+    if (!t) continue;
+    const user = (t.conversation || []).find(u => u.role === "user" && u.text);
+    if (user) return user.text;
+  }
+  return "";
+}
+
+function listItem(root, ids) {
+  const rootThread = threads.get(root) || threads.get(ids[0]);
+  const count = ids.length > 1 ? `${ids.length} threads · ` : "";
+  const last = Math.max(...ids.map(id => threads.get(id).last_seen));
+  return `<div class="titem${root === selectedRoot ? " selected" : ""}" data-root="${esc(root)}">
+    <div class="row">
+      <span class="${dotClass(rootThread)}"></span>
+      <span class="mono">${short(root)}</span>
+    </div>
+    <div class="snippet">${esc(snippetOf([root, ...ids]))}</div>
+    <div class="meta">${count}<span data-ago="${last}">${ago(last)}</span></div>
+  </div>`;
+}
+
 function render() {
   const groups = new Map();      // root_id -> thread ids
   const childIndex = new Map();  // parent thread_id -> child ids
@@ -234,7 +278,19 @@ function render() {
     return fb - fa; // newest tree first
   });
 
-  const html = orderedGroups.map(([root, ids]) => {
+  // Keep the selection stable; fall back to the newest tree.
+  if (!groups.has(selectedRoot))
+    selectedRoot = orderedGroups.length ? orderedGroups[0][0] : null;
+
+  const listHtml = orderedGroups.map(([root, ids]) => listItem(root, ids)).join("");
+  const untracedHtml = untraced
+    ? `<div id="untraced">${untraced} request(s) without trace headers</div>` : "";
+  document.getElementById("threadlist").innerHTML =
+    (listHtml || '<div class="empty">no threads yet</div>') + untracedHtml;
+
+  let detailHtml = '<div class="empty">no traced traffic yet</div>';
+  if (selectedRoot) {
+    const ids = groups.get(selectedRoot);
     const visited = new Set();
     // Top level: the root first, then any thread with no claimed parent.
     const top = ids
@@ -244,13 +300,9 @@ function render() {
         if (ra !== rb) return ra ? -1 : 1;
         return threads.get(a).first_seen - threads.get(b).first_seen;
       });
-    return `<div class="tree">${top.map(id => chainHTML(id, childIndex, visited)).join("")}</div>`;
-  }).join("");
-
-  document.getElementById("forest").innerHTML =
-    html || '<div class="empty">no traced traffic yet</div>';
-  document.getElementById("untraced").textContent =
-    untraced ? `${untraced} request(s) passed through without trace headers` : "";
+    detailHtml = top.map(id => chainHTML(id, childIndex, visited)).join("");
+  }
+  document.getElementById("detail").innerHTML = detailHtml;
 }
 
 let renderQueued = false;
@@ -260,8 +312,14 @@ function queueRender() {
   requestAnimationFrame(() => { renderQueued = false; render(); });
 }
 
-// Click anywhere in a chain to toggle full turn text (innermost chain wins).
+// Left list selects a tree; clicking a chain toggles full turn text.
 document.addEventListener("click", (e) => {
+  const item = e.target.closest(".titem");
+  if (item) {
+    selectedRoot = item.dataset.root;
+    queueRender();
+    return;
+  }
   const chain = e.target.closest(".chain");
   if (!chain) return;
   const tid = chain.dataset.tid;

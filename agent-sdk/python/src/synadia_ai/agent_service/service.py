@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 from nats.micro import ServiceConfig, add_service
 from nats.micro.service import EndpointConfig
 from synadia_ai.agents import (
+    HEADER_ROOT_ID,
     HEADER_THREAD_ID,
     PROMPT_ENDPOINT_NAME,
     PROMPT_QUEUE_GROUP,
@@ -41,6 +42,7 @@ from synadia_ai.agents import (
     QueryTimeout,
     ResponseChunk,
     StatusChunk,
+    TraceContext,
     decode,
     derive_thread_id,
 )
@@ -116,9 +118,12 @@ class PromptStream:
     per §9.
 
     Also carries the request's observability identity:
-    :attr:`thread_id` is derived from the request's reply subject;
-    :meth:`trace_headers` yields the HTTP headers a harness passes on
-    every outbound model request.
+    :attr:`thread_id` is derived from the request's
+    reply subject, :attr:`root_id` comes from the envelope's optional
+    ``root_id`` field (falling back to :attr:`thread_id` for legacy
+    callers — a provisional root). :meth:`trace_headers` yields the
+    HTTP headers a harness passes on every outbound model request;
+    :meth:`child_trace` supports spawning sub-agents in the same tree.
     """
 
     def __init__(
@@ -127,10 +132,12 @@ class PromptStream:
         nc: NATSClient,
         *,
         reply_subject: str,
+        root_id: str | None = None,
     ) -> None:
         self._request = request
         self._nc = nc
         self._thread_id = derive_thread_id(reply_subject)
+        self._root_id = root_id if root_id is not None else self._thread_id
 
     # --- observability identity ----------------------------------------
 
@@ -139,9 +146,33 @@ class PromptStream:
         """This prompt execution's derived thread id."""
         return self._thread_id
 
+    @property
+    def root_id(self) -> str:
+        """Root thread id of the tree this prompt belongs to."""
+        return self._root_id
+
+    @property
+    def is_root(self) -> bool:
+        """True iff this thread is its tree's root.
+
+        Exact when the caller sent ``root_id`` (any client-SDK caller);
+        provisionally true for legacy callers that sent none.
+        """
+        return self._root_id == self._thread_id
+
+    def _identity_headers(self) -> dict[str, str]:
+        return {
+            HEADER_THREAD_ID: self._thread_id,
+            HEADER_ROOT_ID: self._root_id,
+        }
+
     def trace_headers(self) -> dict[str, str]:
         """Headers for an outbound model request issued by this thread."""
-        return {HEADER_THREAD_ID: self._thread_id}
+        return self._identity_headers()
+
+    def child_trace(self) -> TraceContext:
+        """Trace context to pass to ``Agent.prompt(trace=...)`` when spawning."""
+        return TraceContext(root_id=self._root_id)
 
     async def send(self, chunk: str | Chunk) -> None:
         """Publish one chunk to the caller's reply subject.
@@ -492,6 +523,7 @@ class AgentService:
                 request,
                 self._nc,
                 reply_subject=request._msg.reply,
+                root_id=envelope.root_id,
             )
             handler = self._prompt_handler
             if handler is None:  # pragma: no cover — start() rejects this path

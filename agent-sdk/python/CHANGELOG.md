@@ -11,9 +11,11 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 ### Added
 
 - **Trace propagation** — `PromptStream` now exposes
-  `thread_id` (derived from the request's reply subject) and
-  `trace_headers()` for outbound model requests. Requires
-  `synadia-ai-agents` with `derive_thread_id`.
+  `thread_id` (derived from the request's reply subject), `root_id` /
+  `is_root` (from the envelope's optional `root_id` field),
+  `trace_headers()` for outbound model requests, and `child_trace()`
+  for spawning sub-agents in the same tree. Requires
+  `synadia-ai-agents` with `derive_thread_id` / `TraceContext`.
 
 - **Agent-ladder examples** (`examples/01-echo.py` … `05-tools.py`,
   plus the shared `examples/llm.py` base) — the Python mirror of

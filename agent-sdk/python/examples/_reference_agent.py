@@ -129,6 +129,15 @@ async def main() -> None:
     history: deque[str] = deque(maxlen=HISTORY_CAP)
 
     async def handler(envelope: Envelope, stream: PromptStream) -> None:
+        # Trace identity: thread_id is derived from this request's reply
+        # subject (it matches the id the caller derived); root_id names the
+        # tree the caller placed us in. A fresh prompt is its own root.
+        log.info(
+            "prompt thread=%s root=%s is_root=%s",
+            stream.thread_id,
+            stream.root_id,
+            stream.is_root,
+        )
         prior_turns = list(history)
         history.append(envelope.prompt)
 

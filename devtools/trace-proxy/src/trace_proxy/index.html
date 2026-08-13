@@ -89,10 +89,16 @@
   .tbox .role.assistant { color: var(--ok); }
   .tbox .role.tool { color: var(--warn); }
   .tbox .text { white-space: pre-wrap; overflow-wrap: anywhere; flex: 1; min-width: 0; }
-  .tbox .tres { width: 100%; color: var(--muted); font-size: 12px; overflow-wrap: anywhere;
-                white-space: pre-wrap; }
+  .tbox .tres { color: var(--muted); font-size: 12px; overflow-wrap: anywhere;
+                white-space: pre-wrap; margin-top: 3px; }
+  .tname { color: var(--warn); }
+  .arg { display: flex; gap: 10px; padding: 1px 0; font-size: 12.5px; }
+  .arg .argk { flex: none; min-width: 92px; color: var(--muted);
+               font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px;
+               padding-top: 1px; }
+  .arg .argv { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
   /* Only very long texts get compressed (click the chain to expand). */
-  .chain:not(.expanded) > .tbox > .long {
+  .chain:not(.expanded) > .tbox .long {
     display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
   }
 
@@ -159,14 +165,36 @@ function turnBox(role, text) {
   </div>`;
 }
 
+// Tool arguments are a JSON string; render them as key/value rows
+// rather than dumping the raw JSON. Falls back to the raw text when it
+// doesn't parse (non-JSON tools, or server-side clipping cut it short).
+function argRows(argsStr) {
+  if (!argsStr) return "";
+  try {
+    const parsed = JSON.parse(argsStr);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return Object.entries(parsed).map(([k, v]) => {
+        const text = typeof v === "string" ? v : JSON.stringify(v);
+        return `<div class="arg">
+          <span class="argk">${esc(k)}</span>
+          <span class="argv${longCls(text)}">${esc(text)}</span>
+        </div>`;
+      }).join("");
+    }
+  } catch { /* not parseable — show as-is below */ }
+  return `<div class="arg"><span class="argv mono${longCls(argsStr)}">${esc(argsStr)}</span></div>`;
+}
+
 function toolBox(call, result) {
-  const head = `${call.name}(${call.arguments})`;
   return `<div class="tbox tool">
     <span class="role tool">tool</span>
-    <span class="text mono${longCls(head)}">${esc(head)}</span>
-    ${result && result.text
-      ? `<span class="tres${longCls(result.text)}">→ ${esc(result.text)}</span>`
-      : ""}
+    <div class="text">
+      <div class="mono tname">${esc(call.name)}</div>
+      ${argRows(call.arguments)}
+      ${result && result.text
+        ? `<div class="tres${longCls(result.text)}">→ ${esc(result.text)}</div>`
+        : ""}
+    </div>
   </div>`;
 }
 

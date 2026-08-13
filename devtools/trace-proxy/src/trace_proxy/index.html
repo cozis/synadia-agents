@@ -89,9 +89,11 @@
   .tbox .role.assistant { color: var(--ok); }
   .tbox .role.tool { color: var(--warn); }
   .tbox .text { white-space: pre-wrap; overflow-wrap: anywhere; flex: 1; min-width: 0; }
+  /* Tool-card container: normal whitespace (block children, no prose). */
+  .tbox .tdetail { flex: 1; min-width: 0; }
   .tbox .tres { color: var(--muted); font-size: 12px; overflow-wrap: anywhere;
                 white-space: pre-wrap; margin-top: 3px; }
-  .tname { color: var(--warn); }
+  .tname { color: var(--warn); margin-bottom: 2px; }
   .arg { display: flex; gap: 10px; padding: 1px 0; font-size: 12.5px; }
   .arg .argk { flex: none; min-width: 92px; color: var(--muted);
                font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px;
@@ -188,7 +190,7 @@ function argRows(argsStr) {
 function toolBox(call, result) {
   return `<div class="tbox tool">
     <span class="role tool">tool</span>
-    <div class="text">
+    <div class="tdetail">
       <div class="mono tname">${esc(call.name)}</div>
       ${argRows(call.arguments)}
       ${result && result.text

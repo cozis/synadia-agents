@@ -10,10 +10,11 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Added
 
-- **Trace propagation** — `derive_thread_id()`; optional
-  `Envelope.root_id` field (§5.6-tolerated, omitted when unset);
-  `Agent.prompt()` now returns a `PromptHandle` (drop-in async
-  iterator) exposing `thread_id` for parent-side edge reporting.
+- **Trace propagation** — `derive_thread_id()` +
+  `TraceContext`; optional `Envelope.root_id` field (§5.6-tolerated,
+  omitted when unset); `Agent.prompt(trace=...)` now returns a
+  `PromptHandle` (drop-in async iterator) exposing `thread_id` /
+  `root_id` for parent-side edge reporting.
 
 ## [0.7.1] - 2026-05-12
 

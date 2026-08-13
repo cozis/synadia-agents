@@ -76,8 +76,10 @@ from .heartbeat import (
 from .messages import Chunk, QueryChunk, ResponseChunk, StatusChunk
 from .subjects import AgentSubject
 from .trace import (
+    HEADER_ROOT_ID,
     HEADER_THREAD_ID,
     THREAD_ID_HEX_LEN,
+    TraceContext,
     derive_thread_id,
 )
 
@@ -87,6 +89,7 @@ __all__ = [
     "DEFAULT_LIVENESS_SLACK",
     "DEFAULT_PROMPT_MAX_WAIT_S",
     "DEFAULT_STREAM_INACTIVITY_TIMEOUT_S",
+    "HEADER_ROOT_ID",
     "HEADER_THREAD_ID",
     "HEARTBEAT_SUBJECT",
     "PROMPT_ENDPOINT_NAME",
@@ -124,6 +127,7 @@ __all__ = [
     "StreamMaxWaitExceededError",
     "StreamMessage",
     "StreamStalledError",
+    "TraceContext",
     "ValidationError",
     "build_agent_info",
     "decode",

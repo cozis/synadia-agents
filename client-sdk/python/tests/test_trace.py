@@ -1,10 +1,10 @@
 """Unit tests for the trace primitives.
 
-Covers the normative thread-id derivation and the optional ``root_id``
-envelope field (wire round-trip + legacy compatibility). The end-to-end
-path (handle thread_id matching the agent-side derivation over a real
-broker) is exercised by the agent-sdk's e2e suite, which owns the
-server-side half.
+Covers the normative thread-id derivation, the optional ``root_id``
+envelope field (wire round-trip + legacy compatibility), and the
+``TraceContext`` shape. The end-to-end path (handle thread_id matching
+the agent-side derivation over a real broker) is exercised by the
+agent-sdk's e2e suite, which owns the server-side half.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import json
 from synadia_ai.agents import (
     THREAD_ID_HEX_LEN,
     Envelope,
+    TraceContext,
     decode,
     derive_thread_id,
     encode,
@@ -55,3 +56,9 @@ class TestEnvelopeRootId:
 
     def test_plain_text_shorthand_decodes_to_none(self) -> None:
         assert decode(b"just text").root_id is None
+
+
+class TestTraceContext:
+    def test_frozen_carrier(self) -> None:
+        ctx = TraceContext(root_id="b" * 16)
+        assert ctx.root_id == "b" * 16

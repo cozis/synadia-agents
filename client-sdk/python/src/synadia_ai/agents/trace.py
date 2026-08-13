@@ -18,6 +18,7 @@ of its own reply subject.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 
 # Length (hex chars) of derived thread ids. 16 hex chars = 64 bits —
 # collision-safe for observability purposes and short enough to eyeball
@@ -29,6 +30,7 @@ THREAD_ID_HEX_LEN = 16
 # byte-for-byte, so they live here (the shared-primitives home) rather
 # than as literals at the emission sites.
 HEADER_THREAD_ID = "x-agent-thread-id"
+HEADER_ROOT_ID = "x-agent-root-id"
 
 
 def derive_thread_id(reply_subject: str) -> str:
@@ -40,3 +42,16 @@ def derive_thread_id(reply_subject: str) -> str:
     string as UTF-8 — e.g. ``_INBOX.agents.<mux>.<token>``.
     """
     return hashlib.sha256(reply_subject.encode("utf-8")).hexdigest()[:THREAD_ID_HEX_LEN]
+
+
+@dataclass(frozen=True, slots=True)
+class TraceContext:
+    """Trace identity forwarded from a parent thread to a spawned prompt.
+
+    Produced agent-side (``PromptStream.child_trace()``) and passed to
+    :meth:`Agent.prompt(trace=...) <synadia_ai.agents.Agent.prompt>` when
+    an agent spawns a sub-agent. Carries only what the child cannot
+    derive itself.
+    """
+
+    root_id: str

@@ -20,6 +20,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   the `TraceContext` a handler passes to `Agent.prompt(..., { trace })`
   when spawning a sub-agent. A malformed `root_id` never reaches the
   handler: the shared envelope codec 400s it at decode.
+- **Two-channel spawn edges** — `PromptResponse.recordSpawn()` registers a
+  parent→child edge and returns the headers for the spawn-time idempotent
+  marker request (`x-synadia-event: spawn`), fired through any provider
+  client as fire-and-forget telemetry; `traceHeaders()` is the redundant
+  completion-report channel — the packed `x-synadia-trace` pair plus the
+  drained `x-synadia-spawned` entries — for the parent's next model
+  request. Tool ids default from the ambient `toolScope()`.
 
 ### Changed
 

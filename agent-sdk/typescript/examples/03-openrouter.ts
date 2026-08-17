@@ -29,12 +29,16 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
  * fragment at `choices[0].delta.content`. As in `02-ollama.ts`, a network read
  * may split mid-line, so we keep the trailing partial in `buffer`.
  */
-async function* openRouterTokens(prompt: string): AsyncGenerator<string> {
+async function* openRouterTokens(
+  prompt: string,
+  headers?: Record<string, string>,
+): AsyncGenerator<string> {
   const res = await fetch(OPENROUTER_URL, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${API_KEY}`,
       "Content-Type": "application/json",
+      ...headers,
     },
     body: JSON.stringify({
       model: MODEL,
@@ -105,7 +109,7 @@ async function main(): Promise<void> {
   // Same handler shape as the echo agent: instead of one reply, we `send(...)`
   // each token as OpenRouter emits it. The SDK closes the stream when we return.
   service.onPrompt(async (envelope, response) => {
-    for await (const token of openRouterTokens(envelope.prompt)) {
+    for await (const token of openRouterTokens(envelope.prompt, response.traceHeaders())) {
       await response.send(token);
     }
   });

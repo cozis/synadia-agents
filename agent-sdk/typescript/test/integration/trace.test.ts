@@ -58,12 +58,26 @@ describe.skipIf(!natsUrl)("trace propagation — derived thread ids", () => {
   }
 
   it("both ends derive the same thread id, and root forwarding works", async () => {
-    const recorded: { threadId: string; rootId: string; isRoot: boolean }[] = [];
+    const recorded: {
+      threadId: string;
+      rootId: string;
+      isRoot: boolean;
+      marker: Record<string, string>;
+      headersFirst: Record<string, string>;
+      headersSecond: Record<string, string>;
+    }[] = [];
     await startService("identity", async (_envelope, response) => {
+      const marker = response.recordSpawn("cafebabe00000000", {
+        toolCallId: "toolu_test",
+        edgeType: "tool_call",
+      });
       recorded.push({
         threadId: response.threadId,
         rootId: response.rootId,
         isRoot: response.isRoot,
+        marker,
+        headersFirst: response.traceHeaders(),
+        headersSecond: response.traceHeaders(), // spawn entry must have drained
       });
       await response.send("ok");
     });
@@ -95,6 +109,17 @@ describe.skipIf(!natsUrl)("trace propagation — derived thread ids", () => {
     expect(childObs.rootId).toBe(rootObs.rootId);
     expect(child.rootId).toBe(rootObs.rootId);
     expect(childObs.isRoot).toBe(false);
+
+    // --- header shapes: marker + completion-report drain semantics.
+    for (const obs of [rootObs, childObs]) {
+      const expectedTrace = `${obs.rootId}:${obs.threadId}`;
+      expect(obs.marker["x-synadia-event"]).toBe("spawn");
+      expect(obs.marker["x-synadia-trace"]).toBe(expectedTrace);
+      expect(obs.marker["x-synadia-spawned"]).toBe("cafebabe00000000:toolu_test:tool_call");
+      expect(obs.headersFirst["x-synadia-spawned"]).toBe(obs.marker["x-synadia-spawned"]);
+      expect(obs.headersFirst["x-synadia-trace"]).toBe(expectedTrace);
+      expect(obs.headersSecond["x-synadia-spawned"]).toBeUndefined();
+    }
   });
 
   it("rejects a hostile root_id at decode with a 400, before the handler runs", async () => {

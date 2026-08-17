@@ -53,8 +53,13 @@ async function main(): Promise<void> {
   // Wrap the prompt as a single user message and stream the model's reply. A
   // tool-calling agent (see 05-tools.ts) extends this same pattern — adding a
   // non-streamed round-trip for tool dispatch before the final streamed answer.
+  // Every outbound model request carries the thread's trace headers so an
+  // observing proxy can correlate it.
   service.onPrompt(async (envelope, response) => {
-    for await (const token of llm.chatStream([{ role: "user", content: envelope.prompt }])) {
+    for await (const token of llm.chatStream(
+      [{ role: "user", content: envelope.prompt }],
+      response.traceHeaders(),
+    )) {
       await response.send(token);
     }
   });

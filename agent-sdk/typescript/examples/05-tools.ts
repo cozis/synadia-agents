@@ -122,10 +122,13 @@ interface ChatMessage {
 
 // One non-streamed turn — used for the tool-decision round, where we want a
 // clean `tool_calls` array back rather than a token stream.
-async function chat(messages: ChatMessage[]): Promise<ChatMessage> {
+async function chat(
+  messages: ChatMessage[],
+  headers?: Record<string, string>,
+): Promise<ChatMessage> {
   const res = await fetch(`${OLLAMA_URL}/api/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify({ model: MODEL, messages, tools: TOOLS, stream: false }),
   });
   if (!res.ok) throw new Error(`Ollama chat failed: ${res.status} ${res.statusText}`);
@@ -135,10 +138,13 @@ async function chat(messages: ChatMessage[]): Promise<ChatMessage> {
 // Final turn — stream the model's answer token by token (same NDJSON parsing
 // as 02-ollama, but `/api/chat` carries each token at `message.content`). No
 // tools here: the model has its data and just needs to answer.
-async function* chatStream(messages: ChatMessage[]): AsyncGenerator<string> {
+async function* chatStream(
+  messages: ChatMessage[],
+  headers?: Record<string, string>,
+): AsyncGenerator<string> {
   const res = await fetch(`${OLLAMA_URL}/api/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify({ model: MODEL, messages, stream: true }),
   });
   if (!res.ok || res.body === null) {
@@ -201,7 +207,9 @@ async function main(): Promise<void> {
     const messages: ChatMessage[] = [{ role: "user", content: envelope.prompt }];
 
     // Round 1 — does the model want a tool? (non-streamed, for clean tool_calls)
-    const decision = await chat(messages);
+    // Every outbound model request carries the thread's trace headers so an
+    // observing proxy can correlate it.
+    const decision = await chat(messages, response.traceHeaders());
     messages.push(decision);
 
     // Run whatever tools the model asked for, appending each result to the
@@ -224,7 +232,7 @@ async function main(): Promise<void> {
     }
 
     // Round 2 — the model now has the sensor reading; stream its final answer.
-    for await (const token of chatStream(messages)) {
+    for await (const token of chatStream(messages, response.traceHeaders())) {
       await response.send(token);
     }
   });

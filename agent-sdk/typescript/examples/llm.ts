@@ -16,8 +16,10 @@ export interface ChatMessage {
 export interface LlmClient {
   /** Human-readable "backend/model", handy for logging. */
   readonly label: string;
-  /** Stream the assistant's reply to `messages`, yielding text as it arrives. */
-  chatStream(messages: ChatMessage[]): AsyncGenerator<string>;
+  /** Stream the assistant's reply to `messages`, yielding text as it arrives.
+   * `headers` carries the agent's trace identity (`response.traceHeaders()`)
+   * so an observing proxy can correlate the request to its prompt thread. */
+  chatStream(messages: ChatMessage[], headers?: Record<string, string>): AsyncGenerator<string>;
 }
 
 /** Pick a backend from the environment: OpenRouter if a key is present, else Ollama. */
@@ -32,10 +34,10 @@ function ollama(): LlmClient {
   const model = process.env["OLLAMA_MODEL"] ?? "llama3.2";
   return {
     label: `ollama/${model}`,
-    async *chatStream(messages) {
+    async *chatStream(messages, headers) {
       const res = await fetch(`${url}/api/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...headers },
         body: JSON.stringify({ model, messages, stream: true }),
       });
       if (!res.ok || res.body === null) {
@@ -70,12 +72,13 @@ function openRouter(apiKey: string): LlmClient {
   const model = process.env["OPENROUTER_MODEL"] ?? "openai/gpt-4o-mini";
   return {
     label: `openrouter/${model}`,
-    async *chatStream(messages) {
+    async *chatStream(messages, headers) {
       const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
+          ...headers,
         },
         body: JSON.stringify({ model, messages, stream: true }),
       });

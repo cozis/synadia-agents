@@ -38,10 +38,13 @@ const OLLAMA_URL = process.env["OLLAMA_URL"] ?? "http://localhost:11434";
  * body as a stream and re-assemble lines as they trickle in, so tokens flow
  * out the moment the model produces them (same parsing as `03-openrouter.ts`).
  */
-async function* ollamaTokens(prompt: string): AsyncGenerator<string> {
+async function* ollamaTokens(
+  prompt: string,
+  headers?: Record<string, string>,
+): AsyncGenerator<string> {
   const res = await fetch(`${OLLAMA_URL}/v1/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify({
       model: MODEL,
       messages: [{ role: "user", content: prompt }],
@@ -106,8 +109,10 @@ async function main(): Promise<void> {
 
   // Same handler shape as the echo agent: instead of one reply, we `send(...)`
   // each token as Ollama emits it. The SDK closes the stream when we return.
+  // Every outbound model request carries the thread's trace headers so an
+  // observing proxy can correlate it.
   service.onPrompt(async (envelope, response) => {
-    for await (const token of ollamaTokens(envelope.prompt)) {
+    for await (const token of ollamaTokens(envelope.prompt, response.traceHeaders())) {
       await response.send(token);
     }
   });

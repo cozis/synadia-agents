@@ -35,8 +35,12 @@ import { Svcm, type Service, type ServiceHandler, type ServiceMsg } from "@nats-
 
 import {
   AgentSubject,
+  HEADER_EVENT,
+  HEADER_SPAWNED,
+  HEADER_TRACE,
   decodeEnvelope,
   encodeBase64,
+  formatSpawnEntry,
   formatHumanBytes,
   newInbox,
   parseHumanBytes,
@@ -185,6 +189,35 @@ export type PromptHandler = (
   response: PromptResponse,
 ) => Promise<void> | void;
 
+/** A thread's spawn-edge recorder + completion-report buffer. */
+class SpawnLedger {
+  readonly threadId: string;
+  readonly rootId: string;
+  #entries = new Set<string>(); // insertion-ordered, idempotent inserts
+
+  constructor(threadId: string, rootId: string) {
+    this.threadId = threadId;
+    this.rootId = rootId;
+  }
+
+  /** Record one spawn edge; returns its spawn-marker headers. */
+  record(childThreadId: string, toolCallId?: string, edgeType?: string): Record<string, string> {
+    const entry = formatSpawnEntry(childThreadId, toolCallId, edgeType);
+    this.#entries.add(entry);
+    return {
+      [HEADER_EVENT]: "spawn",
+      [HEADER_TRACE]: `${this.rootId}:${this.threadId}`,
+      [HEADER_SPAWNED]: entry,
+    };
+  }
+
+  drain(): string[] {
+    const entries = [...this.#entries];
+    this.#entries.clear();
+    return entries;
+  }
+}
+
 /** A "non-empty subset of `crypto.randomUUID()`-style tokens" — used for query ids. */
 function randomId(): string {
   return crypto.randomUUID().replace(/-/g, "");
@@ -208,6 +241,7 @@ export class PromptResponse {
 
   readonly #msg: ServiceMsg;
   readonly #nc: NatsConnection;
+  readonly #ledger: SpawnLedger;
 
   constructor(msg: ServiceMsg, nc: NatsConnection, rootId?: string) {
     this.#msg = msg;
@@ -216,6 +250,38 @@ export class PromptResponse {
     // shape-valid id rather than the constant sha256("") hash.
     this.threadId = msg.reply ? deriveThreadId(msg.reply) : randomThreadId();
     this.rootId = rootId ?? this.threadId;
+    // Edges recorded via recordSpawn(), drained by the next
+    // traceHeaders() call (the parent's next model request).
+    this.#ledger = new SpawnLedger(this.threadId, this.rootId);
+  }
+
+  /** Headers for an outbound model request issued by this thread: the
+   * packed `x-synadia-trace` pair plus any spawn edges recorded since the
+   * previous call (drained — the marker channel provides the redundant
+   * delivery). */
+  traceHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+      [HEADER_TRACE]: `${this.rootId}:${this.threadId}`,
+    };
+    const entries = this.#ledger.drain();
+    if (entries.length > 0) headers[HEADER_SPAWNED] = entries.join(",");
+    return headers;
+  }
+
+  /**
+   * Record a spawned child thread; returns spawn-marker headers.
+   *
+   * The edge reaches the proxy on two channels: the returned marker
+   * headers (fire through any provider client as fire-and-forget
+   * idempotent telemetry; the proxy consumes them without forwarding)
+   * and the next {@link traceHeaders} drain. Defaults follow
+   * `formatSpawnEntry`.
+   */
+  recordSpawn(
+    childThreadId: string,
+    opts: { readonly toolCallId?: string; readonly edgeType?: string } = {},
+  ): Record<string, string> {
+    return this.#ledger.record(childThreadId, opts.toolCallId, opts.edgeType);
   }
 
   /** True iff this thread is its tree's root (provisionally true for

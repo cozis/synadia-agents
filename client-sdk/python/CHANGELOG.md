@@ -10,9 +10,18 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Added
 
-- **Trace propagation** — `derive_thread_id()`; `Agent.prompt()` now
-  returns a `PromptHandle` (drop-in async iterator) exposing
-  `thread_id` for parent-side edge reporting.
+- **Trace propagation** — `derive_thread_id()` +
+  `TraceContext`; optional `Envelope.root_id` field (§5.6-tolerated,
+  omitted when unset); `Agent.prompt(trace=...)` now returns a
+  `PromptHandle` (drop-in async iterator) exposing `thread_id` /
+  `root_id` for parent-side edge reporting.
+- **`root_id` shape validation** — `Envelope.root_id` is validated to
+  the normative 16-lowercase-hex derived-thread-id shape at decode and
+  construction (new `is_thread_id()` helper, exported). The value
+  arrives from arbitrary NATS callers and is emitted into HTTP header
+  values agent-side, so out-of-shape values (CRLF injection, oversized
+  strings, non-latin-1) are rejected as malformed envelopes instead of
+  reaching headers.
 - **`random_thread_id()`** — a random id with the normative thread-id
   shape, for threads that have no reply subject to derive from (the
   agent-sdk uses it for reply-less fire-and-forget prompts so they

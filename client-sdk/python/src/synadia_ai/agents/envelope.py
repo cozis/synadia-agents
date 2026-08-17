@@ -26,9 +26,10 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from .errors import ProtocolError
+from .trace import THREAD_ID_HEX_LEN, is_thread_id
 
 
 class Attachment(BaseModel):
@@ -80,6 +81,25 @@ class Envelope(BaseModel):
 
     prompt: str
     attachments: list[Attachment] | None = None
+    # Observability: thread_id of the tree's ROOT thread — always the
+    # derived hash, never a raw inbox subject (see trace.py). None for
+    # legacy callers and omitted from the wire, keeping the compact
+    # §5.1 form.
+    root_id: str | None = None
+
+    @field_validator("root_id")
+    @classmethod
+    def _root_id_has_thread_id_shape(cls, value: str | None) -> str | None:
+        # Security boundary, not a style check — root_id arrives from
+        # arbitrary NATS callers and flows into HTTP header values
+        # agent-side (CRLF injection), so it must die here, at the one
+        # decode chokepoint both sides share.
+        if value is None or is_thread_id(value):
+            return value
+        raise ValueError(
+            f"root_id must be {THREAD_ID_HEX_LEN} lowercase hex chars "
+            f"(a derived thread id, see derive_thread_id()); got {value!r:.60}"
+        )
 
 
 def encode(envelope: Envelope) -> bytes:

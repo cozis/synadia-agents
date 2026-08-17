@@ -46,10 +46,10 @@ async def main() -> None:
         agent = found[0]
         handle = agent.prompt(args.text)
         # The prompt's observability identity is known before the first
-        # chunk arrives: the thread id derives from the reply inbox. A
-        # tracing harness reports this id to its observing proxy; here we
-        # just show it (stderr, so piped stdout stays clean).
-        print(f"thread {handle.thread_id}", file=sys.stderr)
+        # chunk: the thread id derives from the reply inbox, and root_id
+        # names the tree this prompt joined (== thread_id here — a fresh
+        # prompt roots its own tree). Shown on stderr to keep stdout clean.
+        print(f"thread {handle.thread_id} (root {handle.root_id})", file=sys.stderr)
         async for msg in handle:
             if isinstance(msg, ResponseChunk):
                 sys.stdout.write(msg.text)

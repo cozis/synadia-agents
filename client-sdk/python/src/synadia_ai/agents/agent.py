@@ -28,7 +28,7 @@ from .errors import (
     StreamStalledError,
 )
 from .messages import QueryChunk, ResponseChunk, StatusChunk, decode_chunk
-from .trace import derive_thread_id
+from .trace import TraceContext, derive_thread_id
 from .validation import (
     assert_attachments_allowed,
     assert_prompt_non_empty,
@@ -97,9 +97,9 @@ StreamMessage: TypeAlias = ResponseChunk | StatusChunk | Query
 class PromptHandle:
     """The value returned by :meth:`Agent.prompt` — a drop-in async iterator
     that also exposes the prompt's observability identity:
-    :attr:`thread_id`, derived from the stream's reply subject and known
-    before the first chunk — the request is still published lazily on
-    first iteration.
+    :attr:`thread_id` and :attr:`root_id` (== ``thread_id`` when this
+    prompt rooted a new tree). Both known before the first chunk — the
+    request is still published lazily on first iteration.
     """
 
     def __init__(
@@ -107,9 +107,11 @@ class PromptHandle:
         stream: AsyncGenerator[StreamMessage, None],
         *,
         thread_id: str,
+        root_id: str,
     ) -> None:
         self._stream = stream
         self.thread_id = thread_id
+        self.root_id = root_id
 
     def __aiter__(self) -> PromptHandle:
         return self
@@ -234,12 +236,19 @@ class Agent:
         attachments: list[Attachment] | None = None,
         timeout: float | None = None,
         max_wait_s: float | None = None,
+        trace: TraceContext | None = None,
     ) -> PromptHandle:
         """Send a prompt and return a :class:`PromptHandle` (async iterator).
 
         ``text`` is either a bare string or a fully-constructed
         :class:`Envelope`. ``attachments``, when provided, are attached to
         the envelope (per §5.1).
+
+        ``trace`` forwards a parent thread's
+        :class:`TraceContext` when an agent spawns a sub-agent — the
+        child joins the parent's tree instead of rooting a new one.
+        Precedence: explicit ``root_id`` on a caller-constructed
+        :class:`Envelope` > ``trace=`` > new tree rooted at this prompt.
 
         Under v0.3 the session is the 5th subject token, not a kwarg —
         callers pick a session by discovering the agent whose
@@ -311,6 +320,15 @@ class Agent:
         token = mux.mint_token()
         thread_id = derive_thread_id(mux.reply_subject_for(token))
 
+        # Root resolution: explicit envelope field > explicit trace= > new tree.
+        explicit_root = text.root_id if isinstance(text, Envelope) else None
+        if explicit_root is not None:
+            root_id = explicit_root
+        elif trace is not None:
+            root_id = trace.root_id
+        else:
+            root_id = thread_id  # this prompt starts a new tree
+
         if isinstance(text, Envelope):
             merged_attachments: list[Attachment] | None
             if attachments:
@@ -321,11 +339,13 @@ class Agent:
             envelope = Envelope(
                 prompt=text.prompt,
                 attachments=merged_attachments,
+                root_id=root_id,
             )
         else:
             envelope = Envelope(
                 prompt=text,
                 attachments=list(attachments) if attachments else None,
+                root_id=root_id,
             )
 
         # §5.4: local validation happens synchronously BEFORE any wire I/O.
@@ -346,6 +366,7 @@ class Agent:
         return PromptHandle(
             self._stream_prompt(mux, token, encoded, effective_timeout, effective_max_wait),
             thread_id=thread_id,
+            root_id=root_id,
         )
 
     async def _wait_for_chunk(

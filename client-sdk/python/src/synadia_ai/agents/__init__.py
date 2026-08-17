@@ -77,6 +77,7 @@ from .messages import Chunk, QueryChunk, ResponseChunk, StatusChunk
 from .subjects import AgentSubject
 from .trace import (
     THREAD_ID_HEX_LEN,
+    TraceContext,
     derive_thread_id,
     is_thread_id,
     random_thread_id,
@@ -124,6 +125,7 @@ __all__ = [
     "StreamMaxWaitExceededError",
     "StreamMessage",
     "StreamStalledError",
+    "TraceContext",
     "ValidationError",
     "build_agent_info",
     "decode",

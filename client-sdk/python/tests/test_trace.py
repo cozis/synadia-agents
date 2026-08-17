@@ -1,17 +1,28 @@
 """Unit tests for the trace primitives.
 
-Covers the normative thread-id derivation. The end-to-end path (handle
-thread_id matching the agent-side derivation over a real broker) is
-exercised by the agent-sdk's e2e suite, which owns the server-side half.
+Covers the normative thread-id derivation, the optional ``root_id``
+envelope field (wire round-trip + legacy compatibility), and the
+``TraceContext`` shape. The end-to-end path (handle thread_id matching
+the agent-side derivation over a real broker) is exercised by the
+agent-sdk's e2e suite, which owns the server-side half.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+
+import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from synadia_ai.agents import (
     THREAD_ID_HEX_LEN,
+    Envelope,
+    ProtocolError,
+    TraceContext,
+    decode,
     derive_thread_id,
+    encode,
     is_thread_id,
     random_thread_id,
 )
@@ -38,3 +49,55 @@ class TestDeriveThreadId:
         assert is_thread_id(a)
         assert is_thread_id(b)
         assert a != b
+
+
+class TestEnvelopeRootId:
+    def test_round_trip(self) -> None:
+        env = Envelope(prompt="hi", root_id="a" * 16)
+        wire = encode(env)
+        assert json.loads(wire)["root_id"] == "a" * 16
+        assert decode(wire).root_id == "a" * 16
+
+    def test_omitted_from_wire_when_none(self) -> None:
+        wire = encode(Envelope(prompt="hi"))
+        assert "root_id" not in json.loads(wire)
+
+    def test_legacy_payload_decodes_to_none(self) -> None:
+        # A pre-trace caller's payload — no root_id field at all.
+        assert decode(b'{"prompt": "hi"}').root_id is None
+
+    def test_plain_text_shorthand_decodes_to_none(self) -> None:
+        assert decode(b"just text").root_id is None
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "x\r\nx-evil: 1",  # CRLF header injection
+            "a" * 15,  # too short
+            "a" * 17,  # too long
+            "A" * 16,  # uppercase
+            "g" * 16,  # non-hex
+            "é" * 16,  # non-latin-1
+            "",  # empty
+        ],
+    )
+    def test_malformed_root_id_rejected_at_decode(self, bad: str) -> None:
+        # Security boundary: root_id reaches HTTP header values agent-side,
+        # so anything outside the 16-lowercase-hex shape must 400 at decode.
+        payload = json.dumps({"prompt": "hi", "root_id": bad}).encode()
+        with pytest.raises(ProtocolError, match="root_id"):
+            decode(payload)
+
+    def test_malformed_root_id_rejected_at_construction(self) -> None:
+        with pytest.raises(PydanticValidationError, match="root_id"):
+            Envelope(prompt="hi", root_id="not-a-thread-id")
+
+    def test_is_thread_id_accepts_derived_ids(self) -> None:
+        assert is_thread_id(derive_thread_id("_INBOX.agents.m.t1"))
+        assert not is_thread_id("A" * 16)
+
+
+class TestTraceContext:
+    def test_frozen_carrier(self) -> None:
+        ctx = TraceContext(root_id="b" * 16)
+        assert ctx.root_id == "b" * 16

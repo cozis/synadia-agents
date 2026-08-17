@@ -17,7 +17,7 @@ import {
   assertWithinMaxPayload,
 } from "./prompt/validate.js";
 import { PromptStream } from "./stream/prompt-stream.js";
-import { deriveThreadId } from "./trace.js";
+import { activeTrace, deriveThreadId } from "./trace.js";
 
 export class Agent {
   // Identity from $SRV.INFO metadata — always populated.
@@ -126,7 +126,24 @@ export class Agent {
     const mux = muxFor(this.#nc);
     const token = mux.mintToken();
     const threadId = deriveThreadId(mux.replySubjectFor(token));
-    const rootId = explicitRoot ?? opts.trace?.rootId ?? threadId;
+    // Root resolution: explicit envelope field > explicit trace > ambient
+    // ActiveTrace > new tree. `ambient` survives iff the spawn joins the
+    // ambient tree: a forwarded envelope naming the ambient root keeps its
+    // edge, a foreign root records none, and trace is the explicit
+    // manual-mode opt-out.
+    let ambient = activeTrace();
+    let rootId: string;
+    if (explicitRoot !== undefined) {
+      rootId = explicitRoot;
+      if (ambient !== undefined && ambient.rootId !== explicitRoot) ambient = undefined;
+    } else if (opts.trace !== undefined) {
+      rootId = opts.trace.rootId;
+      ambient = undefined;
+    } else if (ambient !== undefined) {
+      rootId = ambient.rootId;
+    } else {
+      rootId = threadId; // this prompt starts a new tree
+    }
     const envelope: RequestEnvelope = { ...base, rootId };
     // §5.4: local validation happens synchronously BEFORE any wire I/O. The
     // caller's own broker may enforce a smaller max_payload than the agent
@@ -136,6 +153,11 @@ export class Agent {
       this.promptEndpoint,
       this.#nc.info?.max_payload,
     );
+    // Auto-record the ambient spawn edge only after §5.4 validation — a
+    // prompt that never publishes must not leave a phantom edge. Recorded
+    // before iteration though: a never-iterated stream leaves a stale
+    // claim (accepted — edges are fail-open telemetry).
+    const spawnMarkerHeaders = ambient?.recordSpawn?.(threadId);
     return new PromptStream({
       nc: this.#nc,
       mux,
@@ -147,6 +169,7 @@ export class Agent {
       signal,
       threadId,
       rootId,
+      spawnMarkerHeaders,
     });
   }
 }

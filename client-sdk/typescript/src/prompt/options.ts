@@ -20,9 +20,10 @@ export interface PromptOptions {
   /** `AbortSignal` that aborts the stream when triggered (added in M5). */
   readonly signal?: AbortSignal;
   /**
-   * Forward a parent thread's trace identity so this prompt joins the
-   * parent's tree instead of rooting a new one. Root precedence: envelope
-   * `rootId` > `trace` > new tree rooted at this prompt.
+   * Explicitly forward a parent thread's trace identity; inside a prompt
+   * handler the ambient `ActiveTrace` is consumed instead and the spawn
+   * edge is auto-recorded. Root precedence: envelope `rootId` > `trace` >
+   * ambient > new tree rooted at this prompt.
    */
   readonly trace?: TraceContext;
 }

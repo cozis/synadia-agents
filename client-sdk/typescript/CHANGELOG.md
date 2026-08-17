@@ -43,6 +43,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   set included), an empty tool id means "no tool", and the edge type
   defaults honestly (`tool_call` iff a tool id resolved, else
   `programmatic`).
+- **Implicit spawn recording** — `Agent.prompt()` without an explicit
+  `trace` consults the ambient `ActiveTrace`: a spawn from inside a prompt
+  handler joins the parent's tree and records its edge automatically,
+  labeled with the ambient `toolScope` id; the stream then carries
+  `spawnMarkerHeaders` for the spawn-time marker request. The auto-record
+  criterion is "the spawn joins the ambient tree": a forwarded envelope
+  naming the ambient root keeps its edge, a foreign root records nothing
+  (there are no cross-tree edges), and `trace` is the explicit manual-mode
+  opt-out. The edge is recorded only after §5.4 validation.
 
 ### Changed
 

@@ -54,6 +54,7 @@ export interface PromptStreamInit {
   readonly signal?: AbortSignal | undefined;
   readonly threadId: string;
   readonly rootId: string;
+  readonly spawnMarkerHeaders?: Record<string, string> | undefined;
 }
 
 export class PromptStream implements AsyncIterable<StreamMessage> {
@@ -62,6 +63,11 @@ export class PromptStream implements AsyncIterable<StreamMessage> {
 
   /** Root thread id of the tree this prompt joined (== `threadId` when it rooted a new tree). */
   readonly rootId: string;
+
+  /** Headers for the spawn-time marker request, set when the ambient trace
+   * auto-recorded this prompt as a spawn; undefined when there is nothing
+   * to mark. Fire through any provider client as fire-and-forget telemetry. */
+  readonly spawnMarkerHeaders: Record<string, string> | undefined;
 
   readonly #nc: NatsConnection;
   readonly #mux: MuxInbox;
@@ -86,6 +92,7 @@ export class PromptStream implements AsyncIterable<StreamMessage> {
     this.#signal = init.signal;
     this.threadId = init.threadId;
     this.rootId = init.rootId;
+    this.spawnMarkerHeaders = init.spawnMarkerHeaders;
   }
 
   /**

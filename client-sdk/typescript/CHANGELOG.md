@@ -30,6 +30,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   rooted at this prompt. `prompt()` also accepts a decoded
   `RequestEnvelope` (the one-line way for a handler to forward a request,
   attachments and all).
+- **Ambient trace context (AsyncLocalStorage)** — `ActiveTrace` +
+  `bindActiveTrace(trace, fn)` (bound by the agent-sdk around handlers),
+  `toolScope(id, fn)` / `currentToolCallId()`: the Node analogue of the
+  Python SDK's contextvars layer, so correlation can be implicit where
+  threading arguments through is impossible or noisy.
 
 ### Changed
 

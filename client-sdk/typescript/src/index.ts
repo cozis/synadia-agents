@@ -97,9 +97,15 @@ export {
 // Observability trace primitives — normative, mirrored in the Python SDK.
 export {
   THREAD_ID_HEX_LEN,
+  activeTrace,
+  bindActiveTrace,
+  currentToolCallId,
   deriveThreadId,
   isThreadId,
   randomThreadId,
+  toolScope,
+  type ActiveTrace,
+  type SpawnRecorder,
   type TraceContext,
 } from "./trace.js";
 export { type QueryEvent, QueryAlreadyRepliedError } from "./query/query-event.js";

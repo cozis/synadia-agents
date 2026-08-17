@@ -4,7 +4,16 @@
 
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { THREAD_ID_HEX_LEN, deriveThreadId, isThreadId, randomThreadId } from "../../src/index.js";
+import {
+  THREAD_ID_HEX_LEN,
+  activeTrace,
+  bindActiveTrace,
+  currentToolCallId,
+  deriveThreadId,
+  isThreadId,
+  randomThreadId,
+  toolScope,
+} from "../../src/index.js";
 
 describe("deriveThreadId", () => {
   it("matches the normative convention", () => {
@@ -48,5 +57,34 @@ describe("deriveThreadId", () => {
     for (const bad of ["A".repeat(16), "g".repeat(16), "a".repeat(15), "a".repeat(17), ""]) {
       expect(isThreadId(bad)).toBe(false);
     }
+  });
+});
+
+describe("ambient trace context", () => {
+  it("is undefined outside a binding", () => {
+    expect(activeTrace()).toBeUndefined();
+    expect(currentToolCallId()).toBeUndefined();
+  });
+
+  it("binds, nests tool scopes (innermost wins), and resets", () => {
+    bindActiveTrace({ threadId: "p", rootId: "r" }, () => {
+      expect(activeTrace()?.rootId).toBe("r");
+      toolScope("toolu_outer", () => {
+        expect(currentToolCallId()).toBe("toolu_outer");
+        toolScope("toolu_inner", () => {
+          expect(currentToolCallId()).toBe("toolu_inner");
+        });
+        expect(currentToolCallId()).toBe("toolu_outer");
+      });
+      expect(currentToolCallId()).toBeUndefined();
+    });
+    expect(activeTrace()).toBeUndefined();
+  });
+
+  it("flows through awaits inside the bound function", async () => {
+    await bindActiveTrace({ threadId: "p", rootId: "r" }, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(activeTrace()?.threadId).toBe("p");
+    });
   });
 });

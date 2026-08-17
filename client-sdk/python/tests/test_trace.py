@@ -27,6 +27,7 @@ from synadia_ai.agents import (
     decode,
     derive_thread_id,
     encode,
+    format_spawn_entry,
     is_thread_id,
     random_thread_id,
     tool_scope,
@@ -125,3 +126,33 @@ class TestAmbientContext:
                 assert current_tool_call_id() == "toolu_outer"
             assert current_tool_call_id() is None
         assert active_trace() is None
+
+
+class TestFormatSpawnEntry:
+    """The edge policy: ambient tool default + edge-type honesty."""
+
+    def test_explicit_tool_id(self) -> None:
+        assert format_spawn_entry("c1", "toolu_x") == "c1:toolu_x:tool_call"
+
+    def test_ambient_tool_id(self) -> None:
+        with tool_scope("toolu_ambient"):
+            assert format_spawn_entry("c1") == "c1:toolu_ambient:tool_call"
+
+    def test_no_tool_is_programmatic(self) -> None:
+        assert format_spawn_entry("c1") == "c1::programmatic"
+
+    def test_explicit_edge_type_wins(self) -> None:
+        assert format_spawn_entry("c1", None, "handoff") == "c1::handoff"
+
+    def test_empty_tool_id_counts_as_no_tool(self) -> None:
+        # `.get('id','')`-style defaults must not claim a tool edge.
+        assert format_spawn_entry("c1", "") == "c1::programmatic"
+        with tool_scope(""):
+            assert format_spawn_entry("c1") == "c1::programmatic"
+
+    def test_reserved_chars_percent_encoded(self) -> None:
+        # ':' and ',' would corrupt the entry / comma-joined report.
+        assert format_spawn_entry("c1", "a:b,c") == "c1:a%3Ab%2Cc:tool_call"
+
+    def test_plain_provider_ids_pass_through_unchanged(self) -> None:
+        assert format_spawn_entry("c1", "toolu_01AbC") == "c1:toolu_01AbC:tool_call"

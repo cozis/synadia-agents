@@ -13,6 +13,10 @@ It is always the hash — never the raw inbox subject, which would hand
 every descendant the root caller's live reply subject (an injection
 surface). Root test: a thread is root iff its ``root_id`` equals the hash
 of its own reply subject.
+
+Parent/child *edges* are not carried on NATS at all — the parent (the
+only party that knows the spawning tool_call_id) reports them to the
+observing HTTP proxy. See the agent-sdk's ``PromptStream.trace_headers``.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from urllib.parse import quote
 
 # Length (hex chars) of derived thread ids. 16 hex chars = 64 bits —
 # collision-safe for observability purposes and short enough to eyeball
@@ -38,6 +43,13 @@ def is_thread_id(value: str) -> bool:
     return _THREAD_ID_RE.fullmatch(value) is not None
 
 
+# Normative header vocabulary — the TS SDK and any observing proxy must
+# reproduce these byte-for-byte.
+HEADER_TRACE = "x-synadia-trace"  # "<root_id>:<thread_id>"
+HEADER_SPAWNED = "x-synadia-spawned"  # comma-joined spawn entries (format_spawn_entry)
+HEADER_EVENT = "x-synadia-event"  # "spawn" tags the spawn-time marker request
+
+
 def derive_thread_id(reply_subject: str) -> str:
     """Normative: lowercase hex of ``sha256(reply_subject)``, truncated."""
     return hashlib.sha256(reply_subject.encode("utf-8")).hexdigest()[:THREAD_ID_HEX_LEN]
@@ -45,6 +57,25 @@ def derive_thread_id(reply_subject: str) -> str:
 
 def random_thread_id() -> str:
     return secrets.token_hex(THREAD_ID_HEX_LEN // 2)
+
+
+def format_spawn_entry(
+    child_thread_id: str,
+    tool_call_id: str | None = None,
+    edge_type: str | None = None,
+) -> str:
+    """One spawn-edge claim: ``<child>:<tool_call_id>:<edge_type>``. Normative.
+
+    ``tool_call_id`` defaults from the ambient :func:`tool_scope` and empty
+    means "no tool"; ``edge_type`` defaults to ``tool_call``/``programmatic``
+    to match. The tool slot is percent-encoded; consumers ``unquote`` it.
+    """
+    if not tool_call_id:
+        tool_call_id = current_tool_call_id()
+    if edge_type is None:
+        edge_type = "tool_call" if tool_call_id else "programmatic"
+    encoded_tool = quote(tool_call_id, safe="") if tool_call_id else ""
+    return f"{child_thread_id}:{encoded_tool}:{edge_type}"
 
 
 @dataclass(frozen=True, slots=True)

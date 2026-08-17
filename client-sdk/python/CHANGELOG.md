@@ -15,6 +15,12 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
   omitted when unset); `Agent.prompt(trace=...)` now returns a
   `PromptHandle` (drop-in async iterator) exposing `thread_id` /
   `root_id` for parent-side edge reporting.
+- **Packed thread identity** — thread + root ids travel as one
+  `x-synadia-trace: <root_id>:<thread_id>` header (`HEADER_TRACE`);
+  root first, mirroring W3C `traceparent`'s
+  trace-then-parent order, so a root thread is visible in any dump as
+  two equal slots. The packing is delimiter-safe by construction
+  (16-hex slots) — no escaping regime.
 - **`root_id` shape validation** — `Envelope.root_id` is validated to
   the normative 16-lowercase-hex derived-thread-id shape at decode and
   construction (new `is_thread_id()` helper, exported). The value
@@ -26,6 +32,16 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
   shape, for threads that have no reply subject to derive from (the
   agent-sdk uses it for reply-less fire-and-forget prompts so they
   don't collapse onto the constant `sha256("")` hash).
+- **Spawn-entry hardening** — the `tool_call_id` slot of a spawn-edge
+  entry is percent-encoded (RFC 3986, no safe characters), so
+  harness-supplied ids containing `:` or `,` can no longer corrupt the
+  `<child>:<tool>:<type>` encoding or the comma-joined
+  `x-synadia-spawned` report; real provider ids pass through
+  byte-identical, and consumers `unquote` the slot. An empty-string
+  tool id counts as "no tool": the edge is honestly `programmatic`
+  instead of a `tool_call` claim with an empty id slot. Tool ids have
+  no header of their own — they appear only as spawn-edge labels,
+  captured via `tool_scope()`.
 
 ## [0.7.1] - 2026-05-12
 

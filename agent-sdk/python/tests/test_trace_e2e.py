@@ -3,8 +3,8 @@
 Against a real nats-server: registers an agent whose handler records its
 :class:`PromptStream` trace identity, prompts it through the client SDK,
 and asserts the two ends independently derive the same thread id — the
-core zero-wire-surface property of the design — plus root forwarding
-and the root test.
+core zero-wire-surface property of the design — plus root forwarding,
+the root test, and spawn-edge accumulation/drain on ``trace_headers``.
 """
 
 from __future__ import annotations
@@ -63,11 +63,19 @@ async def test_thread_identity_and_root_forwarding(
     recorded: list[dict[str, Any]] = []
 
     async def handler(envelope: Envelope, stream: PromptStream) -> None:
+        marker = stream.record_spawn(
+            "cafebabe00000000", tool_call_id="toolu_test", edge_type="tool_call"
+        )
+        first = stream.trace_headers()
+        second = stream.trace_headers()  # spawn entry must have drained
         recorded.append(
             {
                 "thread_id": stream.thread_id,
                 "root_id": stream.root_id,
                 "is_root": stream.is_root,
+                "marker": marker,
+                "headers_first": first,
+                "headers_second": second,
             }
         )
         await stream.send("ok")
@@ -103,6 +111,18 @@ async def test_thread_identity_and_root_forwarding(
             assert child_obs["thread_id"] != root_obs["thread_id"]
             assert child_obs["root_id"] == parent_root == handle2.root_id
             assert child_obs["is_root"] is False
+
+            # --- header shapes ------------------------------------------
+            for obs in (root_obs, child_obs):
+                marker = obs["marker"]
+                expected_trace = f"{obs['root_id']}:{obs['thread_id']}"
+                assert marker["x-synadia-event"] == "spawn"
+                assert marker["x-synadia-trace"] == expected_trace
+                assert marker["x-synadia-spawned"] == "cafebabe00000000:toolu_test:tool_call"
+                # Completion-report channel: present once, then drained.
+                assert obs["headers_first"]["x-synadia-spawned"] == marker["x-synadia-spawned"]
+                assert obs["headers_first"]["x-synadia-trace"] == expected_trace
+                assert "x-synadia-spawned" not in obs["headers_second"]
 
             evidence.write_json("trace-observations.json", recorded)
     finally:

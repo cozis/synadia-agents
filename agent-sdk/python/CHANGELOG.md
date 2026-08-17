@@ -10,11 +10,24 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Added
 
+- **Trace propagation** — `PromptStream` now exposes
+  `thread_id` (derived from the request's reply subject), `root_id` /
+  `is_root` (from the envelope's optional `root_id` field),
+  `trace_headers()` for outbound model requests,
+  and `record_spawn()` / `child_trace()` for reporting sub-agent
+  spawn edges. Requires `synadia-ai-agents` with `derive_thread_id` /
+  `TraceContext`.
 - **Malformed `root_id` rejected at the boundary** — via the shared
   envelope codec, a request whose `root_id` is not 16 lowercase hex
   chars now gets the §9 `400` error (like any malformed envelope)
   before the handler runs, so caller-controlled bytes can never reach
   the agent's outbound `x-synadia-trace` header.
+- **Empty tool ids count as none** — `record_spawn` with an empty id
+  produces an honest `programmatic` edge (via the shared
+  `format_spawn_entry` policy, whose tool slot is now percent-encoded).
+  Tool ids have no header of their own: `trace_headers()` takes no
+  `tool_call_id` argument — tool attribution exists only as spawn-edge
+  labels, defaulted from the ambient `tool_scope()`.
 - **Reply-less prompts get random thread ids** — a fire-and-forget
   request (raw-NATS publish with no reply subject) previously hashed
   the empty string, collapsing every such request on every agent onto

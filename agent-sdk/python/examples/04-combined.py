@@ -57,8 +57,11 @@ async def main() -> None:
     # Wrap the prompt as a single user message and stream the model's reply. A
     # tool-calling agent (see 05-tools.py) extends this same pattern — adding a
     # non-streamed round-trip for tool dispatch before the final streamed answer.
+    # Every outbound model request carries the thread's trace headers so an
+    # observing proxy can correlate it.
     async def handler(envelope: Envelope, stream: PromptStream) -> None:
-        async for token in llm.chat_stream([{"role": "user", "content": envelope.prompt}]):
+        messages = [{"role": "user", "content": envelope.prompt}]
+        async for token in llm.chat_stream(messages, headers=stream.trace_headers()):
             await stream.send(token)
 
     service.on_prompt(handler)

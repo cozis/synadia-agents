@@ -26,6 +26,9 @@ from typing import TYPE_CHECKING
 from nats.micro import ServiceConfig, add_service
 from nats.micro.service import EndpointConfig
 from synadia_ai.agents import (
+    HEADER_EVENT,
+    HEADER_SPAWNED,
+    HEADER_TRACE,
     PROMPT_ENDPOINT_NAME,
     PROMPT_QUEUE_GROUP,
     SERVICE_NAME,
@@ -43,6 +46,7 @@ from synadia_ai.agents import (
     TraceContext,
     decode,
     derive_thread_id,
+    format_spawn_entry,
     random_thread_id,
 )
 from synadia_ai.agents.messages import encode_chunk
@@ -108,6 +112,37 @@ DEFAULT_ATTACHMENTS_OK = True
 DEFAULT_KEEPALIVE_INTERVAL_S: float = 30.0
 
 
+class _SpawnLedger:
+    """A thread's spawn-edge recorder + completion-report buffer."""
+
+    __slots__ = ("_entries", "root_id", "thread_id")
+
+    def __init__(self, thread_id: str, root_id: str) -> None:
+        self.thread_id = thread_id
+        self.root_id = root_id
+        self._entries: dict[str, None] = {}
+
+    def record(
+        self,
+        child_thread_id: str,
+        tool_call_id: str | None = None,
+        edge_type: str | None = None,
+    ) -> dict[str, str]:
+        """Record one spawn edge; returns its spawn-marker headers."""
+        entry = format_spawn_entry(child_thread_id, tool_call_id, edge_type)
+        self._entries[entry] = None
+        return {
+            HEADER_EVENT: "spawn",
+            HEADER_TRACE: f"{self.root_id}:{self.thread_id}",
+            HEADER_SPAWNED: entry,
+        }
+
+    def drain(self) -> list[str]:
+        entries = list(self._entries)
+        self._entries.clear()
+        return entries
+
+
 class PromptStream:
     """Handle given to a prompt handler for emitting response chunks.
 
@@ -118,7 +153,8 @@ class PromptStream:
 
     Also carries the request's observability identity —
     :attr:`thread_id`, :attr:`root_id`, :attr:`is_root` — plus
-    :meth:`child_trace` for spawning sub-agents in the same tree.
+    :meth:`trace_headers`, :meth:`record_spawn`, and :meth:`child_trace`
+    for edge reporting.
     """
 
     def __init__(
@@ -135,6 +171,9 @@ class PromptStream:
         # shape-valid id rather than the constant sha256("") hash.
         self._thread_id = derive_thread_id(reply_subject) if reply_subject else random_thread_id()
         self._root_id = root_id if root_id is not None else self._thread_id
+        # Edges recorded via record_spawn(), drained by the next
+        # trace_headers() call (the parent's next model request).
+        self._ledger = _SpawnLedger(self._thread_id, self._root_id)
 
     # --- observability identity ----------------------------------------
 
@@ -153,6 +192,33 @@ class PromptStream:
         """True iff this thread is its tree's root (provisionally true
         for legacy callers that sent no ``root_id``)."""
         return self._root_id == self._thread_id
+
+    def trace_headers(self) -> dict[str, str]:
+        """Headers for an outbound model request issued by this thread:
+        the packed ``x-synadia-trace`` pair plus any spawn edges recorded
+        since the previous call (drained — the marker channel provides
+        the redundant delivery)."""
+        headers = {HEADER_TRACE: f"{self._root_id}:{self._thread_id}"}
+        if entries := self._ledger.drain():
+            headers[HEADER_SPAWNED] = ",".join(entries)
+        return headers
+
+    def record_spawn(
+        self,
+        child_thread_id: str,
+        *,
+        tool_call_id: str | None = None,
+        edge_type: str | None = None,
+    ) -> dict[str, str]:
+        """Record a spawned child thread; returns spawn-marker headers.
+
+        The edge reaches the proxy on two channels: the returned marker
+        headers (fire through any provider client as fire-and-forget
+        idempotent telemetry; the proxy consumes them without forwarding)
+        and the next :meth:`trace_headers` drain. Defaults follow
+        :func:`~synadia_ai.agents.format_spawn_entry`.
+        """
+        return self._ledger.record(child_thread_id, tool_call_id, edge_type)
 
     def child_trace(self) -> TraceContext:
         """Trace context to pass to ``Agent.prompt(trace=...)`` when spawning."""

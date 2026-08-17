@@ -13,7 +13,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Trace propagation (thread ids)** — `deriveThreadId()` / `isThreadId()` /
+  `randomThreadId()` / `THREAD_ID_HEX_LEN`: a prompt's thread id is the
+  lowercase sha256 hex of its reply subject truncated to 16 chars, derived
+  independently by both ends (normative; mirrors the Python SDK).
+  `PromptStream` now exposes `threadId`, known before the first chunk.
+
 ### Changed
+
+- **Prompt replies ride an SDK-owned shared mux** (`_INBOX.agents.<nuid>.*`,
+  one wildcard subscription per connection) instead of `nc.requestMany` —
+  whose internally-minted inbox the SDK cannot see. Owning the inbox is what
+  makes the derived thread id knowable before publish; wire economy is
+  unchanged (still one SUB per connection). `PromptStream`'s constructor now
+  takes a single `PromptStreamInit` object (constructed by `Agent.prompt`;
+  not a documented entry point).
 
 - **Missing or unreadable `creds` / `nkey` files now throw a
   `NatsContextError`** (with the original filesystem error as `cause`)

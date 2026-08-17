@@ -9,9 +9,9 @@ export interface PromptOptions {
   /** Per-stream inactivity timeout (§6.6). Default: the `Agents`-level configured value (60_000ms). */
   readonly inactivityTimeoutMs?: number;
   /**
-   * Absolute ceiling for the entire prompt response, in milliseconds. Passed
-   * straight through to `nc.requestMany`'s `maxWait`. The stream throws
-   * `StreamMaxWaitExceededError` if the terminator hasn't arrived by then,
+   * Absolute ceiling for the entire prompt response, in milliseconds. The
+   * stream throws `StreamMaxWaitExceededError` if the terminator hasn't
+   * arrived by then,
    * even if chunks are still trickling under the inactivity gap.
    * Default: {@link DEFAULT_PROMPT_MAX_WAIT_MS} (10 minutes).
    */

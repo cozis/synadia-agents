@@ -7,6 +7,7 @@ import type { NatsConnection } from "@nats-io/nats-core";
 import type { AgentInfo } from "./discovery/agent-info.js";
 import type { EndpointInfo } from "./discovery/endpoint-info.js";
 import { combineAbortSignals } from "./internal/abort.js";
+import { muxFor } from "./internal/mux.js";
 import { normalizeAttachments } from "./prompt/attachments.js";
 import { encodedEnvelopeSize, type RequestEnvelope } from "./prompt/envelope.js";
 import { DEFAULT_PROMPT_MAX_WAIT_MS, type PromptOptions } from "./prompt/options.js";
@@ -16,6 +17,7 @@ import {
   assertWithinMaxPayload,
 } from "./prompt/validate.js";
 import { PromptStream } from "./stream/prompt-stream.js";
+import { deriveThreadId } from "./trace.js";
 
 export class Agent {
   // Identity from $SRV.INFO metadata — always populated.
@@ -117,13 +119,22 @@ export class Agent {
 
   #buildStream(envelope: RequestEnvelope, opts: PromptOptions): PromptStream {
     const signal = combineAbortSignals([opts.signal, this.#closeSignal]);
-    return new PromptStream(
-      this.#nc,
-      this.promptEndpoint.subject,
+    // Mint the mux token up front (pure, no wire I/O) so the reply
+    // subject — and the thread id derived from it — are known before
+    // anything is published; the publish stays lazy inside the stream.
+    const mux = muxFor(this.#nc);
+    const token = mux.mintToken();
+    const threadId = deriveThreadId(mux.replySubjectFor(token));
+    return new PromptStream({
+      nc: this.#nc,
+      mux,
+      token,
+      requestSubject: this.promptEndpoint.subject,
       envelope,
-      opts.inactivityTimeoutMs ?? this.#defaultInactivityTimeoutMs,
-      opts.maxWaitMs ?? DEFAULT_PROMPT_MAX_WAIT_MS,
+      inactivityTimeoutMs: opts.inactivityTimeoutMs ?? this.#defaultInactivityTimeoutMs,
+      maxWaitMs: opts.maxWaitMs ?? DEFAULT_PROMPT_MAX_WAIT_MS,
       signal,
-    );
+      threadId,
+    });
   }
 }

@@ -3,21 +3,20 @@
 // caller writes `for await (const msg of stream) { ... }`.
 //
 // Wire behavior:
-//   - Calls `nc.requestMany(subject, payload, { strategy: "sentinel", maxWait })`.
-//     The connection's mux inbox handles the reply routing; the empty-body
-//     terminator (§6.5) ends the iterator.
+//   - Replies ride the per-connection shared mux (`internal/mux.ts`): the
+//     stream's reply subject is minted before the request is published, so
+//     the observability `threadId` (derived from it) is known up front.
 //   - Yields `{ type: "response" }`, `{ type: "status" }`, `QueryEvent` per
-//     §6.3–§7.
-//   - Emits a synthetic `{ type: "status", status: "done" }` when the wire
-//     terminator (empty body + no headers, §6.5) arrives.
-//   - Throws `ServiceError` on a `Nats-Service-Error-Code` header (§9.1).
-//   - Throws `StreamStalledError` on inactivity timeout (§6.6).
-//   - Throws `StreamMaxWaitExceededError` if `maxWaitMs` elapses without
-//     a terminator (sentinel strategy's absolute ceiling).
+//     §6.3–§7; a synthetic `{ type: "status", status: "done" }` marks the
+//     wire terminator (empty body + no headers, §6.5).
+//   - Throws `ServiceError` on a `Nats-Service-Error-Code` header (§9.1),
+//     `StreamStalledError` on inactivity timeout (§6.6), and
+//     `StreamMaxWaitExceededError` when `maxWaitMs` elapses without a
+//     terminator.
 //   - `cancel()` and early break from `for await` both stop the iterator
 //     cleanly.
 
-import type { Msg, NatsConnection, QueuedIterator } from "@nats-io/nats-core";
+import type { Msg, NatsConnection } from "@nats-io/nats-core";
 import {
   ServiceError,
   StreamMaxWaitExceededError,
@@ -25,6 +24,7 @@ import {
   type ServiceErrorBody,
 } from "../errors.js";
 import { abortError } from "../internal/abort.js";
+import type { MsgQueue, MuxInbox } from "../internal/mux.js";
 import { encodeEnvelope, type RequestEnvelope } from "../prompt/envelope.js";
 import { buildQueryEvent, type QueryEvent } from "../query/query-event.js";
 import { decodeChunk, type DecodedAttachment, type DecodedChunk } from "./chunk-decoder.js";
@@ -42,40 +42,54 @@ export type StreamMessage =
   | { readonly type: "status"; readonly status: string }
   | QueryEvent;
 
+/** Constructor inputs — assembled by `Agent.prompt`; not part of the caller API. */
+export interface PromptStreamInit {
+  readonly nc: NatsConnection;
+  readonly mux: MuxInbox;
+  readonly token: string;
+  readonly requestSubject: string;
+  readonly envelope: RequestEnvelope;
+  readonly inactivityTimeoutMs: number;
+  readonly maxWaitMs: number;
+  readonly signal?: AbortSignal | undefined;
+  readonly threadId: string;
+}
+
 export class PromptStream implements AsyncIterable<StreamMessage> {
+  /** This prompt execution's derived thread id (observability identity). */
+  readonly threadId: string;
+
   readonly #nc: NatsConnection;
+  readonly #mux: MuxInbox;
+  readonly #token: string;
   readonly #requestSubject: string;
   readonly #envelope: RequestEnvelope;
   readonly #inactivityTimeoutMs: number;
   readonly #maxWaitMs: number;
   readonly #signal: AbortSignal | undefined;
-  #iter: QueuedIterator<Msg> | null = null;
+  #queue: MsgQueue | null = null;
   #iterated = false;
   #cancelled = false;
 
-  constructor(
-    nc: NatsConnection,
-    requestSubject: string,
-    envelope: RequestEnvelope,
-    inactivityTimeoutMs: number,
-    maxWaitMs: number,
-    signal?: AbortSignal,
-  ) {
-    this.#nc = nc;
-    this.#requestSubject = requestSubject;
-    this.#envelope = envelope;
-    this.#inactivityTimeoutMs = inactivityTimeoutMs;
-    this.#maxWaitMs = maxWaitMs;
-    this.#signal = signal;
+  constructor(init: PromptStreamInit) {
+    this.#nc = init.nc;
+    this.#mux = init.mux;
+    this.#token = init.token;
+    this.#requestSubject = init.requestSubject;
+    this.#envelope = init.envelope;
+    this.#inactivityTimeoutMs = init.inactivityTimeoutMs;
+    this.#maxWaitMs = init.maxWaitMs;
+    this.#signal = init.signal;
+    this.threadId = init.threadId;
   }
 
   /**
-   * Stop the underlying request iterator and end the stream cleanly.
+   * Stop the underlying reply queue and end the stream cleanly.
    * Subsequent `for await` iterations over this stream exit without throwing.
    */
   cancel(): void {
     this.#cancelled = true;
-    this.#iter?.stop();
+    this.#queue?.end();
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<StreamMessage> {
@@ -86,24 +100,16 @@ export class PromptStream implements AsyncIterable<StreamMessage> {
     if (this.#cancelled) return;
     if (this.#signal?.aborted) throw abortError(this.#signal);
 
-    // The `NatsConnection` interface types `requestMany` as returning a bare
-    // `AsyncIterable<Msg>`, but the concrete implementations (nats-core /
-    // transport-node / Bun ws) all return a `QueuedIterator<Msg>` whose
-    // `.stop()` is the only way to bail out early without waiting for
-    // `maxWait` to expire. Cast at the boundary.
-    const iter = (await this.#nc.requestMany(this.#requestSubject, encodeEnvelope(this.#envelope), {
-      strategy: "sentinel",
-      maxWait: this.#maxWaitMs,
-    })) as QueuedIterator<Msg>;
-    this.#iter = iter;
-    // cancel() may have fired during the requestMany await — the early
-    // check above only covers cancellation before iteration started.
+    await this.#mux.start(); // idempotent; pays SUB+flush on the first prompt
+    const queue = this.#mux.register(this.#token);
+    this.#queue = queue;
+    // cancel()/abort may have fired during the mux start await.
     if (this.#cancelled) {
-      iter.stop();
+      this.#mux.unregister(this.#token);
       return;
     }
     if (this.#signal?.aborted) {
-      iter.stop();
+      this.#mux.unregister(this.#token);
       throw abortError(this.#signal);
     }
 
@@ -111,14 +117,19 @@ export class PromptStream implements AsyncIterable<StreamMessage> {
     if (this.#signal) {
       onAbort = (): void => {
         this.#cancelled = true; // mark so we distinguish "closed by abort" vs "stalled"
-        iter.stop();
+        queue.end();
       };
       this.#signal.addEventListener("abort", onAbort, { once: true });
     }
+    const maxWaitTimer = setTimeout(() => queue.end(), this.#maxWaitMs);
+    maxWaitTimer.unref?.();
 
     try {
+      this.#nc.publish(this.#requestSubject, encodeEnvelope(this.#envelope), {
+        reply: this.#mux.replySubjectFor(this.#token),
+      });
       const timed = withInactivityTimeout(
-        iter,
+        queue,
         this.#inactivityTimeoutMs,
         () => new StreamStalledError(this.#inactivityTimeoutMs),
       );
@@ -144,10 +155,8 @@ export class PromptStream implements AsyncIterable<StreamMessage> {
         yield toStreamMessage(decoded, this.#nc);
       }
       // The terminator branch above always `return`s, so reaching here
-      // means the iterator drained without one. Possible sources:
-      //   - AbortSignal fired → throw the signal's reason.
-      //   - cancel() fired → exit cleanly.
-      //   - maxWait elapsed → throw StreamMaxWaitExceededError.
+      // means the queue drained without one: abort → throw its reason,
+      // cancel() → exit cleanly, maxWait elapsed → StreamMaxWaitExceededError.
       if (this.#signal?.aborted) {
         throw abortError(this.#signal);
       }
@@ -155,8 +164,10 @@ export class PromptStream implements AsyncIterable<StreamMessage> {
       throw new StreamMaxWaitExceededError(this.#maxWaitMs);
     } finally {
       if (onAbort && this.#signal) this.#signal.removeEventListener("abort", onAbort);
-      iter.stop();
-      this.#iter = null;
+      clearTimeout(maxWaitTimer);
+      queue.end();
+      this.#mux.unregister(this.#token);
+      this.#queue = null;
     }
   }
 }

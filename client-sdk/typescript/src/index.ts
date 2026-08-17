@@ -89,9 +89,13 @@ export {
 export { type PromptOptions, DEFAULT_PROMPT_MAX_WAIT_MS } from "./prompt/options.js";
 export {
   PromptStream,
+  type PromptStreamInit,
   type StreamMessage,
   type ResponseAttachment,
 } from "./stream/prompt-stream.js";
+
+// Observability trace primitives — normative, mirrored in the Python SDK.
+export { THREAD_ID_HEX_LEN, deriveThreadId, isThreadId, randomThreadId } from "./trace.js";
 export { type QueryEvent, QueryAlreadyRepliedError } from "./query/query-event.js";
 export {
   type DecodedAttachment,

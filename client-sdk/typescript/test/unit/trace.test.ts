@@ -10,6 +10,7 @@ import {
   bindActiveTrace,
   currentToolCallId,
   deriveThreadId,
+  formatSpawnEntry,
   isThreadId,
   randomThreadId,
   toolScope,
@@ -86,5 +87,43 @@ describe("ambient trace context", () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
       expect(activeTrace()?.threadId).toBe("p");
     });
+  });
+});
+
+describe("formatSpawnEntry — the edge policy", () => {
+  it("uses an explicit tool id", () => {
+    expect(formatSpawnEntry("c1", "toolu_x")).toBe("c1:toolu_x:tool_call");
+  });
+
+  it("defaults the tool id from the ambient toolScope", () => {
+    toolScope("toolu_ambient", () => {
+      expect(formatSpawnEntry("c1")).toBe("c1:toolu_ambient:tool_call");
+    });
+  });
+
+  it("is honestly programmatic without a tool", () => {
+    expect(formatSpawnEntry("c1")).toBe("c1::programmatic");
+  });
+
+  it("lets an explicit edge type win", () => {
+    expect(formatSpawnEntry("c1", undefined, "handoff")).toBe("c1::handoff");
+  });
+
+  it("counts an empty tool id as no tool", () => {
+    expect(formatSpawnEntry("c1", "")).toBe("c1::programmatic");
+    toolScope("", () => {
+      expect(formatSpawnEntry("c1")).toBe("c1::programmatic");
+    });
+  });
+
+  it("percent-encodes reserved characters (cross-SDK vector)", () => {
+    // ':' and ',' would corrupt the entry / comma-joined report. Pinned to
+    // the Python SDK's quote(safe="") output byte-for-byte.
+    expect(formatSpawnEntry("c1", "a:b,c")).toBe("c1:a%3Ab%2Cc:tool_call");
+    expect(formatSpawnEntry("c1", "a!b'c(d)e*f")).toBe("c1:a%21b%27c%28d%29e%2Af:tool_call");
+  });
+
+  it("passes plain provider ids through unchanged", () => {
+    expect(formatSpawnEntry("c1", "toolu_01AbC")).toBe("c1:toolu_01AbC:tool_call");
   });
 });

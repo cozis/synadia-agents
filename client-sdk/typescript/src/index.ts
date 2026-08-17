@@ -96,11 +96,15 @@ export {
 
 // Observability trace primitives — normative, mirrored in the Python SDK.
 export {
+  HEADER_EVENT,
+  HEADER_SPAWNED,
+  HEADER_TRACE,
   THREAD_ID_HEX_LEN,
   activeTrace,
   bindActiveTrace,
   currentToolCallId,
   deriveThreadId,
+  formatSpawnEntry,
   isThreadId,
   randomThreadId,
   toolScope,

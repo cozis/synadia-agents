@@ -35,6 +35,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `toolScope(id, fn)` / `currentToolCallId()`: the Node analogue of the
   Python SDK's contextvars layer, so correlation can be implicit where
   threading arguments through is impossible or noisy.
+- **Provider-facing trace vocabulary** — `HEADER_TRACE` (packing
+  `<root_id>:<thread_id>`), `HEADER_SPAWNED`, `HEADER_EVENT`, and
+  `formatSpawnEntry()`: the normative header set an observing proxy
+  consumes, reproduced byte-for-byte across SDKs. The spawn-entry tool slot
+  is percent-encoded exactly like Python's `quote(safe="")` (the `!'()*`
+  set included), an empty tool id means "no tool", and the edge type
+  defaults honestly (`tool_call` iff a tool id resolved, else
+  `programmatic`).
 
 ### Changed
 

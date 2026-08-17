@@ -32,6 +32,12 @@ export function isThreadId(value: string): boolean {
   return THREAD_ID_RE.test(value);
 }
 
+// Normative header vocabulary — the Python SDK and any observing proxy
+// reproduce these byte-for-byte.
+export const HEADER_TRACE = "x-synadia-trace"; // "<root_id>:<thread_id>"
+export const HEADER_SPAWNED = "x-synadia-spawned"; // comma-joined spawn entries (formatSpawnEntry)
+export const HEADER_EVENT = "x-synadia-event"; // "spawn" tags the spawn-time marker request
+
 /** Normative: lowercase hex of `sha256(replySubject)` (UTF-8), truncated. */
 export function deriveThreadId(replySubject: string): string {
   return createHash("sha256")
@@ -42,6 +48,31 @@ export function deriveThreadId(replySubject: string): string {
 
 export function randomThreadId(): string {
   return randomBytes(THREAD_ID_HEX_LEN / 2).toString("hex");
+}
+
+/** One spawn-edge claim: `<child>:<toolCallId>:<edgeType>`. Normative.
+ *
+ * `toolCallId` defaults from the ambient {@link toolScope} and empty means
+ * "no tool"; `edgeType` defaults to `tool_call`/`programmatic` to match.
+ * The tool slot is percent-encoded; consumers decode it. */
+export function formatSpawnEntry(
+  childThreadId: string,
+  toolCallId?: string,
+  edgeType?: string,
+): string {
+  const tool = toolCallId || currentToolCallId() || "";
+  const type = edgeType ?? (tool ? "tool_call" : "programmatic");
+  return `${childThreadId}:${percentEncodeStrict(tool)}:${type}`;
+}
+
+// RFC 3986 with NO safe characters beyond unreserved — must match Python's
+// `urllib.parse.quote(s, safe="")` byte-for-byte, so the `!'()*` set that
+// encodeURIComponent leaves bare is escaped too.
+function percentEncodeStrict(s: string): string {
+  return encodeURIComponent(s).replace(
+    /[!'()*]/g,
+    (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"),
+  );
 }
 
 /** Trace identity a parent thread forwards to a spawned prompt

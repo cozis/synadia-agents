@@ -25,21 +25,19 @@ import json
 import time
 from collections.abc import AsyncGenerator
 from contextlib import aclosing, suppress
-from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from synadia_ai.agents import (
     Agent,
-    AgentInfo,
     Agents,
     AgentsClosedError,
-    EndpointInfo,
     ProtocolError,
     ResponseChunk,
 )
 from synadia_ai.agents._mux import mux_for
+from tests.harness.agent_info import make_agent_info
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -53,29 +51,6 @@ if TYPE_CHECKING:
 
 
 PROMPT_SUBJECT = "agents.prompt.test-agent.pytest.cancel"
-
-
-def _make_agent_info(prompt_subject: str) -> AgentInfo:
-    prompt_endpoint = EndpointInfo(
-        name="prompt",
-        subject=prompt_subject,
-        queue_group="agents",
-        metadata=MappingProxyType({}),
-        max_payload_bytes=None,
-        attachments_ok=True,
-    )
-    return AgentInfo(
-        instance_id="test-instance",
-        agent="test-agent",
-        owner="pytest",
-        session_name="cancel",
-        protocol_version="0.3",
-        description="",
-        version="0.0.0",
-        metadata=MappingProxyType({"agent": "test-agent", "owner": "pytest"}),
-        endpoints=(prompt_endpoint,),
-        prompt_endpoint=prompt_endpoint,
-    )
 
 
 def _response_chunk_bytes(text: str) -> bytes:
@@ -140,7 +115,7 @@ async def test_agents_close_during_live_stream_unblocks_promptly(
     try:
         # Build an Agents that owns the mux, plus an Agent attached to it.
         agents = Agents(nc=nc)
-        info = _make_agent_info(PROMPT_SUBJECT)
+        info = make_agent_info(PROMPT_SUBJECT, session_name="cancel")
         agent = Agent(nc, info, close_event=agents.close_event)
 
         consume_started = asyncio.Event()
@@ -204,7 +179,7 @@ async def test_concurrent_prompts_isolated(
     sub = await nc.subscribe(PROMPT_SUBJECT, cb=echo_agent)
     try:
         agents = Agents(nc=nc)
-        info = _make_agent_info(PROMPT_SUBJECT)
+        info = make_agent_info(PROMPT_SUBJECT, session_name="cancel")
         agent = Agent(nc, info, close_event=agents.close_event)
 
         async def run_one(idx: int) -> list[str]:
@@ -258,7 +233,7 @@ async def test_cancel_during_iteration_unregisters_token(
     sub = await nc.subscribe(PROMPT_SUBJECT, cb=emit_forever)
     try:
         agents = Agents(nc=nc)
-        info = _make_agent_info(PROMPT_SUBJECT)
+        info = make_agent_info(PROMPT_SUBJECT, session_name="cancel")
         agent = Agent(nc, info, close_event=agents.close_event)
 
         seen_first: list[str] = []
@@ -305,7 +280,7 @@ async def test_close_wins_over_buffered_chunks_and_terminator(
     depths: list[int] = []
     try:
         agents = Agents(nc=nc)
-        info = _make_agent_info(PROMPT_SUBJECT)
+        info = make_agent_info(PROMPT_SUBJECT, session_name="cancel")
         agent = Agent(nc, info, close_event=agents.close_event)
 
         stream = cast(AsyncGenerator[object, None], agent.prompt("burst", timeout=60.0))
@@ -341,7 +316,7 @@ async def test_cancelling_consumer_cancels_prompt_wait_tasks(
     agents = Agents(nc=nc)
     stream: AsyncGenerator[object, None] | None = None
     try:
-        info = _make_agent_info(PROMPT_SUBJECT)
+        info = make_agent_info(PROMPT_SUBJECT, session_name="cancel")
         agent = Agent(nc, info, close_event=agents.close_event)
         stream = cast(
             AsyncGenerator[object, None],
@@ -392,7 +367,7 @@ async def test_close_before_prompt_raises_agents_closed_error(
     sub = await nc.subscribe(PROMPT_SUBJECT, cb=silent_agent)
     try:
         agents = Agents(nc=nc)
-        info = _make_agent_info(PROMPT_SUBJECT)
+        info = make_agent_info(PROMPT_SUBJECT, session_name="cancel")
         agent = Agent(nc, info, close_event=agents.close_event)
 
         await agents.close()  # set close_event before any prompt runs
@@ -438,7 +413,7 @@ async def test_close_during_prompt_yields_protocol_error(
     sub = await nc.subscribe(PROMPT_SUBJECT, cb=one_chunk_agent)
     try:
         agents = Agents(nc=nc)
-        info = _make_agent_info(PROMPT_SUBJECT)
+        info = make_agent_info(PROMPT_SUBJECT, session_name="cancel")
         agent = Agent(nc, info, close_event=agents.close_event)
 
         outcome: dict[str, str] = {}

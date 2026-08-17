@@ -8,6 +8,16 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ## [Unreleased]
 
+### Added
+
+- **Trace propagation** — `derive_thread_id()`; `Agent.prompt()` now
+  returns a `PromptHandle` (drop-in async iterator) exposing
+  `thread_id` for parent-side edge reporting.
+- **`random_thread_id()`** — a random id with the normative thread-id
+  shape, for threads that have no reply subject to derive from (the
+  agent-sdk uses it for reply-less fire-and-forget prompts so they
+  don't collapse onto the constant `sha256("")` hash).
+
 ## [0.7.1] - 2026-05-12
 
 ### Changed

@@ -28,17 +28,15 @@ import gc
 import json
 import urllib.request
 import weakref
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
 from synadia_ai.agents import (
     Agent,
-    AgentInfo,
     Agents,
-    EndpointInfo,
     ResponseChunk,
 )
 from synadia_ai.agents._mux import _MUX_CACHE, mux_for
+from tests.harness.agent_info import make_agent_info
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -53,29 +51,6 @@ if TYPE_CHECKING:
 
 
 PROMPT_SUBJECT = "agents.prompt.test-agent.pytest.wireecon"
-
-
-def _make_agent_info(prompt_subject: str) -> AgentInfo:
-    prompt_endpoint = EndpointInfo(
-        name="prompt",
-        subject=prompt_subject,
-        queue_group="agents",
-        metadata=MappingProxyType({}),
-        max_payload_bytes=None,
-        attachments_ok=True,
-    )
-    return AgentInfo(
-        instance_id="test-instance",
-        agent="test-agent",
-        owner="pytest",
-        session_name="wireecon",
-        protocol_version="0.3",
-        description="",
-        version="0.0.0",
-        metadata=MappingProxyType({"agent": "test-agent", "owner": "pytest"}),
-        endpoints=(prompt_endpoint,),
-        prompt_endpoint=prompt_endpoint,
-    )
 
 
 def _response_chunk(text: str) -> bytes:
@@ -142,7 +117,7 @@ async def test_five_prompts_open_one_mux_subscription(
     sub = await original_subscribe(PROMPT_SUBJECT, cb=echo_agent)
     try:
         agents = Agents(nc=nc)
-        info = _make_agent_info(PROMPT_SUBJECT)
+        info = make_agent_info(PROMPT_SUBJECT, session_name="wireecon")
         agent = Agent(nc, info, close_event=agents.close_event)
 
         # Snapshot pre-prompt count so we don't conflate other
@@ -219,7 +194,7 @@ async def test_broker_sees_one_mux_subscription_for_n_prompts(
     sub = await nc.subscribe(PROMPT_SUBJECT, cb=echo_agent)
     try:
         agents = Agents(nc=nc)
-        info = _make_agent_info(PROMPT_SUBJECT)
+        info = make_agent_info(PROMPT_SUBJECT, session_name="wireecon")
         agent = Agent(nc, info, close_event=agents.close_event)
 
         for i in range(n_prompts):

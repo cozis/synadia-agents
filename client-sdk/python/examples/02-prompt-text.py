@@ -44,7 +44,13 @@ async def main() -> None:
             print("no agents found — start the reference agent first.", file=sys.stderr)
             sys.exit(2)
         agent = found[0]
-        async for msg in agent.prompt(args.text):
+        handle = agent.prompt(args.text)
+        # The prompt's observability identity is known before the first
+        # chunk arrives: the thread id derives from the reply inbox. A
+        # tracing harness reports this id to its observing proxy; here we
+        # just show it (stderr, so piped stdout stays clean).
+        print(f"thread {handle.thread_id}", file=sys.stderr)
+        async for msg in handle:
             if isinstance(msg, ResponseChunk):
                 sys.stdout.write(msg.text)
                 sys.stdout.flush()

@@ -23,7 +23,6 @@ import inspect
 import json
 import time
 from pathlib import Path
-from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
 import nats
@@ -32,13 +31,12 @@ import pytest
 from synadia_ai.agents import (
     DEFAULT_PROMPT_MAX_WAIT_S,
     Agent,
-    AgentInfo,
     Agents,
-    EndpointInfo,
     ResponseChunk,
     StreamMaxWaitExceededError,
     StreamStalledError,
 )
+from tests.harness.agent_info import make_agent_info
 from tests.harness.evidence import EvidenceRecorder
 from tests.harness.nats_server import start_server
 
@@ -53,34 +51,6 @@ if TYPE_CHECKING:
 
 PROMPT_SUBJECT = "agents.prompt.test-agent.pytest.maxwait"
 _EVIDENCE_ROOT = Path(__file__).parent / "_evidence"
-
-
-def _make_agent_info(prompt_subject: str) -> AgentInfo:
-    """Build an :class:`AgentInfo` pointing at a test-controlled subject.
-
-    Bypasses ``$SRV.INFO`` discovery — the test owns both ends of the
-    wire, so we build the record directly.
-    """
-    prompt_endpoint = EndpointInfo(
-        name="prompt",
-        subject=prompt_subject,
-        queue_group="agents",
-        metadata=MappingProxyType({}),
-        max_payload_bytes=None,
-        attachments_ok=True,
-    )
-    return AgentInfo(
-        instance_id="test-instance",
-        agent="test-agent",
-        owner="pytest",
-        session_name="maxwait",
-        protocol_version="0.3",
-        description="",
-        version="0.0.0",
-        metadata=MappingProxyType({"agent": "test-agent", "owner": "pytest"}),
-        endpoints=(prompt_endpoint,),
-        prompt_endpoint=prompt_endpoint,
-    )
 
 
 def _response_chunk_bytes(text: str) -> bytes:
@@ -111,7 +81,7 @@ def test_prompt_max_wait_rejects_non_positive(bad_value: float) -> None:
     behaviour) or "wait forever" (a footgun inherited from other
     timeout APIs).
     """
-    info = _make_agent_info(PROMPT_SUBJECT)
+    info = make_agent_info(PROMPT_SUBJECT, session_name="maxwait")
     nc_placeholder = cast("NATSClient", object())
 
     # Constructor on `Agent` directly.
@@ -155,7 +125,7 @@ async def test_max_wait_exceeded_raises(
 
     sub = await nc.subscribe(PROMPT_SUBJECT, cb=fake_agent)
     try:
-        agent = Agent(nc, _make_agent_info(PROMPT_SUBJECT))
+        agent = Agent(nc, make_agent_info(PROMPT_SUBJECT, session_name="maxwait"))
         start = time.monotonic()
         with pytest.raises(StreamMaxWaitExceededError) as excinfo:
             async for chunk in agent.prompt("trigger-forever", max_wait_s=0.5):
@@ -200,7 +170,7 @@ async def test_max_wait_with_terminator_in_time(
 
     sub = await nc.subscribe(PROMPT_SUBJECT, cb=fake_agent)
     try:
-        agent = Agent(nc, _make_agent_info(PROMPT_SUBJECT))
+        agent = Agent(nc, make_agent_info(PROMPT_SUBJECT, session_name="maxwait"))
         async for chunk in agent.prompt("terminate-please", max_wait_s=10.0):
             if isinstance(chunk, ResponseChunk):
                 received_texts.append(chunk.text)
@@ -231,7 +201,7 @@ async def test_terminator_arrival_cancels_max_wait_even_if_consumer_is_slow(
 
     sub = await nc.subscribe(PROMPT_SUBJECT, cb=fake_agent)
     try:
-        agent = Agent(nc, _make_agent_info(PROMPT_SUBJECT))
+        agent = Agent(nc, make_agent_info(PROMPT_SUBJECT, session_name="maxwait"))
         async for chunk in agent.prompt("terminate-before-sleep", max_wait_s=max_wait_s):
             if isinstance(chunk, ResponseChunk):
                 received_texts.append(chunk.text)
@@ -288,7 +258,7 @@ async def test_max_wait_distinct_from_inactivity_timeout(
 
     sub = await nc.subscribe(PROMPT_SUBJECT, cb=fake_agent)
     try:
-        agent = Agent(nc, _make_agent_info(PROMPT_SUBJECT))
+        agent = Agent(nc, make_agent_info(PROMPT_SUBJECT, session_name="maxwait"))
         start = time.monotonic()
         # Inactivity timeout very high (60s) so it cannot trip first.
         with pytest.raises(StreamMaxWaitExceededError) as excinfo:
@@ -335,7 +305,7 @@ async def test_inactivity_raises_stream_stalled_error(
 
     sub = await nc.subscribe(PROMPT_SUBJECT, cb=silent_agent)
     try:
-        agent = Agent(nc, _make_agent_info(PROMPT_SUBJECT))
+        agent = Agent(nc, make_agent_info(PROMPT_SUBJECT, session_name="maxwait"))
         with pytest.raises(StreamStalledError) as excinfo:
             # Inactivity 0.2s, ceiling 5s → inactivity wins.
             async for _ in agent.prompt("silent", timeout=0.2, max_wait_s=5.0):
@@ -400,7 +370,7 @@ async def test_max_wait_fires_after_connection_severed(
             kill_at_chunks = 2
             kill_ts: float | None = None
             try:
-                agent = Agent(client, _make_agent_info(PROMPT_SUBJECT))
+                agent = Agent(client, make_agent_info(PROMPT_SUBJECT, session_name="maxwait"))
                 start = time.monotonic()
                 with pytest.raises(StreamMaxWaitExceededError) as excinfo:
                     async for chunk in agent.prompt("sever-me", timeout=60.0, max_wait_s=1.0):

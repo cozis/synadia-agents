@@ -32,6 +32,7 @@ from .agent import (
     DEFAULT_PROMPT_MAX_WAIT_S,
     DEFAULT_STREAM_INACTIVITY_TIMEOUT_S,
     Agent,
+    PromptHandle,
     Query,
     StreamMessage,
 )
@@ -74,6 +75,12 @@ from .heartbeat import (
 )
 from .messages import Chunk, QueryChunk, ResponseChunk, StatusChunk
 from .subjects import AgentSubject
+from .trace import (
+    THREAD_ID_HEX_LEN,
+    derive_thread_id,
+    is_thread_id,
+    random_thread_id,
+)
 
 __all__ = [
     "DEFAULT_DISCOVER_MAX_WAIT_S",
@@ -87,6 +94,7 @@ __all__ = [
     "SERVICE_NAME",
     "STATUS_ENDPOINT_NAME",
     "STATUS_QUEUE_GROUP",
+    "THREAD_ID_HEX_LEN",
     "Agent",
     "AgentInfo",
     "AgentNotFound",
@@ -106,6 +114,7 @@ __all__ = [
     "NatsContextError",
     "PayloadTooLargeError",
     "PromptEmptyError",
+    "PromptHandle",
     "ProtocolError",
     "Query",
     "QueryChunk",
@@ -118,7 +127,10 @@ __all__ = [
     "ValidationError",
     "build_agent_info",
     "decode",
+    "derive_thread_id",
     "encode",
+    "is_thread_id",
     "load_context_options",
     "parse_nats_url",
+    "random_thread_id",
 ]

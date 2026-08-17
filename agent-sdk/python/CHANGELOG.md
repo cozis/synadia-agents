@@ -83,6 +83,16 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 - **`examples` extra** — `httpx`, used by the LLM/tool example scripts
   (`uv sync --extra examples`). Not part of the published SDK surface.
 
+### Changed
+
+- **Dependency floor `synadia-ai-agents>=0.8`** (was `>=0.7`) — this
+  package now imports the trace surface (`ActiveTrace`,
+  `derive_thread_id`, `identity_path`, `bind_active_trace`, …),
+  which first ships in client-sdk 0.8.0; resolving 0.7.x would
+  `ImportError` on import of `synadia_ai.agent_service`. Release-ladder
+  consequence: client-sdk 0.8.0 must be published to PyPI before the
+  next release of this package.
+
 ## [0.4.1] - 2026-05-12
 
 ### Changed

@@ -46,6 +46,7 @@ import {
   SDK_PROTOCOL_VERSION,
   deriveThreadId,
   randomThreadId,
+  type TraceContext,
   SERVICE_NAME,
   STATUS_ENDPOINT_NAME,
   STATUS_QUEUE_GROUP,
@@ -201,15 +202,31 @@ export class PromptResponse {
   /** This prompt execution's derived thread id (observability identity). */
   readonly threadId: string;
 
+  /** Root thread id of the tree this prompt belongs to (falls back to
+   * `threadId` for legacy callers that sent no `root_id` — a provisional root). */
+  readonly rootId: string;
+
   readonly #msg: ServiceMsg;
   readonly #nc: NatsConnection;
 
-  constructor(msg: ServiceMsg, nc: NatsConnection) {
+  constructor(msg: ServiceMsg, nc: NatsConnection, rootId?: string) {
     this.#msg = msg;
     this.#nc = nc;
     // No reply subject (fire-and-forget raw-NATS caller) ⇒ random
     // shape-valid id rather than the constant sha256("") hash.
     this.threadId = msg.reply ? deriveThreadId(msg.reply) : randomThreadId();
+    this.rootId = rootId ?? this.threadId;
+  }
+
+  /** True iff this thread is its tree's root (provisionally true for
+   * legacy callers that sent no `root_id`). */
+  get isRoot(): boolean {
+    return this.rootId === this.threadId;
+  }
+
+  /** Trace context to pass to `Agent.prompt(..., { trace })` when spawning. */
+  childTrace(): TraceContext {
+    return { rootId: this.rootId };
   }
 
   /**
@@ -570,7 +587,7 @@ export class AgentService {
       return;
     }
 
-    const response = new PromptResponse(msg, this.#options.nc);
+    const response = new PromptResponse(msg, this.#options.nc, envelope.rootId);
 
     // §6.4: emit the mandatory leading `ack` status chunk as the first
     // message on the reply subject, before the handler runs. Confirms

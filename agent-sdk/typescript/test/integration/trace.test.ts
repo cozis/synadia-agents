@@ -57,22 +57,63 @@ describe.skipIf(!natsUrl)("trace propagation — derived thread ids", () => {
     return service;
   }
 
-  it("both ends derive the same thread id with nothing exchanged", async () => {
-    const recorded: string[] = [];
+  it("both ends derive the same thread id, and root forwarding works", async () => {
+    const recorded: { threadId: string; rootId: string; isRoot: boolean }[] = [];
     await startService("identity", async (_envelope, response) => {
-      recorded.push(response.threadId);
+      recorded.push({
+        threadId: response.threadId,
+        rootId: response.rootId,
+        isRoot: response.isRoot,
+      });
       await response.send("ok");
     });
 
     const agents = await client.discover({ filter: { agent: AGENT } });
     expect(agents).toHaveLength(1);
-    const stream = await agents[0]!.prompt("root prompt");
+    const agent = agents[0]!;
+
+    // --- root prompt (no trace) — a traceless prompt roots its own tree.
+    const stream = await agent.prompt("root prompt");
     expect(isThreadId(stream.threadId)).toBe(true);
     for await (const _msg of stream) {
       /* drain */
     }
-    expect(recorded).toHaveLength(1);
-    expect(recorded[0]).toBe(stream.threadId);
+    const rootObs = recorded.at(-1)!;
+    expect(rootObs.threadId).toBe(stream.threadId);
+    expect(rootObs.rootId).toBe(stream.threadId);
+    expect(stream.rootId).toBe(stream.threadId);
+    expect(rootObs.isRoot).toBe(true);
+
+    // --- spawned prompt (forwarded trace) — joins the parent's tree.
+    const child = await agent.prompt("spawned prompt", { trace: { rootId: rootObs.rootId } });
+    for await (const _msg of child) {
+      /* drain */
+    }
+    const childObs = recorded.at(-1)!;
+    expect(childObs.threadId).toBe(child.threadId);
+    expect(childObs.threadId).not.toBe(rootObs.threadId);
+    expect(childObs.rootId).toBe(rootObs.rootId);
+    expect(child.rootId).toBe(rootObs.rootId);
+    expect(childObs.isRoot).toBe(false);
+  });
+
+  it("rejects a hostile root_id at decode with a 400, before the handler runs", async () => {
+    const handled: string[] = [];
+    const service = await startService("hostile", (envelope) => {
+      handled.push(envelope.prompt);
+    });
+
+    const inbox = `_INBOX.trace-hostile.${Math.random().toString(36).slice(2)}`;
+    const sub = nc.subscribe(inbox);
+    const payload = JSON.stringify({ prompt: "hi", root_id: "x\r\nx-evil: 1" });
+    nc.publish(service.subject.prompt, new TextEncoder().encode(payload), { reply: inbox });
+
+    for await (const msg of sub) {
+      expect(msg.headers?.get("Nats-Service-Error-Code")).toBe("400");
+      break;
+    }
+    sub.unsubscribe();
+    expect(handled).toHaveLength(0);
   });
 
   it("reply-less prompts get distinct random thread ids", async () => {

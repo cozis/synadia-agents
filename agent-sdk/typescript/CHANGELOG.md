@@ -14,6 +14,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   agree on the id with nothing exchanged on the wire. A reply-less
   fire-and-forget request gets a distinct random shape-valid id instead of
   the constant `sha256("")` hash.
+- **Root identity** — `PromptResponse.rootId` / `isRoot` (from the
+  envelope's validated optional `root_id` field, falling back to
+  `threadId` for legacy callers — a provisional root) and `childTrace()`,
+  the `TraceContext` a handler passes to `Agent.prompt(..., { trace })`
+  when spawning a sub-agent. A malformed `root_id` never reaches the
+  handler: the shared envelope codec 400s it at decode.
 
 ### Changed
 

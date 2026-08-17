@@ -44,6 +44,8 @@ import {
   PROMPT_QUEUE_GROUP,
   ProtocolError,
   SDK_PROTOCOL_VERSION,
+  deriveThreadId,
+  randomThreadId,
   SERVICE_NAME,
   STATUS_ENDPOINT_NAME,
   STATUS_QUEUE_GROUP,
@@ -196,12 +198,18 @@ function randomId(): string {
  * `Agent.prompt(...)` return value). Same conceptual stream, opposite ends.
  */
 export class PromptResponse {
+  /** This prompt execution's derived thread id (observability identity). */
+  readonly threadId: string;
+
   readonly #msg: ServiceMsg;
   readonly #nc: NatsConnection;
 
   constructor(msg: ServiceMsg, nc: NatsConnection) {
     this.#msg = msg;
     this.#nc = nc;
+    // No reply subject (fire-and-forget raw-NATS caller) ⇒ random
+    // shape-valid id rather than the constant sha256("") hash.
+    this.threadId = msg.reply ? deriveThreadId(msg.reply) : randomThreadId();
   }
 
   /**

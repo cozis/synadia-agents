@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Trace propagation (thread ids)** — `PromptResponse.threadId`: derived
+  from the request's reply subject with the shared normative convention
+  (`deriveThreadId` from `@synadia-ai/agents`), so both ends of a prompt
+  agree on the id with nothing exchanged on the wire. A reply-less
+  fire-and-forget request gets a distinct random shape-valid id instead of
+  the constant `sha256("")` hash.
+
 ### Changed
 
 - **Examples: identity env vars moved to the `SYNADIA_*` scheme.** The

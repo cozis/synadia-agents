@@ -41,6 +41,8 @@ from synadia_ai.agents import (
     ResponseChunk,
     StatusChunk,
     decode,
+    derive_thread_id,
+    random_thread_id,
 )
 from synadia_ai.agents.messages import encode_chunk
 
@@ -112,15 +114,30 @@ class PromptStream:
     terminator per §6.5). Handlers should ``send(...)`` zero or more
     chunks and return; raising an exception converts to a service error
     per §9.
+
+    Also carries the request's observability identity: :attr:`thread_id`
+    (derived from the reply subject; random when there is none).
     """
 
     def __init__(
         self,
         request: Request,
         nc: NATSClient,
+        *,
+        reply_subject: str,
     ) -> None:
         self._request = request
         self._nc = nc
+        # No reply subject (fire-and-forget raw-NATS caller) ⇒ random
+        # shape-valid id rather than the constant sha256("") hash.
+        self._thread_id = derive_thread_id(reply_subject) if reply_subject else random_thread_id()
+
+    # --- observability identity ----------------------------------------
+
+    @property
+    def thread_id(self) -> str:
+        """This prompt execution's derived thread id."""
+        return self._thread_id
 
     async def send(self, chunk: str | Chunk) -> None:
         """Publish one chunk to the caller's reply subject.
@@ -464,7 +481,14 @@ class AgentService:
             except Exception:
                 log.exception("failed to emit leading ack on %s", request.subject)
 
-            stream = PromptStream(request, self._nc)
+            # nats.micro's Request has no public reply accessor — this is
+            # the one place we reach into its Msg, at the framework
+            # boundary, so PromptStream stays constructible from plain data.
+            stream = PromptStream(
+                request,
+                self._nc,
+                reply_subject=request._msg.reply,
+            )
             handler = self._prompt_handler
             if handler is None:  # pragma: no cover — start() rejects this path
                 raise RuntimeError("prompt handler invoked before on_prompt() registered one")

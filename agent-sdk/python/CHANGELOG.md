@@ -10,6 +10,13 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Added
 
+- **Reply-less prompts get random thread ids** — a fire-and-forget
+  request (raw-NATS publish with no reply subject) previously hashed
+  the empty string, collapsing every such request on every agent onto
+  the constant thread id `e3b0c44298fc1c14`; each now gets a distinct
+  random id with the normative shape (`random_thread_id()` from
+  `synadia-ai-agents`), a provisional root of its own tree.
+
 - **Agent-ladder examples** (`examples/01-echo.py` … `05-tools.py`,
   plus the shared `examples/llm.py` base) — the Python mirror of
   `agent-sdk/typescript/examples/`: echo, Ollama, OpenRouter, a

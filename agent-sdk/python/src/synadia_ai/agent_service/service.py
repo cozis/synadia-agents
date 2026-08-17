@@ -34,6 +34,7 @@ from synadia_ai.agents import (
     SERVICE_NAME,
     STATUS_ENDPOINT_NAME,
     STATUS_QUEUE_GROUP,
+    ActiveTrace,
     AgentSubject,
     Attachment,
     Chunk,
@@ -44,6 +45,7 @@ from synadia_ai.agents import (
     ResponseChunk,
     StatusChunk,
     TraceContext,
+    bind_active_trace,
     decode,
     derive_thread_id,
     format_spawn_entry,
@@ -113,7 +115,11 @@ DEFAULT_KEEPALIVE_INTERVAL_S: float = 30.0
 
 
 class _SpawnLedger:
-    """A thread's spawn-edge recorder + completion-report buffer."""
+    """A thread's spawn-edge recorder + completion-report buffer.
+
+    Owns identity + entries so the ambient :class:`ActiveTrace` can carry
+    ``ledger.record`` without pinning the :class:`PromptStream`.
+    """
 
     __slots__ = ("_entries", "root_id", "thread_id")
 
@@ -223,6 +229,17 @@ class PromptStream:
     def child_trace(self) -> TraceContext:
         """Trace context to pass to ``Agent.prompt(trace=...)`` when spawning."""
         return TraceContext(root_id=self._root_id)
+
+    def _as_active_trace(self) -> ActiveTrace:
+        """Ambient-context view of this stream — carries the ledger's
+        bound ``record``, deliberately not a method of ``self``, so a
+        task outliving the request doesn't pin the ``Request``/``Msg``
+        via the contextvar binding."""
+        return ActiveTrace(
+            thread_id=self._thread_id,
+            root_id=self._root_id,
+            record_spawn=self._ledger.record,
+        )
 
     async def send(self, chunk: str | Chunk) -> None:
         """Publish one chunk to the caller's reply subject.
@@ -586,7 +603,13 @@ class AgentService:
                 )
 
             try:
-                await handler(envelope, stream)
+                # Bind the ambient trace for the handler's async call
+                # tree: Agent.prompt() calls inside it join this thread's
+                # tree and auto-record spawn edges without explicit
+                # plumbing. Contextvar-scoped (inherited by spawned
+                # tasks), so concurrent handlers each see their own.
+                with bind_active_trace(stream._as_active_trace()):
+                    await handler(envelope, stream)
             except ProtocolError as exc:
                 log.warning(
                     "prompt handler rejected protocol input on %s: %s",

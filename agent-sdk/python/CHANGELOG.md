@@ -17,6 +17,12 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
   and `record_spawn()` / `child_trace()` for reporting sub-agent
   spawn edges. Requires `synadia-ai-agents` with `derive_thread_id` /
   `TraceContext`.
+- **Ambient trace binding** — `AgentService` binds the client-sdk's
+  `ActiveTrace` (contextvars) around each prompt-handler invocation:
+  `Agent.prompt()` calls inside a handler join the thread's tree and
+  auto-record spawn edges with no explicit plumbing;
+  `trace_headers()` defaults its tool id from the ambient
+  `tool_scope()`.
 - **Malformed `root_id` rejected at the boundary** — via the shared
   envelope codec, a request whose `root_id` is not 16 lowercase hex
   chars now gets the §9 `400` error (like any malformed envelope)

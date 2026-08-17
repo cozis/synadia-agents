@@ -17,10 +17,12 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from synadia_ai.agents import (
     Agents,
+    DiscoverFilter,
     ResponseChunk,
     TraceContext,
     derive_thread_id,
     is_thread_id,
+    tool_scope,
 )
 
 from synadia_ai.agent_service import AgentService, PromptStream
@@ -193,3 +195,147 @@ async def test_replyless_prompts_get_distinct_random_thread_ids(
             assert obs["root_id"] == obs["thread_id"]  # provisional root of its own tree
             assert obs["is_root"] is True
         evidence.write_json("replyless-thread-ids.json", seen)
+
+
+@pytest.mark.asyncio
+async def test_forwarded_envelope_keeps_spawn_edge(
+    nc: NATSClient, evidence: EvidenceRecorder
+) -> None:
+    """A handler forwarding its received envelope verbatim keeps its edge.
+
+    The forwarded envelope carries the SDK-stamped root_id of the
+    parent's own tree — a same-tree spawn, so the ambient auto-record
+    must fire on both edge channels even though the envelope's root_id
+    is non-None (the one-line way to preserve attachments must not
+    silently orphan the child)."""
+    agents = Agents(nc=nc)
+    child_obs: dict[str, Any] = {}
+    parent_obs: dict[str, Any] = {}
+
+    async def child_handler(envelope: Envelope, stream: PromptStream) -> None:
+        child_obs.update(thread_id=stream.thread_id, root_id=stream.root_id)
+        await stream.send("child ok")
+
+    async def parent_handler(envelope: Envelope, stream: PromptStream) -> None:
+        found = await agents.discover(filter=DiscoverFilter(session_name="fwd-child"))
+        assert found, "child agent not discovered"
+        with tool_scope("toolu_fwd"):
+            handle = found[0].prompt(envelope)  # verbatim — root_id is SDK-stamped
+            async for _ in handle:
+                pass
+        parent_obs.update(
+            root_id=stream.root_id,
+            child_thread=handle.thread_id,
+            child_root=handle.root_id,
+            marker=handle.spawn_marker_headers,
+            headers_after=stream.trace_headers(),
+        )
+        await stream.send("parent ok")
+
+    outer = Agents(nc=nc)
+    try:
+        async with (
+            _running_service(nc, "fwd-child", child_handler),
+            _running_service(nc, "fwd-parent", parent_handler),
+        ):
+            found = await outer.discover(filter=DiscoverFilter(session_name="fwd-parent"))
+            assert len(found) == 1
+            root_handle = found[0].prompt("delegate this verbatim")
+            async for _ in root_handle:
+                pass
+
+            # Same tree throughout: root prompt -> parent -> forwarded child.
+            assert parent_obs["root_id"] == root_handle.thread_id
+            assert parent_obs["child_root"] == parent_obs["root_id"]
+            assert child_obs["root_id"] == parent_obs["root_id"]
+            assert child_obs["thread_id"] == parent_obs["child_thread"]
+
+            # The edge survived the non-None envelope root, on both channels.
+            expected_edge = f"{child_obs['thread_id']}:toolu_fwd:tool_call"
+            assert parent_obs["marker"] is not None
+            assert parent_obs["marker"]["x-synadia-spawned"] == expected_edge
+            assert parent_obs["headers_after"]["x-synadia-spawned"] == expected_edge
+
+            evidence.write_json(
+                "forwarded-envelope-edge.json", {"parent": parent_obs, "child": child_obs}
+            )
+    finally:
+        await outer.close()
+        await agents.close()
+
+
+@pytest.mark.asyncio
+async def test_ambient_nested_spawn(nc: NATSClient, evidence: EvidenceRecorder) -> None:
+    """A parent handler spawns a child with ZERO explicit trace plumbing.
+
+    The agent-sdk binds the ambient ActiveTrace around the handler; the
+    client-sdk's prompt() picks it up (root forwarding + spawn edge with
+    the ambient tool_scope id) — the core of the implicit-correlation
+    layer, over a real broker.
+    """
+    agents = Agents(nc=nc)
+    child_obs: dict[str, Any] = {}
+    parent_obs: dict[str, Any] = {}
+
+    async def child_handler(envelope: Envelope, stream: PromptStream) -> None:
+        child_obs.update(thread_id=stream.thread_id, root_id=stream.root_id, is_root=stream.is_root)
+        await stream.send("child ok")
+
+    async def parent_handler(envelope: Envelope, stream: PromptStream) -> None:
+        found = await agents.discover(filter=DiscoverFilter(session_name="child"))
+        assert found, "child agent not discovered"
+
+        # Scopeless ambient spawn — edge is honest about having no tool.
+        scopeless = found[0].prompt("fire and observe")
+        async for _ in scopeless:
+            pass
+        assert scopeless.spawn_marker_headers is not None
+        expected_programmatic = f"{scopeless.thread_id}::programmatic"
+        assert scopeless.spawn_marker_headers["x-synadia-spawned"] == expected_programmatic
+        stream.trace_headers()  # drain the programmatic entry before the scoped one
+
+        with tool_scope("toolu_ambient"):
+            # No trace=, no record_spawn — everything ambient.
+            handle = found[0].prompt("sub-task")
+            async for _ in handle:
+                pass
+        parent_obs.update(
+            thread_id=stream.thread_id,
+            root_id=stream.root_id,
+            child_handle_thread=handle.thread_id,
+            marker=handle.spawn_marker_headers,
+            headers_after=stream.trace_headers(),
+        )
+        await stream.send("parent ok")
+
+    outer = Agents(nc=nc)
+    try:
+        async with (
+            _running_service(nc, "child", child_handler),
+            _running_service(nc, "parent", parent_handler),
+        ):
+            found = await outer.discover(filter=DiscoverFilter(session_name="parent"))
+            assert len(found) == 1
+            root_handle = found[0].prompt("do the thing")
+            async for _ in root_handle:
+                pass
+
+            # Tree: root prompt -> parent thread -> (ambient spawn) -> child thread.
+            assert parent_obs["thread_id"] == root_handle.thread_id
+            assert parent_obs["root_id"] == root_handle.thread_id  # parent is the root
+            assert child_obs["root_id"] == parent_obs["root_id"]  # forwarded implicitly
+            assert child_obs["thread_id"] == parent_obs["child_handle_thread"]
+            assert child_obs["is_root"] is False
+
+            # Edge auto-recorded with the ambient tool id, on both channels.
+            expected_edge = f"{child_obs['thread_id']}:toolu_ambient:tool_call"
+            assert parent_obs["marker"]["x-synadia-event"] == "spawn"
+            assert parent_obs["marker"]["x-synadia-spawned"] == expected_edge
+            assert parent_obs["headers_after"]["x-synadia-spawned"] == expected_edge
+
+            evidence.write_json(
+                "ambient-nested-spawn.json", {"parent": parent_obs, "child": child_obs}
+            )
+    finally:
+        await outer.close()
+        await agents.close()

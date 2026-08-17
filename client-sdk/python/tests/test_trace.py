@@ -19,6 +19,7 @@ from pydantic import ValidationError as PydanticValidationError
 from synadia_ai.agents import (
     HEADER_EVENT,
     HEADER_SPAWNED,
+    IDENTITY_PATH_MARKER,
     THREAD_ID_HEX_LEN,
     ActiveTrace,
     Agent,
@@ -32,6 +33,7 @@ from synadia_ai.agents import (
     derive_thread_id,
     encode,
     format_spawn_entry,
+    identity_path,
     is_thread_id,
     random_thread_id,
     tool_scope,
@@ -142,6 +144,25 @@ class TestFormatSpawnEntry:
 
     def test_plain_provider_ids_pass_through_unchanged(self) -> None:
         assert format_spawn_entry("c1", "toolu_01AbC") == "c1:toolu_01AbC:tool_call"
+
+
+class TestIdentityPath:
+    """The §3.2 attribution vocabulary: a base-URL path prefix."""
+
+    def test_full_identity(self) -> None:
+        path = identity_path(
+            agent="openclaw", owner="acme", session_name="default", instance_id="svc01"
+        )
+        assert path == "synadia/openclaw/acme/default/svc01"
+
+    def test_instance_placeholder_when_absent(self) -> None:
+        # Fixed arity — '-' fills the slot (path segments can't be empty).
+        path = identity_path(agent="openclaw", owner="acme", session_name="default")
+        assert path == "synadia/openclaw/acme/default/-"
+
+    def test_reserved_marker_leads(self) -> None:
+        path = identity_path(agent="a", owner="o", session_name="s", instance_id="i")
+        assert path.split("/")[0] == IDENTITY_PATH_MARKER
 
 
 def _make_agent(nc: MagicMock) -> Agent:

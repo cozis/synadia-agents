@@ -49,6 +49,21 @@ HEADER_TRACE = "x-synadia-trace"  # "<root_id>:<thread_id>"
 HEADER_SPAWNED = "x-synadia-spawned"  # comma-joined spawn entries (format_spawn_entry)
 HEADER_EVENT = "x-synadia-event"  # "spawn" tags the spawn-time marker request
 
+IDENTITY_PATH_MARKER = "synadia"  # reserved leading segment of identity_path()
+
+
+def identity_path(
+    *,
+    agent: str,
+    owner: str,
+    session_name: str,
+    instance_id: str | None = None,
+) -> str:
+    """``synadia/<agent>/<owner>/<session>/<instance_id>`` — base-URL path
+    prefix attributing a provider client's traffic to an agent (``-`` when
+    there is no instance id). Normative."""
+    return f"{IDENTITY_PATH_MARKER}/{agent}/{owner}/{session_name}/{instance_id or '-'}"
+
 
 def derive_thread_id(reply_subject: str) -> str:
     """Normative: lowercase hex of ``sha256(reply_subject)``, truncated."""

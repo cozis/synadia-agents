@@ -49,6 +49,7 @@ from synadia_ai.agents import (
     decode,
     derive_thread_id,
     format_spawn_entry,
+    identity_path,
     random_thread_id,
 )
 from synadia_ai.agents.messages import encode_chunk
@@ -138,7 +139,12 @@ class _SpawnLedger:
         tool_call_id: str | None = None,
         edge_type: str | None = None,
     ) -> dict[str, str]:
-        """Record one spawn edge; returns its spawn-marker headers."""
+        """Record one spawn edge; returns its spawn-marker headers.
+
+        The marker needs no attribution header — it rides the parent's
+        provider client, whose base-URL identity_path prefix already
+        names the spawning agent.
+        """
         entry = format_spawn_entry(child_thread_id, tool_call_id, edge_type)
         if self._open:
             self._entries[entry] = None
@@ -394,6 +400,25 @@ class AgentService:
     def on_prompt(self, handler: PromptHandler) -> None:
         """Register the prompt handler. Must be called before :meth:`start`."""
         self._prompt_handler = handler
+
+    @property
+    def identity_path(self) -> str:
+        """Base-URL path prefix attributing this agent's provider traffic:
+        compose the LLM-client base URL as
+        ``f"{proxy_root}/{service.identity_path}"``. Mirrors the §3.2
+        registration metadata; available after :meth:`start` (the §8.3
+        instance id is part of the identity)."""
+        if self._service is None:
+            raise RuntimeError(
+                "identity_path is available after start() — the §8.3 micro-service "
+                "instance id is part of the identity"
+            )
+        return identity_path(
+            agent=self.subject.agent,
+            owner=self.subject.owner,
+            session_name=self.subject.session_name,
+            instance_id=self._service.id,
+        )
 
     def _effective_max_payload(self) -> str:
         """Return the value to advertise on the prompt endpoint.

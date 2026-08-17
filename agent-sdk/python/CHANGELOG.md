@@ -23,6 +23,16 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
   auto-record spawn edges with no explicit plumbing;
   `trace_headers()` defaults its tool id from the ambient
   `tool_scope()`.
+- **Agent attribution via the base URL** — new
+  `AgentService.identity_path` property (available after `start()`,
+  when the §8.3 instance id exists): harnesses compose their
+  provider-client base URL as `f"{proxy_root}/{service.identity_path}"`
+  and every request through that client is attributed to the agent by
+  the observing proxy — no per-request identity headers. Values mirror
+  the §3.2 registration metadata exactly, so proxy node labels match
+  discovery and heartbeats. Thread + root ids travel packed as the
+  `x-synadia-trace: <root_id>:<thread_id>` header. Requires
+  `synadia-ai-agents` with `identity_path`.
 - **Malformed `root_id` rejected at the boundary** — via the shared
   envelope codec, a request whose `root_id` is not 16 lowercase hex
   chars now gets the §9 `400` error (like any malformed envelope)

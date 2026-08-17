@@ -21,12 +21,26 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
   `trace=` now joins the ambient tree automatically and auto-records
   the spawn edge (with the ambient tool id); the handle carries
   `spawn_marker_headers` for the spawn-time marker request.
+- **Agent attribution vocabulary** — `identity_path()` +
+  `IDENTITY_PATH_MARKER`: the §3.2 registration identity (sanitized
+  subject tokens + micro-service instance id) travels as a base-URL
+  path prefix — `synadia/<agent>/<owner>/<session>/<instance_id>`
+  (`-` fills an absent instance slot) — composed into the provider
+  client's base URL when pointing at an observing proxy. Identity is
+  constant per client, which is exactly what a base URL is: every
+  request through the client is attributed (model calls, spawn
+  markers, in-tool HTTP), including requests that never attach
+  `trace_headers()`. Direct-to-provider mode omits the prefix. Trace
+  headers use the `x-synadia-` prefix, marking them as Synadia Agent
+  Protocol vocabulary on shared provider endpoints.
 - **Packed thread identity** — thread + root ids travel as one
   `x-synadia-trace: <root_id>:<thread_id>` header (`HEADER_TRACE`);
   root first, mirroring W3C `traceparent`'s
   trace-then-parent order, so a root thread is visible in any dump as
-  two equal slots. The packing is delimiter-safe by construction
-  (16-hex slots) — no escaping regime.
+  two equal slots. With attribution in the base-URL path, the
+  steady-state request carries exactly one trace header. The packing
+  is delimiter-safe by construction (16-hex slots) — no escaping
+  regime.
 - **`root_id` shape validation** — `Envelope.root_id` is validated to
   the normative 16-lowercase-hex derived-thread-id shape at decode and
   construction (new `is_thread_id()` helper, exported). The value

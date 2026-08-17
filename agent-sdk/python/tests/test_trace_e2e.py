@@ -40,6 +40,11 @@ OWNER = "pytest"
 SESSION_NAME = "trace"
 
 
+def _expected_identity_path(session_name: str, instance_id: str) -> str:
+    """The base-URL prefix a harness composes for this test's agents."""
+    return f"synadia/{AGENT}/{OWNER}/{session_name}/{instance_id}"
+
+
 @asynccontextmanager
 async def _running_service(
     nc: NATSClient,
@@ -84,7 +89,7 @@ async def test_thread_identity_and_root_forwarding(
 
     agents = Agents(nc=nc)
     try:
-        async with _running_service(nc, SESSION_NAME, handler):
+        async with _running_service(nc, SESSION_NAME, handler) as service:
             found = await agents.discover()
             assert len(found) == 1
             agent = found[0]
@@ -126,6 +131,11 @@ async def test_thread_identity_and_root_forwarding(
                 assert obs["headers_first"]["x-synadia-trace"] == expected_trace
                 assert "x-synadia-spawned" not in obs["headers_second"]
 
+            # §3.2 attribution travels in the client's base-URL path, not in
+            # headers — values match what discovery advertises (§8.3 instance
+            # id included), so proxy node labels line up with heartbeats.
+            assert service.identity_path == _expected_identity_path(SESSION_NAME, agent.instance_id)
+
             evidence.write_json("trace-observations.json", recorded)
     finally:
         await agents.close()
@@ -137,9 +147,9 @@ async def test_hostile_root_id_rejected_at_decode(
 ) -> None:
     """A root_id outside the 16-lowercase-hex shape 400s at decode.
 
-    Security boundary: root_id flows into HTTP header values agent-side,
-    so a CRLF-bearing value must be rejected before the handler (and
-    thus any header emission) ever sees it.
+    Security boundary: root_id flows into HTTP header values via
+    trace_headers(), so a CRLF-bearing value must be rejected before the
+    handler (and thus any header emission) ever sees it.
     """
     handled: list[str] = []
 
@@ -378,7 +388,7 @@ async def test_ambient_nested_spawn(nc: NATSClient, evidence: EvidenceRecorder) 
     try:
         async with (
             _running_service(nc, "child", child_handler),
-            _running_service(nc, "parent", parent_handler),
+            _running_service(nc, "parent", parent_handler) as parent_svc,
         ):
             found = await outer.discover(filter=DiscoverFilter(session_name="parent"))
             assert len(found) == 1
@@ -398,6 +408,12 @@ async def test_ambient_nested_spawn(nc: NATSClient, evidence: EvidenceRecorder) 
             assert parent_obs["marker"]["x-synadia-event"] == "spawn"
             assert parent_obs["marker"]["x-synadia-spawned"] == expected_edge
             assert parent_obs["headers_after"]["x-synadia-spawned"] == expected_edge
+
+            # Attribution names the SPAWNER: the marker rides the parent's
+            # provider client, whose base-URL identity path is the parent's.
+            assert parent_svc.identity_path == _expected_identity_path(
+                "parent", found[0].instance_id
+            )
 
             evidence.write_json(
                 "ambient-nested-spawn.json", {"parent": parent_obs, "child": child_obs}

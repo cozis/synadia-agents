@@ -73,15 +73,17 @@ Both error types extend `ValidationError` → `NatsAgentError`. See [Error handl
 
 ## What's in the box
 
-| API                                                              | Purpose                                                                              |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `new Agents({ nc, ... })`                                        | Construct from a caller-owned `NatsConnection`.                                      |
-| `agents.discover({filter?, timeoutMs?})`                         | Return a live `Agent[]`; auto subscribe-before-ping (§8.5).                          |
-| `agent.prompt(text, {attachments, signal, inactivityTimeoutMs})` | Return a `PromptStream`.                                                             |
-| `agents.liveness(id)` / `onHeartbeat(id, cb)` / `ping(id)`       | Heartbeat tracking and on-demand ping.                                               |
-| `agents.close()`                                                 | Tear down SDK state; aborts all in-flight streams.                                   |
-| `loadContextOptions(name)` / `parseNatsUrl(url)`                 | Bridge `nats` CLI context files / URLs into `NodeConnectionOptions` for `connect()`. |
-| `withAgentReconnectDefaults(opts?)`                              | Opt-in resilient reconnect defaults for agent runtimes — see below. Pure transform.  |
+| API                                                                     | Purpose                                                                              |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `new Agents({ nc, ... })`                                               | Construct from a caller-owned `NatsConnection`.                                      |
+| `agents.discover({filter?, timeoutMs?})`                                | Return a live `Agent[]`; auto subscribe-before-ping (§8.5).                          |
+| `agent.prompt(text, {attachments, signal, inactivityTimeoutMs, trace})` | Return a `PromptStream` (also accepts a decoded `RequestEnvelope`).                  |
+| `stream.threadId` / `stream.rootId` / `stream.spawnMarkerHeaders`       | Observability identity — derived thread id, tree root, spawn-marker headers.         |
+| `deriveThreadId(replySubject)` / `toolScope(id, fn)`                    | Trace primitives (normative, mirrored in the Python SDK) — see `src/trace.ts`.       |
+| `agents.liveness(id)` / `onHeartbeat(id, cb)` / `ping(id)`              | Heartbeat tracking and on-demand ping.                                               |
+| `agents.close()`                                                        | Tear down SDK state; aborts all in-flight streams.                                   |
+| `loadContextOptions(name)` / `parseNatsUrl(url)`                        | Bridge `nats` CLI context files / URLs into `NodeConnectionOptions` for `connect()`. |
+| `withAgentReconnectDefaults(opts?)`                                     | Opt-in resilient reconnect defaults for agent runtimes — see below. Pure transform.  |
 
 ### Resilient reconnect defaults
 

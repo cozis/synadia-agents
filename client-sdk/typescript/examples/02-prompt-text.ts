@@ -20,7 +20,12 @@ async function main(): Promise<void> {
       console.error("no agents found — start the reference agent first.");
       process.exit(2);
     }
-    for await (const msg of await agent.prompt(text)) {
+    const stream = await agent.prompt(text);
+    // The prompt's observability identity is known before the first chunk:
+    // the thread id derives from the reply inbox, and rootId names the tree
+    // it joined (== threadId here — a fresh prompt roots its own tree).
+    console.error(`thread ${stream.threadId} (root ${stream.rootId})`);
+    for await (const msg of stream) {
       switch (msg.type) {
         case "response":
           stdout.write(msg.text);

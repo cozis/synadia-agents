@@ -4,11 +4,12 @@
 // is a CLI convenience we don't need. Attachments are base64-encoded per
 // RFC 4648 §4 (standard alphabet, padded, no URL-safe, no whitespace).
 //
-// Stays runtime-agnostic (no Buffer, no fs) so a future browser/WS build
-// can depend on this module unchanged.
+// Stays runtime-agnostic (no Buffer, no fs; the trace.ts import pulls
+// node:crypto transitively — shim it for a future browser/WS build).
 
 import { utf8ByteLength } from "../bytes.js";
 import { ProtocolError } from "../errors.js";
+import { THREAD_ID_HEX_LEN, isThreadId } from "../trace.js";
 
 export interface RequestAttachment {
   readonly filename: string;
@@ -18,6 +19,11 @@ export interface RequestAttachment {
 export interface RequestEnvelope {
   readonly prompt: string;
   readonly attachments?: ReadonlyArray<RequestAttachment>;
+  // Observability: thread id of the tree's ROOT thread — always the
+  // derived hash, never a raw inbox subject (see trace.ts). Absent for
+  // legacy callers and omitted from the wire, keeping the compact §5.1
+  // form. Serialized as `root_id`.
+  readonly rootId?: string;
 }
 
 /** Serialize a request envelope to UTF-8 bytes per §5.1. */
@@ -32,6 +38,10 @@ export function encodedEnvelopeSize(env: RequestEnvelope): number {
 
 function envelopeObject(env: RequestEnvelope): Record<string, unknown> {
   const obj: Record<string, unknown> = { prompt: env.prompt };
+  if (env.rootId !== undefined) {
+    assertRootIdShape(env.rootId);
+    obj["root_id"] = env.rootId;
+  }
   if (env.attachments && env.attachments.length > 0) {
     obj["attachments"] = env.attachments.map((a) => ({
       filename: a.filename,
@@ -147,9 +157,23 @@ export function decodeEnvelope(data: Uint8Array): RequestEnvelope {
     throw new ProtocolError("envelope `prompt` must be a non-empty string");
   }
 
+  // Security boundary, not a style check — root_id arrives from arbitrary
+  // NATS callers and flows into HTTP header values agent-side (CRLF
+  // injection), so it must die here, at the decode chokepoint.
+  const rawRootId = obj["root_id"];
+  let rootId: string | undefined;
+  if (rawRootId !== undefined) {
+    if (typeof rawRootId !== "string" || !isThreadId(rawRootId)) {
+      throw new ProtocolError(
+        `envelope root_id must be ${THREAD_ID_HEX_LEN} lowercase hex chars (a derived thread id)`,
+      );
+    }
+    rootId = rawRootId;
+  }
+
   const rawAttachments = obj["attachments"];
   if (rawAttachments === undefined) {
-    return { prompt };
+    return rootId !== undefined ? { prompt, rootId } : { prompt };
   }
   if (!Array.isArray(rawAttachments)) {
     throw new ProtocolError("envelope `attachments` must be an array");
@@ -158,7 +182,16 @@ export function decodeEnvelope(data: Uint8Array): RequestEnvelope {
   const attachments: RequestAttachment[] = rawAttachments.map((item, idx) =>
     decodeAttachment(item, idx),
   );
-  return attachments.length > 0 ? { prompt, attachments } : { prompt };
+  const base = attachments.length > 0 ? { prompt, attachments } : { prompt };
+  return rootId !== undefined ? { ...base, rootId } : base;
+}
+
+function assertRootIdShape(rootId: string): void {
+  if (!isThreadId(rootId)) {
+    throw new ProtocolError(
+      `envelope rootId must be ${THREAD_ID_HEX_LEN} lowercase hex chars (a derived thread id)`,
+    );
+  }
 }
 
 /**

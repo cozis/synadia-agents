@@ -53,11 +53,15 @@ export interface PromptStreamInit {
   readonly maxWaitMs: number;
   readonly signal?: AbortSignal | undefined;
   readonly threadId: string;
+  readonly rootId: string;
 }
 
 export class PromptStream implements AsyncIterable<StreamMessage> {
   /** This prompt execution's derived thread id (observability identity). */
   readonly threadId: string;
+
+  /** Root thread id of the tree this prompt joined (== `threadId` when it rooted a new tree). */
+  readonly rootId: string;
 
   readonly #nc: NatsConnection;
   readonly #mux: MuxInbox;
@@ -81,6 +85,7 @@ export class PromptStream implements AsyncIterable<StreamMessage> {
     this.#maxWaitMs = init.maxWaitMs;
     this.#signal = init.signal;
     this.threadId = init.threadId;
+    this.rootId = init.rootId;
   }
 
   /**

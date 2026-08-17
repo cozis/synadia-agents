@@ -7,6 +7,13 @@
 // subject), and it is unique per prompt, so a hash of it identifies the
 // thread with zero extra wire surface.
 //
+// `rootId` is the thread id of the tree's *root* thread, forwarded down
+// the tree via an optional envelope field (§5.6 tolerates unknown fields).
+// It is always the hash — never the raw inbox subject, which would hand
+// every descendant the root caller's live reply subject (an injection
+// surface). Root test: a thread is root iff its rootId equals the hash of
+// its own reply subject.
+//
 // Mirrors the Python SDK's `synadia_ai/agents/trace.py` — the derivation
 // and vocabulary are normative and must match byte-for-byte.
 
@@ -34,4 +41,10 @@ export function deriveThreadId(replySubject: string): string {
 
 export function randomThreadId(): string {
   return randomBytes(THREAD_ID_HEX_LEN / 2).toString("hex");
+}
+
+/** Trace identity a parent thread forwards to a spawned prompt
+ * (`PromptResponse.childTrace()` → `Agent.prompt(..., { trace })`). */
+export interface TraceContext {
+  readonly rootId: string;
 }

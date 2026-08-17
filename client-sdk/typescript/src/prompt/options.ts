@@ -2,6 +2,7 @@
 // stable and callers can import it without pulling in the shell layer.
 
 import type { AttachmentInput } from "./attachments.js";
+import type { TraceContext } from "../trace.js";
 
 export interface PromptOptions {
   /** Zero or more attachments — file path, `file:` URL, or bytes object. */
@@ -18,6 +19,12 @@ export interface PromptOptions {
   readonly maxWaitMs?: number;
   /** `AbortSignal` that aborts the stream when triggered (added in M5). */
   readonly signal?: AbortSignal;
+  /**
+   * Forward a parent thread's trace identity so this prompt joins the
+   * parent's tree instead of rooting a new one. Root precedence: envelope
+   * `rootId` > `trace` > new tree rooted at this prompt.
+   */
+  readonly trace?: TraceContext;
 }
 
 /** Default absolute ceiling for a single `prompt()` response — 10 minutes. */

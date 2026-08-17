@@ -87,37 +87,38 @@ export class Agent {
    *     `maxWaitMs` (default {@link DEFAULT_PROMPT_MAX_WAIT_MS}, 10 minutes)
    *     without seeing the wire terminator.
    */
-  prompt(text: string, opts: PromptOptions = {}): Promise<PromptStream> {
-    assertPromptNonEmpty(text);
+  prompt(text: string | RequestEnvelope, opts: PromptOptions = {}): Promise<PromptStream> {
+    const promptText = typeof text === "string" ? text : text.prompt;
+    assertPromptNonEmpty(promptText);
     const attachmentInputs = opts.attachments ?? [];
-    const hasAttachments = attachmentInputs.length > 0;
+    const baseAttachments = typeof text === "string" ? [] : (text.attachments ?? []);
+    const hasAttachments = attachmentInputs.length > 0 || baseAttachments.length > 0;
     if (hasAttachments) {
       assertAttachmentsAllowed(true, this.promptEndpoint);
     }
-
-    // The caller's own broker may enforce a smaller `max_payload` than
-    // the agent advertises (multi-cluster / per-account configs); pass
-    // `nc.info?.max_payload` so the validator picks the smaller of the
-    // two. Treat 0 / missing as "not declared".
-    const connLimit = this.#nc.info?.max_payload;
+    // Root resolution: explicit envelope field > explicit trace > new tree
+    // rooted at this prompt (resolved against the minted thread id inside
+    // #buildStream).
+    const explicitRoot = typeof text === "string" ? undefined : text.rootId;
 
     // Fast path: text-only — max_payload check is sync.
     if (!hasAttachments) {
-      const envelope: RequestEnvelope = { prompt: text };
-      assertWithinMaxPayload(encodedEnvelopeSize(envelope), this.promptEndpoint, connLimit);
-      return Promise.resolve(this.#buildStream(envelope, opts));
+      return Promise.resolve(this.#buildStream({ prompt: promptText }, explicitRoot, opts));
     }
 
     // With attachments: load files, then check max_payload on the final encoded size.
     return (async (): Promise<PromptStream> => {
-      const attachments = await normalizeAttachments(attachmentInputs);
-      const envelope: RequestEnvelope = { prompt: text, attachments };
-      assertWithinMaxPayload(encodedEnvelopeSize(envelope), this.promptEndpoint, connLimit);
-      return this.#buildStream(envelope, opts);
+      const extra = await normalizeAttachments(attachmentInputs);
+      const attachments = [...baseAttachments, ...extra];
+      return this.#buildStream({ prompt: promptText, attachments }, explicitRoot, opts);
     })();
   }
 
-  #buildStream(envelope: RequestEnvelope, opts: PromptOptions): PromptStream {
+  #buildStream(
+    base: RequestEnvelope,
+    explicitRoot: string | undefined,
+    opts: PromptOptions,
+  ): PromptStream {
     const signal = combineAbortSignals([opts.signal, this.#closeSignal]);
     // Mint the mux token up front (pure, no wire I/O) so the reply
     // subject — and the thread id derived from it — are known before
@@ -125,6 +126,16 @@ export class Agent {
     const mux = muxFor(this.#nc);
     const token = mux.mintToken();
     const threadId = deriveThreadId(mux.replySubjectFor(token));
+    const rootId = explicitRoot ?? opts.trace?.rootId ?? threadId;
+    const envelope: RequestEnvelope = { ...base, rootId };
+    // §5.4: local validation happens synchronously BEFORE any wire I/O. The
+    // caller's own broker may enforce a smaller max_payload than the agent
+    // advertises — the validator picks the smaller (0/missing = undeclared).
+    assertWithinMaxPayload(
+      encodedEnvelopeSize(envelope),
+      this.promptEndpoint,
+      this.#nc.info?.max_payload,
+    );
     return new PromptStream({
       nc: this.#nc,
       mux,
@@ -135,6 +146,7 @@ export class Agent {
       maxWaitMs: opts.maxWaitMs ?? DEFAULT_PROMPT_MAX_WAIT_MS,
       signal,
       threadId,
+      rootId,
     });
   }
 }

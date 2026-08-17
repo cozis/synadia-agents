@@ -213,3 +213,30 @@ describe("decodeStrictBase64", () => {
     expect(decodeStrictBase64(valid)).toEqual(decodeBase64(valid));
   });
 });
+
+describe("decodeEnvelope — root_id (trace propagation)", () => {
+  it("round-trips a shape-valid root_id", () => {
+    const bytes = new TextEncoder().encode(
+      JSON.stringify({ prompt: "hi", root_id: "a".repeat(16) }),
+    );
+    expect(decodeEnvelope(bytes).rootId).toBe("a".repeat(16));
+  });
+
+  it("decodes to undefined for legacy payloads and plain text", () => {
+    expect(decodeEnvelope(new TextEncoder().encode('{"prompt": "hi"}')).rootId).toBeUndefined();
+    expect(decodeEnvelope(new TextEncoder().encode("just text")).rootId).toBeUndefined();
+  });
+
+  it.each([
+    "x\r\nx-evil: 1", // CRLF header injection
+    "a".repeat(15), // too short
+    "a".repeat(17), // too long
+    "A".repeat(16), // uppercase
+    "g".repeat(16), // non-hex
+    "é".repeat(16), // non-latin-1
+    "", // empty
+  ])("rejects out-of-shape root_id %j at decode", (bad) => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ prompt: "hi", root_id: bad }));
+    expect(() => decodeEnvelope(bytes)).toThrow(ProtocolError);
+  });
+});

@@ -20,6 +20,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   lowercase sha256 hex of its reply subject truncated to 16 chars, derived
   independently by both ends (normative; mirrors the Python SDK).
   `PromptStream` now exposes `threadId`, known before the first chunk.
+- **Tree identity** — validated optional `RequestEnvelope.rootId`
+  (wire field `root_id`, §5.6-tolerated, omitted when unset; must be a
+  16-lowercase-hex derived thread id — out-of-shape values are rejected at
+  decode before they can reach agent-side HTTP headers), `TraceContext`,
+  and `Agent.prompt(text | envelope, { trace })`: a spawning agent places
+  the child in its parent's tree; the stream exposes `rootId` alongside
+  `threadId`. Root precedence: envelope `rootId` > `trace` > new tree
+  rooted at this prompt. `prompt()` also accepts a decoded
+  `RequestEnvelope` (the one-line way for a handler to forward a request,
+  attachments and all).
 
 ### Changed
 

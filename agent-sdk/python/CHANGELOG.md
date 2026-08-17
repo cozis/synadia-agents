@@ -10,6 +10,11 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Added
 
+- **Malformed `root_id` rejected at the boundary** — via the shared
+  envelope codec, a request whose `root_id` is not 16 lowercase hex
+  chars now gets the §9 `400` error (like any malformed envelope)
+  before the handler runs, so caller-controlled bytes can never reach
+  the agent's outbound `x-synadia-trace` header.
 - **Reply-less prompts get random thread ids** — a fire-and-forget
   request (raw-NATS publish with no reply subject) previously hashed
   the empty string, collapsing every such request on every agent onto

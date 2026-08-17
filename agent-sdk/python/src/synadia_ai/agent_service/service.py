@@ -40,6 +40,7 @@ from synadia_ai.agents import (
     QueryTimeout,
     ResponseChunk,
     StatusChunk,
+    TraceContext,
     decode,
     derive_thread_id,
     random_thread_id,
@@ -115,8 +116,9 @@ class PromptStream:
     chunks and return; raising an exception converts to a service error
     per §9.
 
-    Also carries the request's observability identity: :attr:`thread_id`
-    (derived from the reply subject; random when there is none).
+    Also carries the request's observability identity —
+    :attr:`thread_id`, :attr:`root_id`, :attr:`is_root` — plus
+    :meth:`child_trace` for spawning sub-agents in the same tree.
     """
 
     def __init__(
@@ -125,12 +127,14 @@ class PromptStream:
         nc: NATSClient,
         *,
         reply_subject: str,
+        root_id: str | None = None,
     ) -> None:
         self._request = request
         self._nc = nc
         # No reply subject (fire-and-forget raw-NATS caller) ⇒ random
         # shape-valid id rather than the constant sha256("") hash.
         self._thread_id = derive_thread_id(reply_subject) if reply_subject else random_thread_id()
+        self._root_id = root_id if root_id is not None else self._thread_id
 
     # --- observability identity ----------------------------------------
 
@@ -138,6 +142,21 @@ class PromptStream:
     def thread_id(self) -> str:
         """This prompt execution's derived thread id."""
         return self._thread_id
+
+    @property
+    def root_id(self) -> str:
+        """Root thread id of the tree this prompt belongs to."""
+        return self._root_id
+
+    @property
+    def is_root(self) -> bool:
+        """True iff this thread is its tree's root (provisionally true
+        for legacy callers that sent no ``root_id``)."""
+        return self._root_id == self._thread_id
+
+    def child_trace(self) -> TraceContext:
+        """Trace context to pass to ``Agent.prompt(trace=...)`` when spawning."""
+        return TraceContext(root_id=self._root_id)
 
     async def send(self, chunk: str | Chunk) -> None:
         """Publish one chunk to the caller's reply subject.
@@ -488,6 +507,7 @@ class AgentService:
                 request,
                 self._nc,
                 reply_subject=request._msg.reply,
+                root_id=envelope.root_id,
             )
             handler = self._prompt_handler
             if handler is None:  # pragma: no cover — start() rejects this path

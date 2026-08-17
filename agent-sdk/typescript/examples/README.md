@@ -7,13 +7,14 @@ Counterpart to the caller-side numbered demos in
 
 They form a ladder — each rung is the one before plus a little more:
 
-| Example                                | What it shows                                                                                    |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| [`01-echo.ts`](01-echo.ts)             | Minimal echo agent on top of `AgentService` — replies `echo: <prompt>`.                          |
-| [`02-ollama.ts`](02-ollama.ts)         | Same shape as `01-echo`, but forwards each prompt to a local Ollama and streams the reply.       |
-| [`03-openrouter.ts`](03-openrouter.ts) | Same shape again, but the backend is the hosted, OpenAI-compatible OpenRouter API (needs a key). |
-| [`04-combined.ts`](04-combined.ts)     | Ollama **or** OpenRouter, auto-selected from the env; model access factored into `llm.ts`.       |
-| [`05-tools.ts`](05-tools.ts)           | Gives the LLM a `read_sensor` tool wired to a NATS microservice, then reasons over the reading.  |
+| Example                                | What it shows                                                                                                             |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| [`01-echo.ts`](01-echo.ts)             | Minimal echo agent on top of `AgentService` — replies `echo: <prompt>`.                                                   |
+| [`02-ollama.ts`](02-ollama.ts)         | Same shape as `01-echo`, but forwards each prompt to a local Ollama and streams the reply.                                |
+| [`03-openrouter.ts`](03-openrouter.ts) | Same shape again, but the backend is the hosted, OpenAI-compatible OpenRouter API (needs a key).                          |
+| [`04-combined.ts`](04-combined.ts)     | Ollama **or** OpenRouter, auto-selected from the env; model access factored into `llm.ts`.                                |
+| [`05-tools.ts`](05-tools.ts)           | Gives the LLM a `read_sensor` tool wired to a NATS microservice, then reasons over the reading.                           |
+| [`06-subagent.ts`](06-subagent.ts)     | A coordinator agent that delegates each prompt to a worker agent — a minimal multi-agent tree with automatic trace edges. |
 
 ## Environment variables
 

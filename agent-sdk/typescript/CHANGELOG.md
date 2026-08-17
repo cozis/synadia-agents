@@ -27,6 +27,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   completion-report channel — the packed `x-synadia-trace` pair plus the
   drained `x-synadia-spawned` entries — for the parent's next model
   request. Tool ids default from the ambient `toolScope()`.
+- **Ambient trace binding** — `AgentService` binds the client-sdk's
+  `ActiveTrace` (AsyncLocalStorage) around each prompt-handler
+  invocation: `Agent.prompt()` calls inside a handler join the thread's
+  tree and auto-record spawn edges with no explicit plumbing, labeled by
+  the ambient `toolScope()`. Handlers run concurrently and each sees its
+  own binding.
 
 ### Changed
 

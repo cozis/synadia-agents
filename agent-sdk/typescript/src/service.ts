@@ -48,8 +48,10 @@ import {
   PROMPT_QUEUE_GROUP,
   ProtocolError,
   SDK_PROTOCOL_VERSION,
+  bindActiveTrace,
   deriveThreadId,
   randomThreadId,
+  type ActiveTrace,
   type TraceContext,
   SERVICE_NAME,
   STATUS_ENDPOINT_NAME,
@@ -293,6 +295,19 @@ export class PromptResponse {
   /** Trace context to pass to `Agent.prompt(..., { trace })` when spawning. */
   childTrace(): TraceContext {
     return { rootId: this.rootId };
+  }
+
+  /** Ambient-context view of this response — carries the ledger's bound
+   * `record`, deliberately not a method of `this`, so work outliving the
+   * request doesn't pin the `ServiceMsg` via the ambient store.
+   * @internal */
+  asActiveTrace(): ActiveTrace {
+    const ledger = this.#ledger;
+    return {
+      threadId: this.threadId,
+      rootId: this.rootId,
+      recordSpawn: (childThreadId) => ledger.record(childThreadId),
+    };
   }
 
   /**
@@ -703,7 +718,12 @@ export class AgentService {
     };
 
     try {
-      await handler(envelope, response);
+      // Bind the ambient trace for the handler's async call tree:
+      // Agent.prompt() calls inside it join this thread's tree and
+      // auto-record spawn edges without explicit plumbing. ALS-scoped
+      // (flows into awaited work), so concurrent handlers each see
+      // their own binding.
+      await bindActiveTrace(response.asActiveTrace(), () => handler(envelope, response));
     } catch (err) {
       // Stop keep-alive BEFORE the §9 error frame so an ack chunk can't
       // race in between the error and the terminator.

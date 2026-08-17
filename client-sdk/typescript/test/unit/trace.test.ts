@@ -9,8 +9,10 @@ import {
   activeTrace,
   bindActiveTrace,
   currentToolCallId,
+  IDENTITY_PATH_MARKER,
   deriveThreadId,
   formatSpawnEntry,
+  identityPath,
   isThreadId,
   randomThreadId,
   toolScope,
@@ -125,5 +127,24 @@ describe("formatSpawnEntry — the edge policy", () => {
 
   it("passes plain provider ids through unchanged", () => {
     expect(formatSpawnEntry("c1", "toolu_01AbC")).toBe("c1:toolu_01AbC:tool_call");
+  });
+});
+
+describe("identityPath — §3.2 attribution as a base-URL path prefix", () => {
+  it("composes the full identity", () => {
+    expect(
+      identityPath({ agent: "openclaw", owner: "acme", name: "default", instanceId: "svc01" }),
+    ).toBe("synadia/openclaw/acme/default/svc01");
+  });
+
+  it("fills an absent instance slot with '-' (fixed arity)", () => {
+    expect(identityPath({ agent: "openclaw", owner: "acme", name: "default" })).toBe(
+      "synadia/openclaw/acme/default/-",
+    );
+  });
+
+  it("leads with the reserved marker", () => {
+    const path = identityPath({ agent: "a", owner: "o", name: "s", instanceId: "i" });
+    expect(path.split("/")[0]).toBe(IDENTITY_PATH_MARKER);
   });
 });

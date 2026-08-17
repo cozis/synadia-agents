@@ -38,6 +38,20 @@ export const HEADER_TRACE = "x-synadia-trace"; // "<root_id>:<thread_id>"
 export const HEADER_SPAWNED = "x-synadia-spawned"; // comma-joined spawn entries (formatSpawnEntry)
 export const HEADER_EVENT = "x-synadia-event"; // "spawn" tags the spawn-time marker request
 
+export const IDENTITY_PATH_MARKER = "synadia"; // reserved leading segment of identityPath()
+
+/** `synadia/<agent>/<owner>/<name>/<instanceId>` — base-URL path prefix
+ * attributing a provider client's traffic to an agent (`-` when there is
+ * no instance id). Normative. */
+export function identityPath(opts: {
+  readonly agent: string;
+  readonly owner: string;
+  readonly name: string;
+  readonly instanceId?: string;
+}): string {
+  return `${IDENTITY_PATH_MARKER}/${opts.agent}/${opts.owner}/${opts.name}/${opts.instanceId || "-"}`;
+}
+
 /** Normative: lowercase hex of `sha256(replySubject)` (UTF-8), truncated. */
 export function deriveThreadId(replySubject: string): string {
   return createHash("sha256")

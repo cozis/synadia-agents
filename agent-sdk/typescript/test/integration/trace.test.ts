@@ -251,6 +251,13 @@ describe.skipIf(!natsUrl)("trace propagation — ambient spawns", () => {
     expect(marker["x-synadia-spawned"]).toBe(expectedEdge);
     const headersAfter = parentObs["headersAfter"] as Record<string, string>;
     expect(headersAfter["x-synadia-spawned"]).toBe(expectedEdge);
+
+    // Attribution names the SPAWNER: the marker rides the parent's provider
+    // client, whose base-URL identity path is the parent's.
+    const parentSvc2 = services.find((s) => s.subject.name === "amb-parent")!;
+    expect(parentSvc2.identityPath).toBe(
+      `synadia/${AGENT}/${OWNER}/amb-parent/${parentSvc2.instanceId}`,
+    );
   });
 
   it("an ambient spawn from a task outliving its request: marker only", async () => {

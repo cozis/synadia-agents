@@ -39,6 +39,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   inherited ambient trace) no longer accrete undrainable entries. Late
   spawns still join the tree and deliver their edge via the spawn-time
   marker — the one channel for post-completion spawns.
+- **Agent attribution via the base URL** — new `AgentService.identityPath`
+  getter (available after `start()`, when the instance id exists):
+  harnesses compose their provider-client base URL as
+  `` `${proxyRoot}/${service.identityPath}` `` and every request through
+  that client is attributed to the agent by the observing proxy — no
+  per-request identity headers. Thread + root ids travel packed as the
+  `x-synadia-trace: <root_id>:<thread_id>` header.
 
 ### Changed
 

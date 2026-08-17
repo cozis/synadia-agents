@@ -52,6 +52,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   naming the ambient root keeps its edge, a foreign root records nothing
   (there are no cross-tree edges), and `trace` is the explicit manual-mode
   opt-out. The edge is recorded only after §5.4 validation.
+- **Agent attribution vocabulary** — `identityPath()` +
+  `IDENTITY_PATH_MARKER`: the registration identity travels as a base-URL
+  path prefix — `synadia/<agent>/<owner>/<name>/<instanceId>` (`-` fills
+  an absent instance slot) — composed into the provider client's base URL
+  when pointing at an observing proxy; every request through the client is
+  then attributed with no per-request identity headers.
 
 ### Changed
 

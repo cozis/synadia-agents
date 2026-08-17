@@ -41,6 +41,7 @@ import {
   decodeEnvelope,
   encodeBase64,
   formatSpawnEntry,
+  identityPath,
   formatHumanBytes,
   newInbox,
   parseHumanBytes,
@@ -482,6 +483,25 @@ export class AgentService {
       throw new Error("AgentService.service: service not started — call start() first");
     }
     return this.#service;
+  }
+
+  /** Base-URL path prefix attributing this agent's provider traffic:
+   * compose the LLM-client base URL as
+   * `` `${proxyRoot}/${service.identityPath}` ``. Mirrors the registration
+   * identity; available after {@link start} (the §8.3 instance id is part
+   * of the identity). */
+  get identityPath(): string {
+    if (!this.#service) {
+      throw new Error(
+        "AgentService.identityPath: available after start() — the instance id is part of the identity",
+      );
+    }
+    return identityPath({
+      agent: this.#subject.subjectToken,
+      owner: this.#subject.owner,
+      name: this.#subject.name,
+      instanceId: this.#service.info().id,
+    });
   }
 
   /** Register the prompt handler. Must be called before {@link start}. */

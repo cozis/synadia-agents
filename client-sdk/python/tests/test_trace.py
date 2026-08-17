@@ -17,14 +17,19 @@ from pydantic import ValidationError as PydanticValidationError
 
 from synadia_ai.agents import (
     THREAD_ID_HEX_LEN,
+    ActiveTrace,
     Envelope,
     ProtocolError,
     TraceContext,
+    active_trace,
+    bind_active_trace,
+    current_tool_call_id,
     decode,
     derive_thread_id,
     encode,
     is_thread_id,
     random_thread_id,
+    tool_scope,
 )
 
 
@@ -101,3 +106,22 @@ class TestTraceContext:
     def test_frozen_carrier(self) -> None:
         ctx = TraceContext(root_id="b" * 16)
         assert ctx.root_id == "b" * 16
+
+
+class TestAmbientContext:
+    """The contextvars layer: binding, nesting, reset."""
+
+    def test_no_ambient_outside_binding(self) -> None:
+        assert active_trace() is None
+        assert current_tool_call_id() is None
+
+    def test_bind_and_tool_scope_nest_and_reset(self) -> None:
+        with bind_active_trace(ActiveTrace(thread_id="p", root_id="r")):
+            assert active_trace() is not None
+            with tool_scope("toolu_outer"):
+                assert current_tool_call_id() == "toolu_outer"
+                with tool_scope("toolu_inner"):
+                    assert current_tool_call_id() == "toolu_inner"
+                assert current_tool_call_id() == "toolu_outer"
+            assert current_tool_call_id() is None
+        assert active_trace() is None

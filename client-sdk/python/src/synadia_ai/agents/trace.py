@@ -20,6 +20,9 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 # Length (hex chars) of derived thread ids. 16 hex chars = 64 bits —
@@ -50,3 +53,67 @@ class TraceContext:
     (``PromptStream.child_trace()`` → ``Agent.prompt(trace=...)``)."""
 
     root_id: str
+
+
+# --- ambient (async-context) layer -------------------------------------
+#
+# Plain PEP 567 contextvars making correlation implicit where threading
+# arguments through is impossible or noisy: the agent-sdk binds an
+# ActiveTrace around each prompt handler, and Agent.prompt() consults it
+# when no explicit ``trace`` is passed — a spawn inside a handler joins
+# the parent's tree and records its edge automatically.
+
+SpawnRecorder = Callable[[str], dict[str, str]]
+"""``(child_thread_id) -> spawn-marker headers`` — the parent stream's
+edge recorder; runs in the spawner's context, so it resolves the
+ambient tool scope itself."""
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveTrace:
+    """The prompt execution currently running in this async context."""
+
+    thread_id: str
+    root_id: str
+    record_spawn: SpawnRecorder | None = None
+
+
+_active_trace: ContextVar[ActiveTrace | None] = ContextVar(
+    "synadia_agents_active_trace", default=None
+)
+_active_tool_call: ContextVar[str | None] = ContextVar(
+    "synadia_agents_active_tool_call", default=None
+)
+
+
+def active_trace() -> ActiveTrace | None:
+    """The ambient :class:`ActiveTrace`, or None outside a bound handler."""
+    return _active_trace.get()
+
+
+def current_tool_call_id() -> str | None:
+    """The innermost ambient :func:`tool_scope` id, or None outside one."""
+    return _active_tool_call.get()
+
+
+@contextmanager
+def bind_active_trace(trace: ActiveTrace) -> Iterator[None]:
+    """Bind ``trace`` as the ambient context for the enclosed scope (the
+    agent-sdk calls this around each prompt-handler invocation)."""
+    token = _active_trace.set(trace)
+    try:
+        yield
+    finally:
+        _active_trace.reset(token)
+
+
+@contextmanager
+def tool_scope(tool_call_id: str) -> Iterator[None]:
+    """Mark the enclosed scope as executing one tool invocation: ambient
+    spawns inside it label their edge with ``tool_call_id``. Scopes
+    nest; the innermost wins."""
+    token = _active_tool_call.set(tool_call_id)
+    try:
+        yield
+    finally:
+        _active_tool_call.reset(token)

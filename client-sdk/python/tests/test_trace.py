@@ -11,13 +11,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
 from synadia_ai.agents import (
+    HEADER_EVENT,
+    HEADER_SPAWNED,
     THREAD_ID_HEX_LEN,
     ActiveTrace,
+    Agent,
     Envelope,
     ProtocolError,
     TraceContext,
@@ -32,6 +36,7 @@ from synadia_ai.agents import (
     random_thread_id,
     tool_scope,
 )
+from tests.harness.agent_info import make_agent_info
 
 
 class TestDeriveThreadId:
@@ -109,25 +114,6 @@ class TestTraceContext:
         assert ctx.root_id == "b" * 16
 
 
-class TestAmbientContext:
-    """The contextvars layer: binding, nesting, reset."""
-
-    def test_no_ambient_outside_binding(self) -> None:
-        assert active_trace() is None
-        assert current_tool_call_id() is None
-
-    def test_bind_and_tool_scope_nest_and_reset(self) -> None:
-        with bind_active_trace(ActiveTrace(thread_id="p", root_id="r")):
-            assert active_trace() is not None
-            with tool_scope("toolu_outer"):
-                assert current_tool_call_id() == "toolu_outer"
-                with tool_scope("toolu_inner"):
-                    assert current_tool_call_id() == "toolu_inner"
-                assert current_tool_call_id() == "toolu_outer"
-            assert current_tool_call_id() is None
-        assert active_trace() is None
-
-
 class TestFormatSpawnEntry:
     """The edge policy: ambient tool default + edge-type honesty."""
 
@@ -156,3 +142,116 @@ class TestFormatSpawnEntry:
 
     def test_plain_provider_ids_pass_through_unchanged(self) -> None:
         assert format_spawn_entry("c1", "toolu_01AbC") == "c1:toolu_01AbC:tool_call"
+
+
+def _make_agent(nc: MagicMock) -> Agent:
+    nc.max_payload = 0  # "not declared" — §5.4 validator falls back to endpoint value
+    return Agent(nc, make_agent_info("agents.prompt.test.pytest.s"))
+
+
+class TestAmbientContext:
+    """The contextvars layer: fallback, auto-record, tool scope."""
+
+    def test_no_ambient_outside_binding(self) -> None:
+        assert active_trace() is None
+        assert current_tool_call_id() is None
+
+    def test_bind_and_tool_scope_nest_and_reset(self) -> None:
+        with bind_active_trace(ActiveTrace(thread_id="p", root_id="r")):
+            assert active_trace() is not None
+            with tool_scope("toolu_outer"):
+                assert current_tool_call_id() == "toolu_outer"
+                with tool_scope("toolu_inner"):
+                    assert current_tool_call_id() == "toolu_inner"
+                assert current_tool_call_id() == "toolu_outer"
+            assert current_tool_call_id() is None
+        assert active_trace() is None
+
+    def test_prompt_joins_ambient_tree_and_auto_records(self) -> None:
+        # The recorder runs synchronously in the spawner's context, so it
+        # resolves the ambient tool scope itself — record what it saw.
+        recorded: list[tuple[str, str | None]] = []
+
+        def recorder(child: str) -> dict[str, str]:
+            recorded.append((child, current_tool_call_id()))
+            return {HEADER_EVENT: "spawn", HEADER_SPAWNED: format_spawn_entry(child)}
+
+        agent = _make_agent(MagicMock())
+        with (
+            bind_active_trace(
+                ActiveTrace(thread_id="a" * 16, root_id="b" * 16, record_spawn=recorder)
+            ),
+            tool_scope("toolu_x"),
+        ):
+            handle = agent.prompt("hi")
+
+        assert handle.root_id == "b" * 16
+        assert recorded == [(handle.thread_id, "toolu_x")]
+        assert handle.spawn_marker_headers is not None
+        assert handle.spawn_marker_headers[HEADER_EVENT] == "spawn"
+        assert (
+            handle.spawn_marker_headers[HEADER_SPAWNED] == f"{handle.thread_id}:toolu_x:tool_call"
+        )
+
+    def test_explicit_trace_wins_and_disables_auto_record(self) -> None:
+        recorded: list[tuple[str, str | None]] = []
+
+        def recorder(child: str) -> dict[str, str]:
+            recorded.append((child, current_tool_call_id()))
+            return {}
+
+        agent = _make_agent(MagicMock())
+        with bind_active_trace(
+            ActiveTrace(thread_id="a" * 16, root_id="c" * 16, record_spawn=recorder)
+        ):
+            handle = agent.prompt("hi", trace=TraceContext(root_id="d" * 16))
+
+        assert handle.root_id == "d" * 16
+        assert recorded == []
+        assert handle.spawn_marker_headers is None
+
+    def test_forwarded_envelope_same_tree_keeps_auto_record(self) -> None:
+        # A handler forwarding its received envelope verbatim: the
+        # envelope's root_id (SDK-stamped upstream) names the ambient
+        # tree, so this is a same-tree spawn and the edge must survive.
+        recorded: list[str] = []
+
+        def recorder(child: str) -> dict[str, str]:
+            recorded.append(child)
+            return {HEADER_EVENT: "spawn", HEADER_SPAWNED: format_spawn_entry(child)}
+
+        agent = _make_agent(MagicMock())
+        forwarded = Envelope(prompt="hi", root_id="b" * 16)
+        with bind_active_trace(
+            ActiveTrace(thread_id="a" * 16, root_id="b" * 16, record_spawn=recorder)
+        ):
+            handle = agent.prompt(forwarded)
+
+        assert handle.root_id == "b" * 16
+        assert recorded == [handle.thread_id]
+        assert handle.spawn_marker_headers is not None
+
+    def test_envelope_root_of_foreign_tree_disables_auto_record(self) -> None:
+        # A root naming a different tree: honored explicitly, and no
+        # edge is recorded — there are no cross-tree edges.
+        recorded: list[str] = []
+
+        def recorder(child: str) -> dict[str, str]:
+            recorded.append(child)
+            return {}
+
+        agent = _make_agent(MagicMock())
+        foreign = Envelope(prompt="hi", root_id="f" * 16)
+        with bind_active_trace(
+            ActiveTrace(thread_id="a" * 16, root_id="b" * 16, record_spawn=recorder)
+        ):
+            handle = agent.prompt(foreign)
+
+        assert handle.root_id == "f" * 16
+        assert recorded == []
+        assert handle.spawn_marker_headers is None
+
+    def test_prompt_without_any_context_roots_itself(self) -> None:
+        handle = _make_agent(MagicMock()).prompt("hi")
+        assert handle.root_id == handle.thread_id
+        assert handle.spawn_marker_headers is None

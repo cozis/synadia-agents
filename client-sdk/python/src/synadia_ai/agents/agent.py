@@ -28,7 +28,7 @@ from .errors import (
     StreamStalledError,
 )
 from .messages import QueryChunk, ResponseChunk, StatusChunk, decode_chunk
-from .trace import TraceContext, derive_thread_id
+from .trace import ActiveTrace, TraceContext, active_trace, derive_thread_id
 from .validation import (
     assert_attachments_allowed,
     assert_prompt_non_empty,
@@ -96,10 +96,12 @@ StreamMessage: TypeAlias = ResponseChunk | StatusChunk | Query
 
 class PromptHandle:
     """The value returned by :meth:`Agent.prompt` — a drop-in async iterator
-    that also exposes the prompt's observability identity:
-    :attr:`thread_id` and :attr:`root_id` (== ``thread_id`` when this
-    prompt rooted a new tree). Both known before the first chunk — the
-    request is still published lazily on first iteration.
+    that also exposes the prompt's observability identity: :attr:`thread_id`,
+    :attr:`root_id` (== ``thread_id`` when this prompt rooted a new tree),
+    and :attr:`spawn_marker_headers` (headers for the spawn-time marker
+    request when the ambient trace auto-recorded this spawn; else None).
+    All known before the first chunk — the request is still published
+    lazily on first iteration.
     """
 
     def __init__(
@@ -108,10 +110,12 @@ class PromptHandle:
         *,
         thread_id: str,
         root_id: str,
+        spawn_marker_headers: dict[str, str] | None = None,
     ) -> None:
         self._stream = stream
         self.thread_id = thread_id
         self.root_id = root_id
+        self.spawn_marker_headers = spawn_marker_headers
 
     def __aiter__(self) -> PromptHandle:
         return self
@@ -244,11 +248,13 @@ class Agent:
         :class:`Envelope`. ``attachments``, when provided, are attached to
         the envelope (per §5.1).
 
-        ``trace`` forwards a parent thread's
-        :class:`TraceContext` when an agent spawns a sub-agent — the
-        child joins the parent's tree instead of rooting a new one.
-        Precedence: explicit ``root_id`` on a caller-constructed
-        :class:`Envelope` > ``trace=`` > new tree rooted at this prompt.
+        ``trace`` explicitly forwards a parent thread's
+        :class:`TraceContext`; inside a prompt handler the ambient
+        :class:`~synadia_ai.agents.trace.ActiveTrace` is consumed instead
+        and the spawn edge is auto-recorded (with the ambient
+        :func:`~synadia_ai.agents.trace.tool_scope` id, when inside one).
+        Root precedence: envelope ``root_id`` > ``trace=`` > ambient >
+        new tree rooted at this prompt.
 
         Under v0.3 the session is the 5th subject token, not a kwarg —
         callers pick a session by discovering the agent whose
@@ -311,21 +317,30 @@ class Agent:
                 f"max_wait_s must be > 0 (got {max_wait_s!r}); pass None to use the default."
             )
 
-        # Mint this stream's mux token up front (pure, no wire I/O) so the
-        # reply subject — and the thread id derived from it — are known
-        # before the envelope is built. Registration and the publish stay
-        # lazy inside `_stream_prompt`, so an unconsumed handle costs
-        # nothing and leaks nothing.
+        # Mint the mux token up front (pure, no wire I/O) so the reply
+        # subject — and the thread id derived from it — are known before
+        # the envelope is built; registration and the publish stay lazy
+        # inside `_stream_prompt`.
         mux = mux_for(self._nc)
         token = mux.mint_token()
         thread_id = derive_thread_id(mux.reply_subject_for(token))
 
-        # Root resolution: explicit envelope field > explicit trace= > new tree.
+        # Root resolution: explicit envelope field > explicit trace= >
+        # ambient ActiveTrace > new tree. `ambient` survives iff the
+        # spawn joins the ambient tree: a forwarded envelope naming the
+        # ambient root keeps its edge, a foreign root records none, and
+        # trace= is the explicit manual-mode opt-out.
         explicit_root = text.root_id if isinstance(text, Envelope) else None
+        ambient: ActiveTrace | None = active_trace()
         if explicit_root is not None:
             root_id = explicit_root
+            if ambient is not None and ambient.root_id != explicit_root:
+                ambient = None  # foreign tree — no honest edge to record
         elif trace is not None:
             root_id = trace.root_id
+            ambient = None  # manual mode: caller manages edge reporting
+        elif ambient is not None:
+            root_id = ambient.root_id
         else:
             root_id = thread_id  # this prompt starts a new tree
 
@@ -361,12 +376,21 @@ class Agent:
         conn_limit = getattr(self._nc, "max_payload", 0) or None
         assert_within_max_payload(len(encoded), ep.max_payload_bytes, conn_limit)
 
+        # Auto-record the ambient spawn edge only after §5.4 validation —
+        # a prompt that never publishes must not leave a phantom edge.
+        # Recorded before iteration though: a never-iterated handle leaves
+        # a stale claim (accepted — edges are fail-open telemetry).
+        spawn_marker: dict[str, str] | None = None
+        if ambient is not None and ambient.record_spawn is not None:
+            spawn_marker = ambient.record_spawn(thread_id)
+
         effective_timeout = timeout if timeout is not None else self._default_inactivity_timeout
         effective_max_wait = max_wait_s if max_wait_s is not None else self._default_max_wait_s
         return PromptHandle(
             self._stream_prompt(mux, token, encoded, effective_timeout, effective_max_wait),
             thread_id=thread_id,
             root_id=root_id,
+            spawn_marker_headers=spawn_marker,
         )
 
     async def _wait_for_chunk(

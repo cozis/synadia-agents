@@ -15,6 +15,12 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
   omitted when unset); `Agent.prompt(trace=...)` now returns a
   `PromptHandle` (drop-in async iterator) exposing `thread_id` /
   `root_id` for parent-side edge reporting.
+- **Ambient trace context (contextvars)** — `ActiveTrace` +
+  `bind_active_trace()` (bound by the agent-sdk around handlers),
+  `tool_scope()` / `current_tool_call_id()`. `Agent.prompt()` without
+  `trace=` now joins the ambient tree automatically and auto-records
+  the spawn edge (with the ambient tool id); the handle carries
+  `spawn_marker_headers` for the spawn-time marker request.
 - **Packed thread identity** — thread + root ids travel as one
   `x-synadia-trace: <root_id>:<thread_id>` header (`HEADER_TRACE`);
   root first, mirroring W3C `traceparent`'s
@@ -42,6 +48,14 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
   instead of a `tool_call` claim with an empty id slot. Tool ids have
   no header of their own — they appear only as spawn-edge labels,
   captured via `tool_scope()`.
+- **Same-tree forwarding keeps its spawn edge** — the ambient
+  auto-record criterion is now "the spawn joins the ambient tree",
+  decoupled from how the root was supplied: a handler forwarding its
+  received `Envelope` verbatim (whose `root_id` the upstream SDK
+  stamped — the one-line way to preserve attachments) no longer
+  silently drops the parent→child edge. An envelope root naming a
+  *different* tree still records nothing (there are no cross-tree
+  edges), and `trace=` remains the explicit manual-mode opt-out.
 
 ## [0.7.1] - 2026-05-12
 

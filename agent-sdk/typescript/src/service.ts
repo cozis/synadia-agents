@@ -191,11 +191,16 @@ export type PromptHandler = (
   response: PromptResponse,
 ) => Promise<void> | void;
 
-/** A thread's spawn-edge recorder + completion-report buffer. */
+/** A thread's spawn-edge recorder + completion-report buffer.
+ *
+ * After {@link close} (request finished), {@link record} stops buffering —
+ * the drain would never run again — but still returns marker headers, the
+ * one channel for post-completion spawns. */
 class SpawnLedger {
   readonly threadId: string;
   readonly rootId: string;
   #entries = new Set<string>(); // insertion-ordered, idempotent inserts
+  #open = true;
 
   constructor(threadId: string, rootId: string) {
     this.threadId = threadId;
@@ -205,7 +210,7 @@ class SpawnLedger {
   /** Record one spawn edge; returns its spawn-marker headers. */
   record(childThreadId: string, toolCallId?: string, edgeType?: string): Record<string, string> {
     const entry = formatSpawnEntry(childThreadId, toolCallId, edgeType);
-    this.#entries.add(entry);
+    if (this.#open) this.#entries.add(entry);
     return {
       [HEADER_EVENT]: "spawn",
       [HEADER_TRACE]: `${this.rootId}:${this.threadId}`,
@@ -217,6 +222,10 @@ class SpawnLedger {
     const entries = [...this.#entries];
     this.#entries.clear();
     return entries;
+  }
+
+  close(): void {
+    this.#open = false;
   }
 }
 
@@ -259,8 +268,8 @@ export class PromptResponse {
 
   /** Headers for an outbound model request issued by this thread: the
    * packed `x-synadia-trace` pair plus any spawn edges recorded since the
-   * previous call (drained — the marker channel provides the redundant
-   * delivery). */
+   * previous call (drained; once the request completes, late spawns
+   * deliver via the spawn-time marker only). */
   traceHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
       [HEADER_TRACE]: `${this.rootId}:${this.threadId}`,
@@ -295,6 +304,13 @@ export class PromptResponse {
   /** Trace context to pass to `Agent.prompt(..., { trace })` when spawning. */
   childTrace(): TraceContext {
     return { rootId: this.rootId };
+  }
+
+  /** Close the completion-report channel; called by the service just
+   * before the §6.5 terminator. See {@link SpawnLedger}.
+   * @internal */
+  finish(): void {
+    this.#ledger.close();
   }
 
   /** Ambient-context view of this response — carries the ledger's bound
@@ -743,6 +759,10 @@ export class AgentService {
       }
     } finally {
       stopKeepalive();
+      // Close the completion-report channel BEFORE the terminator, so work
+      // outliving the request can't slip in an undrainable entry (its
+      // edges deliver via the spawn-time marker only).
+      response.finish();
       // §6.5 + §9.3: every stream — successful or errored — ends with a
       // zero-byte body message that carries NO NATS headers.
       tryRespondTerminator(msg);

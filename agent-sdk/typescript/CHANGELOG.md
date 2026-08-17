@@ -33,6 +33,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   tree and auto-record spawn edges with no explicit plumbing, labeled by
   the ambient `toolScope()`. Handlers run concurrently and each sees its
   own binding.
+- **Spawn-ledger lifecycle** — when a request completes (just before the
+  §6.5 terminator), the response's completion-report channel closes:
+  spawns recorded afterwards by work that outlives the request (via its
+  inherited ambient trace) no longer accrete undrainable entries. Late
+  spawns still join the tree and deliver their edge via the spawn-time
+  marker — the one channel for post-completion spawns.
 
 ### Changed
 

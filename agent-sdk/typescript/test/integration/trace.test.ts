@@ -253,6 +253,60 @@ describe.skipIf(!natsUrl)("trace propagation — ambient spawns", () => {
     expect(headersAfter["x-synadia-spawned"]).toBe(expectedEdge);
   });
 
+  it("an ambient spawn from a task outliving its request: marker only", async () => {
+    // The detached task inherits the ambient trace via AsyncLocalStorage;
+    // once the request finishes the completion-report channel is closed, so
+    // the late spawn delivers via the spawn-time marker (still joining the
+    // parent's tree) and nothing accretes in the finished response.
+    const captured: Record<string, unknown> = {};
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let lateDone!: () => void;
+    const lateFinished = new Promise<void>((resolve) => (lateDone = resolve));
+
+    const childSvc = new AgentService({ nc, agent: AGENT, owner: OWNER, name: "late-child" });
+    childSvc.onPrompt(async (_envelope, response) => {
+      await response.send("child ok");
+    });
+    await childSvc.start();
+    services.push(childSvc);
+
+    const parentSvc = new AgentService({ nc, agent: AGENT, owner: OWNER, name: "late-parent" });
+    parentSvc.onPrompt(async (_envelope, response) => {
+      captured["response"] = response; // test-only: inspect post-completion state
+      void (async (): Promise<void> => {
+        await released; // deterministically after the request finished
+        const found = await client.discover({ filter: { name: "late-child" } });
+        const stream = await found[0]!.prompt("late sub-task");
+        for await (const _m of stream) {
+          /* drain */
+        }
+        captured["marker"] = stream.spawnMarkerHeaders;
+        captured["lateRoot"] = stream.rootId;
+        lateDone();
+      })();
+      await response.send("parent ok");
+    });
+    await parentSvc.start();
+    services.push(parentSvc);
+
+    const found = await client.discover({ filter: { name: "late-parent" } });
+    const rootStream = await found[0]!.prompt("go");
+    for await (const _m of rootStream) {
+      /* drain */
+    }
+    // Terminator consumed ⇒ the service closed the ledger before emitting it.
+    release();
+    await lateFinished;
+
+    const marker = captured["marker"] as Record<string, string>;
+    // The marker channel still delivers the edge; the parent is the root.
+    expect(marker["x-synadia-trace"]).toBe(`${rootStream.threadId}:${rootStream.threadId}`);
+    expect(captured["lateRoot"]).toBe(rootStream.threadId); // still joins the tree
+    const headersAfter = (captured["response"] as PromptResponse).traceHeaders();
+    expect(headersAfter["x-synadia-spawned"]).toBeUndefined(); // no accretion
+  });
+
   it("a handler forwarding its envelope verbatim keeps its spawn edge", async () => {
     const childObs: Record<string, unknown> = {};
     const parentObs: Record<string, unknown> = {};

@@ -34,6 +34,15 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
   Tool ids have no header of their own: `trace_headers()` takes no
   `tool_call_id` argument — tool attribution exists only as spawn-edge
   labels, defaulted from the ambient `tool_scope()`.
+- **Spawn-ledger lifecycle** — when a request completes (just before
+  the §6.5 terminator), the stream's completion-report channel closes:
+  spawns recorded afterwards by handler-spawned tasks that outlive the
+  request (via their inherited ambient trace) no longer accrete
+  undrainable entries in the finished stream's pending set. Late
+  spawns still join the tree and deliver their edge via the spawn-time
+  marker — now the documented single channel for post-completion
+  spawns. `record_spawn()` / `trace_headers()` docstrings state the
+  lifecycle rule.
 - **Reply-less prompts get random thread ids** — a fire-and-forget
   request (raw-NATS publish with no reply subject) previously hashed
   the empty string, collapsing every such request on every agent onto

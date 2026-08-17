@@ -118,15 +118,19 @@ class _SpawnLedger:
     """A thread's spawn-edge recorder + completion-report buffer.
 
     Owns identity + entries so the ambient :class:`ActiveTrace` can carry
-    ``ledger.record`` without pinning the :class:`PromptStream`.
+    ``ledger.record`` without pinning the :class:`PromptStream`. After
+    :meth:`close` (request finished), :meth:`record` stops buffering —
+    the drain would never run again — but still returns marker headers,
+    the one channel for post-completion spawns.
     """
 
-    __slots__ = ("_entries", "root_id", "thread_id")
+    __slots__ = ("_entries", "_open", "root_id", "thread_id")
 
     def __init__(self, thread_id: str, root_id: str) -> None:
         self.thread_id = thread_id
         self.root_id = root_id
         self._entries: dict[str, None] = {}
+        self._open = True
 
     def record(
         self,
@@ -136,7 +140,8 @@ class _SpawnLedger:
     ) -> dict[str, str]:
         """Record one spawn edge; returns its spawn-marker headers."""
         entry = format_spawn_entry(child_thread_id, tool_call_id, edge_type)
-        self._entries[entry] = None
+        if self._open:
+            self._entries[entry] = None
         return {
             HEADER_EVENT: "spawn",
             HEADER_TRACE: f"{self.root_id}:{self.thread_id}",
@@ -147,6 +152,9 @@ class _SpawnLedger:
         entries = list(self._entries)
         self._entries.clear()
         return entries
+
+    def close(self) -> None:
+        self._open = False
 
 
 class PromptStream:
@@ -178,7 +186,8 @@ class PromptStream:
         self._thread_id = derive_thread_id(reply_subject) if reply_subject else random_thread_id()
         self._root_id = root_id if root_id is not None else self._thread_id
         # Edges recorded via record_spawn(), drained by the next
-        # trace_headers() call (the parent's next model request).
+        # trace_headers() call (the parent's next model request); closed
+        # by _finish() once the request completes.
         self._ledger = _SpawnLedger(self._thread_id, self._root_id)
 
     # --- observability identity ----------------------------------------
@@ -202,8 +211,8 @@ class PromptStream:
     def trace_headers(self) -> dict[str, str]:
         """Headers for an outbound model request issued by this thread:
         the packed ``x-synadia-trace`` pair plus any spawn edges recorded
-        since the previous call (drained — the marker channel provides
-        the redundant delivery)."""
+        since the previous call (drained; once the request completes,
+        late spawns deliver via the spawn-time marker only)."""
         headers = {HEADER_TRACE: f"{self._root_id}:{self._thread_id}"}
         if entries := self._ledger.drain():
             headers[HEADER_SPAWNED] = ",".join(entries)
@@ -229,6 +238,11 @@ class PromptStream:
     def child_trace(self) -> TraceContext:
         """Trace context to pass to ``Agent.prompt(trace=...)`` when spawning."""
         return TraceContext(root_id=self._root_id)
+
+    def _finish(self) -> None:
+        """Close the completion-report channel; called by the service just
+        before the §6.5 terminator. See :class:`_SpawnLedger`."""
+        self._ledger.close()
 
     def _as_active_trace(self) -> ActiveTrace:
         """Ambient-context view of this stream — carries the ledger's
@@ -539,6 +553,7 @@ class AgentService:
 
     async def _on_prompt_request(self, request: Request) -> None:
         keepalive_task: asyncio.Task[None] | None = None
+        stream: PromptStream | None = None
         try:
             try:
                 envelope = decode(request.data)
@@ -637,14 +652,23 @@ class AgentService:
             # task and don't let it slip an ack past the terminator. No-op
             # when keepalive_task is already None.
             await _stop_keepalive(keepalive_task)
-            # §6.5 + §9.3: every stream — successful or errored — ends with a
-            # zero-byte body message that carries NO NATS headers. The error
-            # frame emitted by `respond_error` above is NOT the terminator;
-            # this final `respond(b"")` is.
-            try:
-                await request.respond(b"")
-            except Exception:
-                log.exception("failed to emit stream terminator on %s", request.subject)
+            await _finish_stream(request, stream)
+
+
+async def _finish_stream(request: Request, stream: PromptStream | None) -> None:
+    """Close the stream's trace ledger, then emit the §6.5 terminator —
+    a zero-byte body with NO headers, ending every stream including the
+    pre-stream 400 paths (where ``stream`` is None; §9.3). The ledger
+    closes BEFORE the await yields, so a task outliving the request
+    can't slip in an undrainable entry. Best-effort: failures are
+    logged, not raised into nats-py's framework.
+    """
+    if stream is not None:
+        stream._finish()
+    try:
+        await request.respond(b"")
+    except Exception:
+        log.exception("failed to emit stream terminator on %s", request.subject)
 
 
 async def _stop_keepalive(task: asyncio.Task[None] | None) -> None:

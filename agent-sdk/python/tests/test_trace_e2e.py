@@ -198,6 +198,72 @@ async def test_replyless_prompts_get_distinct_random_thread_ids(
 
 
 @pytest.mark.asyncio
+async def test_task_outliving_request_spawns_marker_only(
+    nc: NATSClient, evidence: EvidenceRecorder
+) -> None:
+    """An ambient spawn from a task that outlives its request: marker only.
+
+    The task inherits the ambient trace via its PEP 567 context copy;
+    once the request finishes the completion-report channel is closed,
+    so the late spawn delivers via the spawn-time marker (still joining
+    the parent's tree) and nothing accretes in the finished stream's
+    pending set.
+    """
+    agents = Agents(nc=nc)
+    captured: dict[str, Any] = {}
+    release = asyncio.Event()
+    late_done = asyncio.Event()
+
+    async def child_handler(envelope: Envelope, stream: PromptStream) -> None:
+        await stream.send("child ok")
+
+    async def parent_handler(envelope: Envelope, stream: PromptStream) -> None:
+        captured["stream"] = stream  # test-only: inspect post-completion state
+
+        async def late_spawn() -> None:
+            await release.wait()  # deterministically after the request finished
+            found = await agents.discover(filter=DiscoverFilter(session_name="late-child"))
+            handle = found[0].prompt("late sub-task")
+            async for _ in handle:
+                pass
+            captured["marker"] = handle.spawn_marker_headers
+            captured["late_root"] = handle.root_id
+            late_done.set()
+
+        captured["task"] = asyncio.create_task(late_spawn())
+        await stream.send("parent ok")
+
+    outer = Agents(nc=nc)
+    try:
+        async with (
+            _running_service(nc, "late-child", child_handler),
+            _running_service(nc, "late-parent", parent_handler),
+        ):
+            found = await outer.discover(filter=DiscoverFilter(session_name="late-parent"))
+            assert len(found) == 1
+            root_handle = found[0].prompt("go")
+            async for _ in root_handle:
+                pass
+            # Terminator consumed ⇒ the service closed the ledger before emitting it.
+            release.set()
+            await asyncio.wait_for(late_done.wait(), timeout=5.0)
+
+            marker = captured["marker"]
+            assert marker is not None  # the marker channel still delivers the edge
+            # The parent is the tree root: both trace slots carry its thread id.
+            assert marker["x-synadia-trace"] == f"{root_handle.thread_id}:{root_handle.thread_id}"
+            assert captured["late_root"] == root_handle.thread_id  # still joins the tree
+            headers_after = captured["stream"].trace_headers()
+            assert "x-synadia-spawned" not in headers_after  # no post-completion accretion
+            evidence.write_json(
+                "late-spawn-marker-only.json", {"marker": marker, "headers_after": headers_after}
+            )
+    finally:
+        await outer.close()
+        await agents.close()
+
+
+@pytest.mark.asyncio
 async def test_forwarded_envelope_keeps_spawn_edge(
     nc: NATSClient, evidence: EvidenceRecorder
 ) -> None:

@@ -16,6 +16,7 @@ They form a ladder — each rung is the one before plus a little more:
 | [`03-openrouter.py`](03-openrouter.py) | Same shape again, but the backend is the hosted, OpenAI-compatible OpenRouter API (needs a key). |
 | [`04-combined.py`](04-combined.py) | Ollama **or** OpenRouter, auto-selected from the env; model access factored into [`llm.py`](llm.py). |
 | [`05-tools.py`](05-tools.py) | Gives the LLM a `read_sensor` tool wired to a NATS microservice, then reasons over the reading. |
+| [`06-subagent.py`](06-subagent.py) | A coordinator that delegates to a worker **agent** — a two-node tree you can watch form on `afo.threads`. |
 
 The spec-compliant [`_reference_agent.py`](_reference_agent.py) (a stateful echo
 with per-session memory) lives here too — it's what the
@@ -28,8 +29,8 @@ the agent-sdk's tests discover and prompt.
 uv sync --extra examples   # the `examples` extra pulls in httpx (used by 02–05)
 ```
 
-`01-echo.py` needs only the base install; `02`–`05` stream over HTTP with
-`httpx`, so they need the `examples` extra.
+`01-echo.py` and `06-subagent.py` need only the base install; `02`–`05`
+stream over HTTP with `httpx`, so they need the `examples` extra.
 
 ## Configuration
 
@@ -174,3 +175,35 @@ nats req agents.prompt.tools.<owner>.main \
 Room 3 is deliberately too warm (`6.2°C`), so the agent has something to flag;
 rooms 1 and 2 are within range. While the agent runs, `nats micro ls` shows both
 the `agents` service (the agent) and the `sensors` service (its tool's backend).
+
+### `06-subagent.py` — delegate to another agent, and watch the tree
+
+The capability this time is another **agent**: a `coordinator` forwards each
+prompt to a `worker` (same process, for a self-contained demo) and streams the
+answer back. No LLM needed.
+
+The point is observability. The service running each prompt mints a
+`prompt_id` and publishes one record on `afo.threads`; because the
+coordinator's handler runs with its trace bound as ambient context, the nested
+`worker.prompt(..., tool_call_id="delegate-1")` forwards `parent_prompt_id` /
+`root_id` with zero plumbing, and the worker's record lands on the same subject
+with the edge filled in:
+
+```sh
+nats sub afo.threads                                       # terminal 1
+uv run python examples/06-subagent.py --url nats://127.0.0.1:4222   # terminal 2
+nats req agents.prompt.coordinator.<owner>.main "hello" --replies=0 --reply-timeout=10s
+```
+
+```
+[#1] Received on "afo.threads"
+{"prompt_id":"2f0b8101…","root_id":"2f0b8101…","agent":"coordinator",…}
+[#2] Received on "afo.threads"
+{"prompt_id":"5d6d316d…","root_id":"2f0b8101…","parent_prompt_id":"2f0b8101…","tool_call_id":"delegate-1","agent":"worker",…}
+```
+
+The same identity goes to the model provider: `02`–`05` pass
+`stream.trace_headers()` (`x-synadia-trace: <root>:<prompt>`, plus
+`x-synadia-parent: <parent>:<tool>` on spawned executions) on every model
+request, so an HTTP proxy can rebuild the tree without touching NATS. The
+subject is `AgentService(trace_subject=...)`; `None` disables publishing.

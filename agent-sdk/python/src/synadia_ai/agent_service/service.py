@@ -26,11 +26,13 @@ from typing import TYPE_CHECKING
 from nats.micro import ServiceConfig, add_service
 from nats.micro.service import EndpointConfig
 from synadia_ai.agents import (
+    DEFAULT_TRACE_SUBJECT,
     PROMPT_ENDPOINT_NAME,
     PROMPT_QUEUE_GROUP,
     SERVICE_NAME,
     STATUS_ENDPOINT_NAME,
     STATUS_QUEUE_GROUP,
+    ActiveTrace,
     AgentSubject,
     Attachment,
     Chunk,
@@ -40,9 +42,13 @@ from synadia_ai.agents import (
     QueryTimeout,
     ResponseChunk,
     StatusChunk,
+    TraceRecord,
+    bind_active_trace,
     decode,
 )
+from synadia_ai.agents.heartbeat import now_iso
 from synadia_ai.agents.messages import encode_chunk
+from synadia_ai.agents.trace import format_trace_headers, random_prompt_id
 
 from ._bytes import format_human_bytes, parse_human_bytes
 from ._inbox import new_inbox
@@ -112,15 +118,40 @@ class PromptStream:
     terminator per §6.5). Handlers should ``send(...)`` zero or more
     chunks and return; raising an exception converts to a service error
     per §9.
+
+    ``trace`` is this execution's observability identity: ``prompt_id``
+    minted by the service, lineage taken from the envelope. The service
+    also binds it as the ambient trace for the handler, so nested
+    ``Agent.prompt()`` calls join the tree without plumbing.
     """
 
     def __init__(
         self,
         request: Request,
         nc: NATSClient,
+        trace: ActiveTrace,
     ) -> None:
         self._request = request
         self._nc = nc
+        self.trace = trace
+
+    @property
+    def prompt_id(self) -> str:
+        return self.trace.prompt_id
+
+    @property
+    def root_id(self) -> str:
+        return self.trace.root_id
+
+    @property
+    def is_root(self) -> bool:
+        return self.trace.is_root
+
+    def trace_headers(self) -> dict[str, str]:
+        """``x-synadia-trace`` (+ ``x-synadia-parent`` when spawned) for every
+        model request this execution issues. Same values as the ambient
+        :func:`synadia_ai.agents.trace_headers`."""
+        return format_trace_headers(self.trace)
 
     async def send(self, chunk: str | Chunk) -> None:
         """Publish one chunk to the caller's reply subject.
@@ -223,6 +254,11 @@ class AgentService:
     over-advertising would only break callers. Smaller overrides are
     honored (use case: shed expensive prompts before they reach the
     handler).
+
+    ``trace_subject`` is the flat subject on which one
+    :class:`~synadia_ai.agents.TraceRecord` per prompt execution is
+    published (core NATS, best-effort; default ``afo.threads``). Requires
+    publish permission on it; pass ``None`` to disable publishing.
     """
 
     def __init__(
@@ -237,6 +273,7 @@ class AgentService:
         max_payload: str = DEFAULT_MAX_PAYLOAD,
         attachments_ok: bool = DEFAULT_ATTACHMENTS_OK,
         keepalive_interval_s: float | None = DEFAULT_KEEPALIVE_INTERVAL_S,
+        trace_subject: str | None = DEFAULT_TRACE_SUBJECT,
     ) -> None:
         if heartbeat_interval_s <= 0:
             raise ValueError("heartbeat_interval_s must be > 0 (heartbeat is mandatory in v0.3)")
@@ -253,6 +290,9 @@ class AgentService:
         self._effective_max_payload_value = max_payload
         self._attachments_ok = attachments_ok
         self._keepalive_interval_s = keepalive_interval_s
+        if trace_subject is not None and not trace_subject:
+            raise ValueError("trace_subject must be a non-empty subject or None")
+        self._trace_subject = trace_subject
         self._prompt_handler: PromptHandler | None = None
         self._service: Service | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
@@ -464,7 +504,8 @@ class AgentService:
             except Exception:
                 log.exception("failed to emit leading ack on %s", request.subject)
 
-            stream = PromptStream(request, self._nc)
+            trace = await self._open_trace(envelope)
+            stream = PromptStream(request, self._nc, trace)
             handler = self._prompt_handler
             if handler is None:  # pragma: no cover — start() rejects this path
                 raise RuntimeError("prompt handler invoked before on_prompt() registered one")
@@ -476,7 +517,8 @@ class AgentService:
                 )
 
             try:
-                await handler(envelope, stream)
+                with bind_active_trace(trace):
+                    await handler(envelope, stream)
             except ProtocolError as exc:
                 log.warning(
                     "prompt handler rejected protocol input on %s: %s",
@@ -512,6 +554,41 @@ class AgentService:
                 await request.respond(b"")
             except Exception:
                 log.exception("failed to emit stream terminator on %s", request.subject)
+
+    async def _open_trace(self, envelope: Envelope) -> ActiveTrace:
+        """Mint this execution's identity and announce it.
+
+        The service chooses the id; a root prompt (no ``parent_prompt_id``)
+        starts a tree, a spawned one joins the forwarded root. The record
+        goes out before the handler runs so an observer sees the node
+        before any of its children — best-effort, a failed publish never
+        fails the prompt.
+        """
+        prompt_id = random_prompt_id()
+        trace = ActiveTrace(
+            prompt_id=prompt_id,
+            root_id=envelope.root_id or prompt_id,
+            parent_prompt_id=envelope.parent_prompt_id,
+            tool_call_id=envelope.tool_call_id,
+        )
+        if self._trace_subject is None or self._service is None:
+            return trace
+        record = TraceRecord(
+            prompt_id=trace.prompt_id,
+            root_id=trace.root_id,
+            parent_prompt_id=trace.parent_prompt_id,
+            tool_call_id=trace.tool_call_id,
+            agent=self.subject.agent,
+            owner=self.subject.owner,
+            session=self.subject.session_name,
+            instance_id=self._service.id,
+            ts=now_iso(),
+        )
+        try:
+            await self._nc.publish(self._trace_subject, record.encode())
+        except Exception:
+            log.exception("failed to publish trace record on %s", self._trace_subject)
+        return trace
 
 
 async def _stop_keepalive(task: asyncio.Task[None] | None) -> None:

@@ -8,6 +8,10 @@
 #
 #   OPENROUTER_API_KEY set?  → OpenRouter (OPENROUTER_MODEL, default openai/gpt-4o-mini)
 #   otherwise                → local Ollama (OLLAMA_MODEL, default llama3.2; OLLAMA_URL)
+#
+# `headers` on chat_stream is where an agent passes stream.trace_headers() —
+# the x-synadia-* trace identity an observing proxy uses to attribute each
+# model request to its prompt execution.
 
 from __future__ import annotations
 
@@ -26,13 +30,16 @@ class OllamaClient:
         self.model = os.environ.get("OLLAMA_MODEL", "llama3.2")
         self.label = f"ollama/{self.model}"
 
-    async def chat_stream(self, messages: list[ChatMessage]) -> AsyncGenerator[str, None]:
+    async def chat_stream(
+        self, messages: list[ChatMessage], headers: dict[str, str] | None = None
+    ) -> AsyncGenerator[str, None]:
         # /api/chat returns newline-delimited JSON, each line `{message: {content}}`.
         async with (
             httpx.AsyncClient(timeout=None) as client,
             client.stream(
                 "POST",
                 f"{self.url}/api/chat",
+                headers=headers,
                 json={"model": self.model, "messages": messages, "stream": True},
             ) as resp,
         ):
@@ -55,9 +62,15 @@ class OpenRouterClient:
         self.model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
         self.label = f"openrouter/{self.model}"
 
-    async def chat_stream(self, messages: list[ChatMessage]) -> AsyncGenerator[str, None]:
+    async def chat_stream(
+        self, messages: list[ChatMessage], headers: dict[str, str] | None = None
+    ) -> AsyncGenerator[str, None]:
         # OpenAI SSE: `data: {json}` lines (+ keep-alive comments), then `data: [DONE]`.
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            **(headers or {}),
+        }
         async with (
             httpx.AsyncClient(timeout=None) as client,
             client.stream(

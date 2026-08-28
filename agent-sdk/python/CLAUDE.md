@@ -459,6 +459,15 @@ them to success or frustrates them.
 
 ## Alignment milestones
 
+- **2026-08-29 - prompt traces.** `AgentService._open_trace` mints the
+  execution's `prompt_id`, publishes a `TraceRecord` on
+  the flat trace subject (kwarg `trace_subject`, default
+  `afo.threads`, `None` disables; best-effort publish) and binds the
+  `ActiveTrace` around the handler via `bind_active_trace`, so nested
+  `Agent.prompt()` calls forward lineage automatically.
+  `PromptStream.trace_headers()` is what harnesses attach to model
+  requests. Vocabulary lives in the client-sdk (`trace.py`); floor
+  bumped to `synadia-ai-agents>=0.8`. See `tests/test_trace_e2e.py`.
 - **2026-04-30 — package carved out of `synadia-ai-agents` at the
   0.5.0 cut.** The surface (`AgentService` and friends) lived in
   `synadia-ai-agents` through 0.4.x; at 0.5.0 it was removed there

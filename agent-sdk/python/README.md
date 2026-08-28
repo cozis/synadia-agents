@@ -61,11 +61,37 @@ both as the test harness for the client-side numbered demos in
 for cross-SDK interop.
 
 Alongside it, [`examples/`](examples/) carries a numbered **agent
-ladder** — `01-echo.py` → `05-tools.py` (echo, Ollama, OpenRouter,
-combined, and a tool-calling agent backed by a NATS microservice) —
-the Python mirror of `../typescript/examples/`. See
-[`examples/README.md`](examples/README.md) for the full table and how
-to run them.
+ladder** — `01-echo.py` → `06-subagent.py` (echo, Ollama, OpenRouter,
+combined, a tool-calling agent backed by a NATS microservice, and a
+coordinator delegating to a worker agent) — the Python mirror of
+`../typescript/examples/`. See [`examples/README.md`](examples/README.md)
+for the full table and how to run them.
+
+## Observability — prompt traces
+
+Every prompt execution gets a `prompt_id`, minted by the service that
+runs it. A root prompt carries nothing extra on the wire; a prompt
+issued from *inside* a handler (via `synadia_ai.agents.Agent.prompt`)
+automatically forwards `parent_prompt_id` / `root_id`, and
+`prompt(..., tool_call_id=...)` labels the edge with the model tool
+call it serves. The service announces each execution as a
+`TraceRecord` on the trace subject (default `afo.threads`;
+`AgentService(trace_subject=None)` disables it — publishing needs
+permission on it).
+
+```python
+async def handler(envelope: Envelope, stream: PromptStream) -> None:
+    stream.prompt_id, stream.root_id, stream.is_root     # this execution
+    headers = stream.trace_headers()   # x-synadia-trace / x-synadia-parent
+    ...                                # attach to every model request
+    async for msg in worker.prompt("sub-task", tool_call_id=call.id):
+        ...                            # joins this tree — no plumbing
+```
+
+`synadia_ai.agents.trace_headers()` returns the same headers from the
+ambient context, for code that builds its HTTP client far from the
+`PromptStream`. Subscribe `afo.threads` to rebuild trees on the NATS
+side; the headers let an HTTP proxy do the same without NATS.
 
 ## Where things live
 

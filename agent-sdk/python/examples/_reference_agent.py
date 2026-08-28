@@ -129,6 +129,13 @@ async def main() -> None:
     history: deque[str] = deque(maxlen=HISTORY_CAP)
 
     async def handler(envelope: Envelope, stream: PromptStream) -> None:
+        log.info(
+            "prompt %s (root=%s parent=%s tool=%s)",
+            stream.prompt_id,
+            stream.root_id,
+            stream.trace.parent_prompt_id or "-",
+            stream.trace.tool_call_id or "-",
+        )
         prior_turns = list(history)
         history.append(envelope.prompt)
 

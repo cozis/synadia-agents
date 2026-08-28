@@ -10,6 +10,31 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Added
 
+- **Prompt traces.** `AgentService` mints a `prompt_id` for every
+  execution, publishes a `synadia_ai.agents.TraceRecord`
+  (`{prompt_id, root_id, parent_prompt_id?, tool_call_id?, agent,
+  owner, session, instance_id, ts}`) on the flat `trace_subject`
+  before the handler runs, and binds the execution as the ambient
+  trace so nested `Agent.prompt()` calls join the tree with no
+  plumbing. New constructor kwarg `trace_subject` (default
+  `"afo.threads"`; `None` disables publishing). `PromptStream` gains
+  `prompt_id`, `root_id`, `is_root`, `trace` (an `ActiveTrace`) and
+  `trace_headers()` — `x-synadia-trace: <root>:<prompt>` plus
+  `x-synadia-parent: <parent>:<tool>` on spawned executions — for
+  the harness to attach to every model request. Publishing is
+  best-effort: a failed publish is logged and never fails the prompt.
+  Hostile lineage fields (non-id `root_id`, CRLF in `tool_call_id`)
+  are rejected with a §9 `400` before any handler, record, or header.
+- **`examples/06-subagent.py`** — coordinator + worker in one process,
+  the minimal multi-agent tree; `02`–`05` now pass
+  `stream.trace_headers()` on their model requests and the reference
+  agent logs each execution's identity.
+
+### Changed
+
+- Dependency floor `synadia-ai-agents>=0.8` (the trace vocabulary
+  lives there).
+
 - **Agent-ladder examples** (`examples/01-echo.py` … `05-tools.py`,
   plus the shared `examples/llm.py` base) — the Python mirror of
   `agent-sdk/typescript/examples/`: echo, Ollama, OpenRouter, a

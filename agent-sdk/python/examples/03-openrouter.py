@@ -42,9 +42,10 @@ MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 
 
-async def openrouter_tokens(prompt: str) -> AsyncGenerator[str, None]:
+async def openrouter_tokens(prompt: str, trace: dict[str, str]) -> AsyncGenerator[str, None]:
     # OpenAI SSE: `data: {json}` lines (+ keep-alive comments), then `data: [DONE]`.
-    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    # `trace` is the agent's x-synadia-* identity for an observing proxy.
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json", **trace}
     async with (
         httpx.AsyncClient(timeout=None) as client,
         client.stream(
@@ -102,7 +103,7 @@ async def main() -> None:
     )
 
     async def handler(envelope: Envelope, stream: PromptStream) -> None:
-        async for token in openrouter_tokens(envelope.prompt):
+        async for token in openrouter_tokens(envelope.prompt, stream.trace_headers()):
             await stream.send(token)
 
     service.on_prompt(handler)

@@ -134,11 +134,12 @@ async def run_tool(nc: NATSClient, name: str, args: Any) -> str:
     return f"no sensor at '{location}'" if value == "unknown" else f"{location} is {value}°C"
 
 
-async def chat(messages: list[dict[str, Any]]) -> dict[str, Any]:
+async def chat(messages: list[dict[str, Any]], headers: dict[str, str]) -> dict[str, Any]:
     """One non-streamed turn — used for the tool-decision round, for a clean tool_calls array."""
     async with httpx.AsyncClient(timeout=None) as client:
         resp = await client.post(
             f"{OLLAMA_URL}/api/chat",
+            headers=headers,
             json={"model": MODEL, "messages": messages, "tools": TOOLS, "stream": False},
         )
         resp.raise_for_status()
@@ -147,13 +148,16 @@ async def chat(messages: list[dict[str, Any]]) -> dict[str, Any]:
         return message
 
 
-async def chat_stream(messages: list[dict[str, Any]]) -> AsyncGenerator[str, None]:
+async def chat_stream(
+    messages: list[dict[str, Any]], headers: dict[str, str]
+) -> AsyncGenerator[str, None]:
     """Final turn — stream the model's answer token by token (no tools needed)."""
     async with (
         httpx.AsyncClient(timeout=None) as client,
         client.stream(
             "POST",
             f"{OLLAMA_URL}/api/chat",
+            headers=headers,
             json={"model": MODEL, "messages": messages, "stream": True},
         ) as resp,
     ):
@@ -195,9 +199,11 @@ async def main() -> None:
 
     async def handler(envelope: Envelope, stream: PromptStream) -> None:
         messages: list[dict[str, Any]] = [{"role": "user", "content": envelope.prompt}]
+        # Every model request of this execution carries the same trace identity.
+        trace = stream.trace_headers()
 
         # Round 1 — does the model want a tool? (non-streamed, for clean tool_calls)
-        decision = await chat(messages)
+        decision = await chat(messages, trace)
         messages.append(decision)
 
         # Run whatever tools the model asked for, appending each result. (One
@@ -217,7 +223,7 @@ async def main() -> None:
             return
 
         # Round 2 — the model now has the sensor reading; stream its final answer.
-        async for token in chat_stream(messages):
+        async for token in chat_stream(messages, trace):
             await stream.send(token)
 
     service.on_prompt(handler)

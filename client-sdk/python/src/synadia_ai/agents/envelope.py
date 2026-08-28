@@ -26,9 +26,10 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from .errors import ProtocolError
+from .trace import PROMPT_ID_HEX_LEN, TOOL_CALL_ID_MAX_LEN, is_prompt_id, is_tool_call_id
 
 
 class Attachment(BaseModel):
@@ -80,6 +81,27 @@ class Envelope(BaseModel):
 
     prompt: str
     attachments: list[Attachment] | None = None
+    # Observability lineage (see trace.py): present only on prompts issued
+    # from inside a prompt handler; a root prompt carries none of them.
+    # Validated at this decode chokepoint because the values flow into
+    # HTTP header values and NATS subjects on the agent side.
+    parent_prompt_id: str | None = None
+    root_id: str | None = None
+    tool_call_id: str | None = None
+
+    @field_validator("parent_prompt_id", "root_id")
+    @classmethod
+    def _check_prompt_id(cls, value: str | None) -> str | None:
+        if value is not None and not is_prompt_id(value):
+            raise ValueError(f"must be {PROMPT_ID_HEX_LEN} lowercase hex chars (a prompt id)")
+        return value
+
+    @field_validator("tool_call_id")
+    @classmethod
+    def _check_tool_call_id(cls, value: str | None) -> str | None:
+        if value is not None and not is_tool_call_id(value):
+            raise ValueError(f"must be 1-{TOOL_CALL_ID_MAX_LEN} visible ASCII characters")
+        return value
 
 
 def encode(envelope: Envelope) -> bytes:

@@ -13,6 +13,10 @@ Public API entry points:
   kwargs for :func:`nats.connect`.
 * :func:`parse_nats_url` — parse a NATS URL (with optional userinfo
   for token / user:password) into kwargs for :func:`nats.connect`.
+* :mod:`synadia_ai.agents.trace` — observability vocabulary shared with
+  the agent-sdk: :class:`TraceRecord` (published per prompt execution on
+  the configurable trace subject, default ``afo.threads``), :func:`trace_headers`
+  (the ambient execution's ``x-synadia-*`` headers for model requests).
 
 The agent-host surface (``AgentService``, ``PromptStream``,
 ``PromptHandler``) lives in the sibling package
@@ -74,6 +78,16 @@ from .heartbeat import (
 )
 from .messages import Chunk, QueryChunk, ResponseChunk, StatusChunk
 from .subjects import AgentSubject
+from .trace import (
+    DEFAULT_TRACE_SUBJECT,
+    HEADER_PARENT,
+    HEADER_TRACE,
+    ActiveTrace,
+    TraceRecord,
+    active_trace,
+    bind_active_trace,
+    trace_headers,
+)
 
 __all__ = [
     "DEFAULT_DISCOVER_MAX_WAIT_S",
@@ -81,12 +95,16 @@ __all__ = [
     "DEFAULT_LIVENESS_SLACK",
     "DEFAULT_PROMPT_MAX_WAIT_S",
     "DEFAULT_STREAM_INACTIVITY_TIMEOUT_S",
+    "DEFAULT_TRACE_SUBJECT",
+    "HEADER_PARENT",
+    "HEADER_TRACE",
     "HEARTBEAT_SUBJECT",
     "PROMPT_ENDPOINT_NAME",
     "PROMPT_QUEUE_GROUP",
     "SERVICE_NAME",
     "STATUS_ENDPOINT_NAME",
     "STATUS_QUEUE_GROUP",
+    "ActiveTrace",
     "Agent",
     "AgentInfo",
     "AgentNotFound",
@@ -115,10 +133,14 @@ __all__ = [
     "StreamMaxWaitExceededError",
     "StreamMessage",
     "StreamStalledError",
+    "TraceRecord",
     "ValidationError",
+    "active_trace",
+    "bind_active_trace",
     "build_agent_info",
     "decode",
     "encode",
     "load_context_options",
     "parse_nats_url",
+    "trace_headers",
 ]

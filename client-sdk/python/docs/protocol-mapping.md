@@ -54,6 +54,7 @@ spec to catch up.
 | Pre-publish `max_payload` check              | `PayloadTooLargeError(limit, actual)` before any wire I/O. Effective limit is `min(endpoint.max_payload_bytes, nc.max_payload)` — caller's broker cap binds when smaller. | §5.4       |
 | Empty prompt rejected pre-publish            | `PromptEmptyError` before any wire I/O.                                               | §5.1, §5.3 |
 | Endpoint subject resolution                  | Always `endpoints[].subject` from discovery; never constructed from identity.         | §4.3, §12  |
+| Lineage fields (SDK extension, rides §5.6)   | `parent_prompt_id` / `root_id` (16 lowercase hex, minted by the receiving agent service) and `tool_call_id` (1-256 visible ASCII). Sent only by `Agent.prompt` inside a bound handler; absent on root prompts. Rejected at decode (`ProtocolError` → agent-side `400`) when malformed. The service publishes a `TraceRecord` per execution on the flat, configurable trace subject (default `afo.threads`) and exposes `x-synadia-trace` / `x-synadia-parent` for model requests. Not yet in the spec — flagged upstream. | §5.6 |
 | Unknown envelope fields                      | `Envelope` uses `extra="allow"`; decode → encode round-trips lossless per §5.6. A stray inbound `session` from a non-compliant peer rides this bag — under v0.3 the request subject IS the session, so `Envelope.session` is no longer a first-class field. | §5.6 |
 
 ## Response streaming (§6)

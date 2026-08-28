@@ -28,6 +28,7 @@ from .errors import (
     StreamStalledError,
 )
 from .messages import QueryChunk, ResponseChunk, StatusChunk, decode_chunk
+from .trace import active_trace
 from .validation import (
     assert_attachments_allowed,
     assert_prompt_non_empty,
@@ -203,12 +204,21 @@ class Agent:
         attachments: list[Attachment] | None = None,
         timeout: float | None = None,
         max_wait_s: float | None = None,
+        tool_call_id: str | None = None,
     ) -> AsyncIterator[StreamMessage]:
         """Send a prompt and return an async iterator of streamed messages.
 
         ``text`` is either a bare string or a fully-constructed
         :class:`Envelope`. ``attachments``, when provided, are attached to
         the envelope (per §5.1).
+
+        Observability: when called inside a prompt handler (the agent-sdk
+        binds an ambient :class:`~synadia_ai.agents.trace.ActiveTrace`),
+        the envelope carries ``parent_prompt_id`` / ``root_id`` so the
+        prompt joins the caller's tree; ``tool_call_id`` labels the edge
+        with the model tool call being served. Lineage fields already set
+        on an explicit :class:`Envelope` win over the ambient ones. Outside
+        a handler nothing is added — the prompt starts a new tree.
 
         Under v0.3 the session is the 5th subject token, not a kwarg —
         callers pick a session by discovering the agent whose
@@ -271,6 +281,12 @@ class Agent:
                 f"max_wait_s must be > 0 (got {max_wait_s!r}); pass None to use the default."
             )
 
+        ambient = active_trace()
+        lineage: dict[str, str | None] = {
+            "parent_prompt_id": ambient.prompt_id if ambient else None,
+            "root_id": ambient.root_id if ambient else None,
+            "tool_call_id": tool_call_id,
+        }
         if isinstance(text, Envelope):
             merged_attachments: list[Attachment] | None
             if attachments:
@@ -278,14 +294,19 @@ class Agent:
                 merged_attachments.extend(attachments)
             else:
                 merged_attachments = list(text.attachments) if text.attachments else None
+            for key, value in lineage.items():
+                explicit = getattr(text, key)
+                lineage[key] = explicit if explicit is not None else value
             envelope = Envelope(
                 prompt=text.prompt,
                 attachments=merged_attachments,
+                **lineage,
             )
         else:
             envelope = Envelope(
                 prompt=text,
                 attachments=list(attachments) if attachments else None,
+                **lineage,
             )
 
         # §5.4: local validation happens synchronously BEFORE any wire I/O.

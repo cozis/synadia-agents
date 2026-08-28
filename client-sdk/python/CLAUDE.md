@@ -323,6 +323,18 @@ either guides them to success or frustrates them.
 
 ## Alignment milestones
 
+- **2026-08-29 - prompt traces (SDK extension, ahead of spec).** New
+  `trace.py`: the *receiving* agent service mints each execution's
+  16-hex `prompt_id`; callers forward lineage (`parent_prompt_id`,
+  `root_id`, `tool_call_id`) as optional envelope fields only when
+  prompting from inside a bound handler (contextvar `ActiveTrace`),
+  so root prompts are wire-identical to legacy ones. The agent-sdk
+  publishes a `TraceRecord` per execution on
+  a flat, configurable trace subject (default `afo.threads`)
+  and exposes `x-synadia-trace` / `x-synadia-parent` headers for
+  model requests. Lineage is validated at decode. Version staged at
+  0.8.0; the agent-sdk floor moved to `>=0.8`, so this package
+  publishes first.
 - **2026-05-11 - §6.4 leading-ack compliance (agent-sdk-only).** Spec
   §6.4 was sharpened: every prompt handler MUST emit exactly one
   `{"type":"status","data":"ack"}` chunk as the **first** message on

@@ -8,6 +8,32 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ## [Unreleased]
 
+### Added
+
+- **Trace vocabulary** (`synadia_ai.agents.trace`, re-exported at the
+  top level): `ActiveTrace`, `TraceRecord`, `active_trace()`,
+  `bind_active_trace()`, `trace_headers()`,
+  `DEFAULT_TRACE_SUBJECT = "afo.threads"`, `HEADER_TRACE` /
+  `HEADER_PARENT`. Ids are 16 lowercase hex chars, minted by the
+  *receiving* agent service — the client never chooses one, so a
+  root prompt is byte-identical to a pre-trace prompt.
+- **`Envelope.parent_prompt_id` / `root_id` / `tool_call_id`** —
+  optional lineage fields, omitted from the wire when unset and
+  validated at decode (`ProtocolError`) since they flow into HTTP
+  header values agent-side.
+- **`Agent.prompt(..., tool_call_id=...)`** — when called inside a
+  bound handler (the agent-sdk binds one around every prompt
+  handler) the envelope carries the ambient execution's
+  `parent_prompt_id` / `root_id`; `tool_call_id` labels the edge.
+  Lineage already set on an explicit `Envelope` wins. Outside a
+  handler nothing is added.
+
+### Changed
+
+- Version staged at `0.8.0` — `synadia-ai-agent-service` now requires
+  `synadia-ai-agents>=0.8` for the trace vocabulary, so this package
+  must publish first (release ladder).
+
 ## [0.7.1] - 2026-05-12
 
 ### Changed

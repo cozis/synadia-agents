@@ -1,8 +1,16 @@
-"""Observability trace primitives — shape, headers, ambient layer."""
+"""Observability trace primitives — shape, headers, ambient layer, and what
+``Agent.prompt`` actually puts on the wire.
+
+The e2e half owns both ends of the wire: a raw subscription on the prompt
+subject captures the request envelope exactly as published (evidence in
+``tests/_evidence/<test>/request.json``) and answers with a terminator.
+"""
 
 from __future__ import annotations
 
 import json
+from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
@@ -11,6 +19,9 @@ from synadia_ai.agents import (
     HEADER_PARENT,
     HEADER_TRACE,
     ActiveTrace,
+    Agent,
+    AgentInfo,
+    EndpointInfo,
     Envelope,
     ProtocolError,
     TraceRecord,
@@ -26,6 +37,12 @@ from synadia_ai.agents.trace import (
     is_tool_call_id,
     random_prompt_id,
 )
+
+if TYPE_CHECKING:
+    from nats.aio.client import Client as NATSClient
+    from nats.aio.msg import Msg
+
+    from tests.harness.evidence import EvidenceRecorder
 
 ROOT = "a" * 16
 PARENT = "b" * 16
@@ -137,3 +154,100 @@ def test_hostile_lineage_dies_at_decode(field: str, value: str) -> None:
         decode(payload)
     with pytest.raises(PydanticValidationError):
         Envelope(prompt="hi", **{field: value})
+
+
+# --- Agent.prompt forwarding (e2e) -------------------------------------
+
+PROMPT_SUBJECT = "agents.prompt.test-agent.pytest.trace"
+
+
+def _agent(nc: NATSClient) -> Agent:
+    prompt_endpoint = EndpointInfo(
+        name="prompt",
+        subject=PROMPT_SUBJECT,
+        queue_group="agents",
+        metadata=MappingProxyType({}),
+        max_payload_bytes=None,
+        attachments_ok=True,
+    )
+    info = AgentInfo(
+        instance_id="test-instance",
+        agent="test-agent",
+        owner="pytest",
+        session_name="trace",
+        protocol_version="0.3",
+        description="",
+        version="0.0.0",
+        metadata=MappingProxyType({"agent": "test-agent", "owner": "pytest"}),
+        endpoints=(prompt_endpoint,),
+        prompt_endpoint=prompt_endpoint,
+    )
+    return Agent(nc, info)
+
+
+async def _capture_one_request(nc: NATSClient, agent: Agent, **kwargs: object) -> dict[str, object]:
+    """Prompt, answer with a bare terminator, return the envelope as published."""
+    captured: list[Msg] = []
+
+    async def responder(msg: Msg) -> None:
+        captured.append(msg)
+        await nc.publish(msg.reply, b"")
+
+    sub = await nc.subscribe(PROMPT_SUBJECT, cb=responder)
+    try:
+        async for _ in agent.prompt("hello", timeout=2.0, **kwargs):  # type: ignore[arg-type]
+            pass
+    finally:
+        await sub.unsubscribe()
+    assert len(captured) == 1
+    return dict(json.loads(captured[0].data))
+
+
+@pytest.mark.asyncio
+async def test_prompt_outside_handler_sends_bare_envelope(
+    nc: NATSClient, evidence: EvidenceRecorder
+) -> None:
+    wire = await _capture_one_request(nc, _agent(nc))
+    evidence.write_json("request.json", wire)
+    assert wire == {"prompt": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_prompt_inside_handler_forwards_lineage(
+    nc: NATSClient, evidence: EvidenceRecorder
+) -> None:
+    parent = ActiveTrace(prompt_id=PARENT, root_id=ROOT, parent_prompt_id=ROOT)
+    with bind_active_trace(parent):
+        wire = await _capture_one_request(nc, _agent(nc), tool_call_id="call_7")
+    evidence.write_json("request.json", wire)
+    assert wire == {
+        "prompt": "hello",
+        "parent_prompt_id": PARENT,
+        "root_id": ROOT,
+        "tool_call_id": "call_7",
+    }
+
+
+@pytest.mark.asyncio
+async def test_explicit_envelope_lineage_wins_over_ambient(
+    nc: NATSClient, evidence: EvidenceRecorder
+) -> None:
+    captured: list[Msg] = []
+
+    async def responder(msg: Msg) -> None:
+        captured.append(msg)
+        await nc.publish(msg.reply, b"")
+
+    sub = await nc.subscribe(PROMPT_SUBJECT, cb=responder)
+    explicit = Envelope(prompt="hello", parent_prompt_id=CHILD, root_id=CHILD)
+    try:
+        with bind_active_trace(ActiveTrace(prompt_id=PARENT, root_id=ROOT)):
+            async for _ in _agent(nc).prompt(explicit, timeout=2.0, tool_call_id="call_9"):
+                pass
+    finally:
+        await sub.unsubscribe()
+    wire = dict(json.loads(captured[0].data))
+    evidence.write_json("request.json", wire)
+    assert wire["parent_prompt_id"] == CHILD
+    assert wire["root_id"] == CHILD
+    assert wire["tool_call_id"] == "call_9"  # kwarg fills the slot the envelope left empty

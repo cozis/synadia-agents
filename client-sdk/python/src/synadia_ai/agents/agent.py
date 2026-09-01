@@ -47,6 +47,7 @@ from .trace import (
     TOOL_CALL_ID_MAX_LEN,
     TraceOptions,
     active_trace,
+    active_turn_count,
     build_edge_record,
     inherited_trace_options,
     is_tool_call_id,
@@ -392,6 +393,9 @@ class Agent:
                     root_id=root_id,
                     parent_id=ambient.thread_id if ambient is not None else None,
                     tool_call_id=tool,
+                    # Snapshot of the parent's model-call count, so children
+                    # can be ordered within the parent's timeline.
+                    turn_count_hint=active_turn_count(),
                 )
                 # Enqueue only — delivery (acks, retries, backoff) happens
                 # in a background drain nothing awaits, so tracing can

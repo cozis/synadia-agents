@@ -23,6 +23,12 @@ export interface EdgeFields {
   /** The calling execution's own thread, from the ambient trace; absent on a root. */
   readonly parentId?: string | undefined;
   readonly toolCallId?: string | undefined;
+  /**
+   * The parent execution's model-call count at spawn time. Omitted from
+   * the wire when 0 (the parent had made no model call yet) and on root
+   * advertisements — a best-effort ordering hint, never a claim.
+   */
+  readonly turnCountHint?: number | undefined;
 }
 
 /** One built edge record: its wire bytes and the id that de-duplicates it. */
@@ -48,6 +54,9 @@ export function buildEdgeRecord(fields: EdgeFields): BuiltEdgeRecord {
     parent_id: fields.parentId ?? null,
     root_id: fields.rootId,
     tool_call_id: fields.toolCallId ?? null,
+    ...(fields.turnCountHint !== undefined && fields.turnCountHint > 0
+      ? { turn_count_hint: fields.turnCountHint }
+      : {}),
   };
   return { recordId, payload: new TextEncoder().encode(JSON.stringify(record)) };
 }

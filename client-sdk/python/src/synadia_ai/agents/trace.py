@@ -207,6 +207,7 @@ def build_edge_record(
     root_id: str,
     parent_id: str | None = None,
     tool_call_id: str | None = None,
+    turn_count_hint: int = 0,
 ) -> tuple[str, bytes]:
     """Build one edge record: its de-duplication id and its wire bytes.
 
@@ -219,7 +220,10 @@ def build_edge_record(
     ``record_id`` shares the 128-bit lowercase-hex shape of thread IDs
     and travels as the JetStream ``Nats-Msg-Id``, so a retry after a lost
     ack is absorbed by the stream's duplicate window; ``ts`` is unix
-    seconds. The writer's identity lands with signing.
+    seconds. ``turn_count_hint`` is the parent's model-call count at spawn
+    time, omitted from the wire when 0 (the parent had made no model call
+    yet) and on root advertisements — a best-effort ordering hint, never a
+    claim. The writer's identity lands with signing.
     """
     record_id = random_thread_id()
     record = {
@@ -231,6 +235,8 @@ def build_edge_record(
         "root_id": root_id,
         "tool_call_id": tool_call_id,
     }
+    if turn_count_hint > 0:
+        record["turn_count_hint"] = turn_count_hint
     return record_id, json.dumps(record, separators=(",", ":")).encode("utf-8")
 
 

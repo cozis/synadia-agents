@@ -20,7 +20,7 @@ import {
   serializeSenderHeader,
 } from "./identity/sender-header.js";
 import { combineAbortSignals } from "./internal/abort.js";
-import { activeTrace, inheritedTraceOptions } from "./trace/context.js";
+import { activeTrace, activeTurnCount, inheritedTraceOptions } from "./trace/context.js";
 import { buildEdgeRecord, DEFAULT_EDGE_SUBJECT } from "./trace/edge.js";
 import { edgePublisherFor } from "./trace/publisher.js";
 import { isToolCallId, randomThreadId, TOOL_CALL_ID_MAX_LEN } from "./trace/ids.js";
@@ -204,7 +204,13 @@ export class Agent {
         ? DEFAULT_EDGE_SUBJECT
         : trace.edgeSubject;
       if (edgeSubject !== null) {
-        const record = buildEdgeRecord({ ...lineage, toolCallId: opts.tool });
+        const record = buildEdgeRecord({
+          ...lineage,
+          toolCallId: opts.tool,
+          // Snapshot of the parent's model-call count, so children can be
+          // ordered within the parent's timeline.
+          turnCountHint: activeTurnCount(),
+        });
         // Enqueue only — delivery (acks, retries, backoff) happens in a
         // background drain nothing awaits, so tracing can never slow a
         // prompt. A full queue evicts its oldest record, counted.

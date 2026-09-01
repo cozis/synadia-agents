@@ -233,6 +233,36 @@ async def test_ambient_trace_flows_into_awaited_work() -> None:
         assert await probe() is trace
 
 
+def test_turn_count_hint_is_omitted_when_the_parent_made_no_model_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info = build_agent_info(_info())
+    assert info is not None
+    agent = Agent(_NC, info, trace=TraceOptions())
+    _, edge = _captured_edge(monkeypatch, agent, "hello")
+    assert edge is not None
+    assert "turn_count_hint" not in json.loads(edge[1])
+
+
+def test_turn_count_hint_carries_the_parents_model_call_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info = build_agent_info(_info())
+    assert info is not None
+    agent = Agent(_NC, info, trace=TraceOptions())
+    ambient = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
+    with bind_active_trace(ambient):
+        trace_headers()
+        trace_headers()
+        _, first = _captured_edge(monkeypatch, agent, "hello")  # after two turns
+        trace_headers()
+        _, second = _captured_edge(monkeypatch, agent, "hello")  # ... and a third
+    assert first is not None
+    assert second is not None
+    assert json.loads(first[1])["turn_count_hint"] == 2
+    assert json.loads(second[1])["turn_count_hint"] == 3
+
+
 def test_format_trace_headers_names_the_thread_and_root() -> None:
     trace = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
     assert format_trace_headers(trace) == {

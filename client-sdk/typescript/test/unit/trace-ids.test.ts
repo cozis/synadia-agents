@@ -189,6 +189,29 @@ describe("prompt minting", () => {
   });
 });
 
+describe("turn_count_hint on edges", () => {
+  it("is omitted when the parent has made no model call", async () => {
+    const sink = newSink();
+    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
+    await promptedWire(agent, sink);
+    expect(sink.edges[0]!.record).not.toHaveProperty("turn_count_hint");
+  });
+
+  it("carries the parent's model-call count at spawn time", async () => {
+    const ambient: ActiveTrace = { threadId: randomThreadId(), rootId: randomThreadId() };
+    const sink = newSink();
+    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
+    await bindActiveTrace(ambient, async () => {
+      traceHeaders();
+      traceHeaders();
+      await promptedWire(agent, sink); // spawned after two model turns
+      traceHeaders();
+      await promptedWire(agent, sink); // ... and after a third
+    });
+    expect(sink.edges.map((e) => e.record["turn_count_hint"])).toEqual([2, 3]);
+  });
+});
+
 describe("trace headers", () => {
   it("names the thread and the root", () => {
     const trace: ActiveTrace = { threadId: randomThreadId(), rootId: randomThreadId() };

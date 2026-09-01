@@ -143,6 +143,34 @@ def bind_active_trace(trace: ActiveTrace, options: TraceOptions | None = None) -
         _active_scope.reset(token)
 
 
+# Trace headers for model calls. An agent stamps these on every
+# completion request it issues, so the model proxy can file the call
+# under the right thread and tree without seeing any NATS traffic
+# (observability.md, Model Proxy). The proxy needs no parent or
+# tool-call header — hierarchy is the edge records' job.
+
+#: The execution's own thread ID.
+HEADER_THREAD_ID = "X-Synadia-Thread-ID"
+#: The tree's root thread ID; equals the thread ID on a root.
+HEADER_ROOT_ID = "X-Synadia-Root-ID"
+
+
+def format_trace_headers(trace: ActiveTrace) -> dict[str, str]:
+    """Headers naming ``trace`` — attach to every model request of that execution."""
+    return {HEADER_THREAD_ID: trace.thread_id, HEADER_ROOT_ID: trace.root_id}
+
+
+def trace_headers() -> dict[str, str]:
+    """:func:`format_trace_headers` for the ambient execution.
+
+    ``{}`` outside a prompt handler, so harness code that builds its HTTP
+    client deep inside a tool needs no plumbing and degrades to nothing
+    when untraced.
+    """
+    trace = active_trace()
+    return format_trace_headers(trace) if trace is not None else {}
+
+
 def build_edge_record(
     *,
     thread_id: str,
@@ -179,6 +207,8 @@ def build_edge_record(
 __all__ = [
     "DEFAULT_EDGE_SUBJECT",
     "EDGE_RECORD_VERSION",
+    "HEADER_ROOT_ID",
+    "HEADER_THREAD_ID",
     "THREAD_ID_HEX_LEN",
     "TOOL_CALL_ID_MAX_LEN",
     "ActiveTrace",
@@ -186,8 +216,10 @@ __all__ = [
     "active_trace",
     "bind_active_trace",
     "build_edge_record",
+    "format_trace_headers",
     "inherited_trace_options",
     "is_thread_id",
     "is_tool_call_id",
     "random_thread_id",
+    "trace_headers",
 ]

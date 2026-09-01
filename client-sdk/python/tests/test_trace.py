@@ -17,6 +17,8 @@ import synadia_ai.agents.agent as agent_module
 from synadia_ai.agents import (
     DEFAULT_EDGE_SUBJECT,
     EDGE_RECORD_VERSION,
+    HEADER_ROOT_ID,
+    HEADER_THREAD_ID,
     THREAD_ID_HEX_LEN,
     ActiveTrace,
     Agent,
@@ -29,9 +31,11 @@ from synadia_ai.agents import (
     build_agent_info,
     decode,
     encode,
+    format_trace_headers,
     is_thread_id,
     is_tool_call_id,
     random_thread_id,
+    trace_headers,
 )
 
 if TYPE_CHECKING:
@@ -226,6 +230,27 @@ async def test_ambient_trace_flows_into_awaited_work() -> None:
 
     with bind_active_trace(trace):
         assert await probe() is trace
+
+
+def test_format_trace_headers_names_the_thread_and_root() -> None:
+    trace = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
+    assert format_trace_headers(trace) == {
+        HEADER_THREAD_ID: trace.thread_id,
+        HEADER_ROOT_ID: trace.root_id,
+    }
+
+
+async def test_trace_headers_is_empty_outside_a_handler_and_populated_inside() -> None:
+    assert trace_headers() == {}
+    trace = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
+
+    async def probe() -> dict[str, str]:
+        await asyncio.sleep(0)
+        return trace_headers()
+
+    with bind_active_trace(trace):
+        assert await probe() == format_trace_headers(trace)
+    assert trace_headers() == {}
 
 
 def test_is_tool_call_id_bounds() -> None:

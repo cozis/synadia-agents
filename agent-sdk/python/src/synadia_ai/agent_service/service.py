@@ -66,6 +66,7 @@ from synadia_ai.agents import (
     bind_active_trace,
     decode,
     format_sender,
+    format_trace_headers,
     random_thread_id,
 )
 from synadia_ai.agents.identity import (
@@ -197,6 +198,15 @@ class PromptStream:
         without plumbing.
         """
         return self._trace
+
+    def trace_headers(self) -> dict[str, str]:
+        """Headers for every model request this execution issues.
+
+        ``X-Synadia-Thread-ID`` / ``X-Synadia-Root-ID``, so the proxy
+        files the call under this thread and tree. Same values as the
+        ambient :func:`synadia_ai.agents.trace_headers`.
+        """
+        return format_trace_headers(self._trace)
 
     @property
     def sender(self) -> SenderInfo | None:

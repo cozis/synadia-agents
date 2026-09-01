@@ -249,6 +249,12 @@ export {
   inheritedTraceOptions,
 } from "./trace/context.js";
 export {
+  HEADER_ROOT_ID,
+  HEADER_THREAD_ID,
+  formatTraceHeaders,
+  traceHeaders,
+} from "./trace/headers.js";
+export {
   DEFAULT_EDGE_SUBJECT,
   EDGE_RECORD_VERSION,
   buildEdgeRecord,

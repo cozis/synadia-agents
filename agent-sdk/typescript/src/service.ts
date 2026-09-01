@@ -56,6 +56,7 @@ import {
   encodeBase64,
   formatHumanBytes,
   formatSender,
+  formatTraceHeaders,
   IDENTITY_METADATA_KEYS,
   MIN_SENDER_TRUST_KEY,
   newInbox,
@@ -351,6 +352,16 @@ export class PromptResponse {
     this.#nc = nc;
     this.sender = sender;
     this.trace = trace ?? mintRootTrace();
+  }
+
+  /**
+   * Headers to attach to every model request this execution issues, so
+   * the proxy files the call under this thread and tree
+   * (`X-Synadia-Thread-ID` / `X-Synadia-Root-ID`). Same values as the
+   * ambient `traceHeaders()` from `@synadia-ai/agents`.
+   */
+  traceHeaders(): Record<string, string> {
+    return formatTraceHeaders(this.trace);
   }
 
   /**

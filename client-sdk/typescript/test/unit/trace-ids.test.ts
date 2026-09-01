@@ -5,6 +5,12 @@ import { buildAgentInfo, type RawServiceInfo } from "../../src/discovery/agent-i
 import { decodeEnvelope, encodeEnvelope } from "../../src/prompt/envelope.js";
 import { activeTrace, bindActiveTrace, type ActiveTrace } from "../../src/trace/context.js";
 import { DEFAULT_EDGE_SUBJECT, EDGE_RECORD_VERSION } from "../../src/trace/edge.js";
+import {
+  formatTraceHeaders,
+  HEADER_ROOT_ID,
+  HEADER_THREAD_ID,
+  traceHeaders,
+} from "../../src/trace/headers.js";
 import type { TraceOptions } from "../../src/trace/options.js";
 import { isThreadId, isToolCallId, randomThreadId, THREAD_ID_HEX_LEN } from "../../src/trace/ids.js";
 
@@ -175,6 +181,27 @@ describe("prompt minting", () => {
     const wire = (await promptedWire(agent, sink)) as Record<string, unknown>;
     expect(sink.edges).toHaveLength(1);
     expect(sink.edges[0]!.record["thread_id"]).toBe(wire["thread_id"]);
+  });
+});
+
+describe("trace headers", () => {
+  it("names the thread and the root", () => {
+    const trace: ActiveTrace = { threadId: randomThreadId(), rootId: randomThreadId() };
+    expect(formatTraceHeaders(trace)).toEqual({
+      [HEADER_THREAD_ID]: trace.threadId,
+      [HEADER_ROOT_ID]: trace.rootId,
+    });
+  });
+
+  it("is empty outside a handler and populated inside", async () => {
+    expect(traceHeaders()).toEqual({});
+    const trace: ActiveTrace = { threadId: randomThreadId(), rootId: randomThreadId() };
+    const inside = await bindActiveTrace(trace, async () => {
+      await Promise.resolve();
+      return traceHeaders();
+    });
+    expect(inside).toEqual(formatTraceHeaders(trace));
+    expect(traceHeaders()).toEqual({});
   });
 });
 

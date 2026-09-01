@@ -128,6 +128,38 @@ async def test_service_mints_a_root_for_an_id_less_envelope(
 
 
 @pytest.mark.asyncio
+async def test_handler_trace_headers_carry_the_adopted_thread_and_root(
+    nc: NATSClient, evidence: EvidenceRecorder
+) -> None:
+    """The headers an agent stamps on model calls name its own execution."""
+    seen: list[dict[str, str]] = []
+
+    async def _handler(envelope: Envelope, stream: PromptStream) -> None:
+        seen.append(stream.trace_headers())
+        await stream.send(envelope.prompt)
+
+    service = AgentService(
+        agent=AGENT,
+        owner=OWNER,
+        session_name="trace-headers",
+        nc=nc,
+        heartbeat_interval_s=HEARTBEAT_INTERVAL_S,
+        keepalive_interval_s=None,
+    )
+    service.on_prompt(_handler)
+    await service.start()
+    try:
+        tid = "9f2c4b1e8a7d33051c6e0b42d78a91f0"
+        rid = "5b8e2a90c4f1d7631e0a9b3c82d45f17"
+        payload = json.dumps({"prompt": "hi", "thread_id": tid, "root_id": rid}).encode()
+        await _drain_reply(nc, service.subject.prompt, payload)
+        evidence.write_json("model-call-headers.json", seen[0] if seen else {})
+        assert seen == [{"X-Synadia-Thread-ID": tid, "X-Synadia-Root-ID": rid}]
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
 async def test_service_hands_its_trace_config_down_to_clients(
     nc: NATSClient, evidence: EvidenceRecorder
 ) -> None:

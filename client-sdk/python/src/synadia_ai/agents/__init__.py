@@ -164,6 +164,8 @@ from .subjects import AgentSubject
 from .trace import (
     DEFAULT_EDGE_SUBJECT,
     EDGE_RECORD_VERSION,
+    HEADER_ROOT_ID,
+    HEADER_THREAD_ID,
     THREAD_ID_HEX_LEN,
     TOOL_CALL_ID_MAX_LEN,
     ActiveTrace,
@@ -171,10 +173,12 @@ from .trace import (
     active_trace,
     bind_active_trace,
     build_edge_record,
+    format_trace_headers,
     inherited_trace_options,
     is_thread_id,
     is_tool_call_id,
     random_thread_id,
+    trace_headers,
 )
 
 __all__ = [
@@ -198,6 +202,8 @@ __all__ = [
     "DEFAULT_STATUS_TIMEOUT_S",
     "DEFAULT_STREAM_INACTIVITY_TIMEOUT_S",
     "EDGE_RECORD_VERSION",
+    "HEADER_ROOT_ID",
+    "HEADER_THREAD_ID",
     "HEARTBEAT_SUBJECT",
     "IDENTITY_METADATA_KEYS",
     "MIN_SENDER_TRUST_KEY",
@@ -288,6 +294,7 @@ __all__ = [
     "expected_sender_header_bytes",
     "format_sender",
     "format_sender_timestamp",
+    "format_trace_headers",
     "inherited_trace_options",
     "is_thread_id",
     "is_tool_call_id",
@@ -312,6 +319,7 @@ __all__ = [
     "signer_from_creds",
     "signer_from_creds_file",
     "signer_from_seed",
+    "trace_headers",
     "verify_agent_id",
     "verify_sender",
     "verify_sender_header",

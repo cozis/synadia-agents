@@ -8,10 +8,14 @@
 /**
  * Opt-in tracing configuration. Passing this object (even empty, for all
  * defaults) enables tracing on the client; omitting it disables tracing
- * entirely. Configuration fields (edge subject, delivery tuning) land as
- * the tracing feature is built out.
+ * entirely. Delivery-tuning fields land as the feature is built out.
  */
 export interface TraceOptions {
-  /** Reserved — no configuration fields yet. */
-  readonly _reserved?: never;
+  /**
+   * Subject edge records are published to. Default `"TRACE.edges"` (the
+   * tenant-side short form; the account's import qualifies it). Pass
+   * `null` for propagate-only mode: mint IDs and forward lineage, but
+   * publish no edge records.
+   */
+  readonly edgeSubject?: string | null;
 }

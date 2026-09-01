@@ -21,7 +21,7 @@ import {
 } from "./identity/sender-header.js";
 import { combineAbortSignals } from "./internal/abort.js";
 import { activeTrace } from "./trace/context.js";
-import { sendEdgeRecord } from "./trace/edge.js";
+import { buildEdgeRecord, DEFAULT_EDGE_SUBJECT } from "./trace/edge.js";
 import { isToolCallId, randomThreadId, TOOL_CALL_ID_MAX_LEN } from "./trace/ids.js";
 import type { TraceOptions } from "./trace/options.js";
 import { STATUS_ENDPOINT_NAME } from "./internal/service-name.js";
@@ -189,7 +189,19 @@ export class Agent {
     }
     const lineage = this.#trace !== undefined ? mintLineage() : undefined;
     if (lineage !== undefined) {
-      sendEdgeRecord({ ...lineage, toolCallId: opts.tool });
+      // Publish the edge before the prompt goes out, so an observer sees
+      // the node before it runs. Fire-and-forget and fail-open: a failed
+      // publish never fails the prompt.
+      const edgeSubject = this.#trace?.edgeSubject === undefined
+        ? DEFAULT_EDGE_SUBJECT
+        : this.#trace.edgeSubject;
+      if (edgeSubject !== null) {
+        try {
+          this.#nc.publish(edgeSubject, buildEdgeRecord({ ...lineage, toolCallId: opts.tool }));
+        } catch {
+          // Nothing in the observability layer may break an agent.
+        }
+      }
     }
     // The envelope carries only what the receiver must inherit; the
     // parent stays in the edge record and never transits the child.

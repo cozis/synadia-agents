@@ -15,6 +15,8 @@ import pytest
 
 import synadia_ai.agents.agent as agent_module
 from synadia_ai.agents import (
+    DEFAULT_EDGE_SUBJECT,
+    EDGE_RECORD_VERSION,
     THREAD_ID_HEX_LEN,
     ActiveTrace,
     Agent,
@@ -33,6 +35,8 @@ from synadia_ai.agents import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from nats.aio.client import Client as NATSClient
 
 # Tracker/resolver only store the connection at construction time, so a
@@ -224,88 +228,90 @@ def test_prompt_rejects_an_invalid_tool_synchronously(monkeypatch: pytest.Monkey
         agent.prompt("hello", tool="bad tool")
 
 
-def _capture_edges(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str | None]]:
-    edges: list[dict[str, str | None]] = []
-
-    def capture_edge(
-        *,
-        thread_id: str,
-        root_id: str,
-        parent_id: str | None = None,
-        tool_call_id: str | None = None,
-    ) -> None:
-        edges.append(
-            {
-                "thread_id": thread_id,
-                "root_id": root_id,
-                "parent_id": parent_id,
-                "tool_call_id": tool_call_id,
-            }
-        )
-
-    monkeypatch.setattr(agent_module, "send_edge_record", capture_edge)
-    return edges
-
-
-def test_prompt_hands_thread_and_tool_ids_to_the_edge_sender(
+def _captured_edge(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    agent: Agent,
+    text: str | Envelope,
+    tool: str | None = None,
+) -> tuple[Envelope, tuple[str, bytes] | None]:
+    """Run the sync half of ``prompt()``; capture the envelope and edge publish."""
+    seen: list[Envelope] = []
+    edge: list[tuple[str, bytes] | None] = []
+
+    def capture(envelope: Envelope) -> bytes:
+        seen.append(envelope)
+        return encode(envelope)
+
+    def capture_stream(*args: object, **kw: object) -> AsyncIterator[object]:
+        edge.append(cast("tuple[str, bytes] | None", kw.get("edge_publish")))
+
+        async def _empty() -> AsyncIterator[object]:
+            return
+            yield  # pragma: no cover
+
+        return _empty()
+
+    monkeypatch.setattr(agent_module, "encode", capture)
+    monkeypatch.setattr(agent, "_stream_prompt", capture_stream)
+    agent.prompt(text, tool=tool)
+    assert len(seen) == 1
+    return seen[0], edge[0]
+
+
+def test_prompt_publishes_a_root_edge_record(monkeypatch: pytest.MonkeyPatch) -> None:
     info = build_agent_info(_info())
     assert info is not None
     agent = Agent(_NC, info, trace=TraceOptions())
-    edges = _capture_edges(monkeypatch)
-    envelope = _captured_envelope(monkeypatch, agent, "hello")  # tool-less path
-    assert edges == [
-        {
-            "thread_id": envelope.thread_id,
-            "root_id": envelope.thread_id,
-            "parent_id": None,
-            "tool_call_id": None,
-        }
-    ]
-
-    edges.clear()
-    agent.prompt("hello", tool="call_9xJ2")
-    assert len(edges) == 1
-    assert edges[0]["tool_call_id"] == "call_9xJ2"
+    envelope, edge = _captured_edge(monkeypatch, agent, "hello", tool="call_9xJ2")
+    assert edge is not None
+    subject, payload = edge
+    assert subject == DEFAULT_EDGE_SUBJECT
+    record = json.loads(payload)
+    assert record["version"] == EDGE_RECORD_VERSION
+    assert record["thread_id"] == envelope.thread_id
+    assert record["root_id"] == envelope.thread_id
+    assert record["parent_id"] is None
+    assert record["tool_call_id"] == "call_9xJ2"
+    assert is_thread_id(record["record_id"])
+    assert isinstance(record["ts"], int)
 
 
 def test_prompt_inherits_ambient_lineage(monkeypatch: pytest.MonkeyPatch) -> None:
     info = build_agent_info(_info())
     assert info is not None
     agent = Agent(_NC, info, trace=TraceOptions())
-    edges = _capture_edges(monkeypatch)
     ambient = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
     with bind_active_trace(ambient):
-        envelope = _captured_envelope(monkeypatch, agent, "hello")
+        envelope, edge = _captured_edge(monkeypatch, agent, "hello")
 
     # The envelope carries only (thread, root); the parent rides the edge.
     assert envelope.root_id == ambient.root_id
     assert envelope.thread_id != ambient.thread_id
     assert "parent_id" not in json.loads(encode(envelope))
-    assert edges == [
-        {
-            "thread_id": envelope.thread_id,
-            "root_id": ambient.root_id,
-            "parent_id": ambient.thread_id,
-            "tool_call_id": None,
-        }
-    ]
+    assert edge is not None
+    record = json.loads(edge[1])
+    assert record["thread_id"] == envelope.thread_id
+    assert record["root_id"] == ambient.root_id
+    assert record["parent_id"] == ambient.thread_id
 
 
-def test_prompt_skips_the_edge_sender_when_tracing_is_off(
+def test_propagate_only_mints_without_publishing(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = build_agent_info(_info())
+    assert info is not None
+    agent = Agent(_NC, info, trace=TraceOptions(edge_subject=None))
+    envelope, edge = _captured_edge(monkeypatch, agent, "hello")
+    assert envelope.thread_id is not None
+    assert edge is None
+
+
+def test_prompt_publishes_no_edge_when_tracing_is_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     info = build_agent_info(_info())
     assert info is not None
-    edges: list[str] = []
-    monkeypatch.setattr(
-        agent_module,
-        "send_edge_record",
-        lambda **kwargs: edges.append("called"),
-    )
-    Agent(_NC, info).prompt("hello", tool="call_9xJ2")
-    assert edges == []
+    envelope, edge = _captured_edge(monkeypatch, Agent(_NC, info), "hello", tool="call_9xJ2")
+    assert envelope.thread_id is None
+    assert edge is None
 
 
 def test_explicit_envelope_lineage_wins_over_minting(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -12,8 +12,10 @@ Mirrors the TS SDK's ``TraceOptions``.
 
 from __future__ import annotations
 
+import json
 import re
 import secrets
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -55,9 +57,24 @@ def is_tool_call_id(value: str) -> bool:
     return len(value) <= TOOL_CALL_ID_MAX_LEN and _TOOL_CALL_ID_RE.fullmatch(value) is not None
 
 
+#: Edge record schema version.
+EDGE_RECORD_VERSION = 1
+
+#: Default subject edge records are published to — the tenant-side short
+#: form; the account's import qualifies it to ``TRACE.{account}.edges``.
+DEFAULT_EDGE_SUBJECT = "TRACE.edges"
+
+
 @dataclass(frozen=True, slots=True)
 class TraceOptions:
-    """Opt-in tracing configuration; passing an instance enables tracing."""
+    """Opt-in tracing configuration; passing an instance enables tracing.
+
+    ``edge_subject`` is where edge records are published (default
+    ``TRACE.edges``); ``None`` selects propagate-only mode — mint IDs and
+    forward lineage, but publish no edge records.
+    """
+
+    edge_subject: str | None = DEFAULT_EDGE_SUBJECT
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,33 +113,48 @@ def bind_active_trace(trace: ActiveTrace) -> Iterator[None]:
         _active_trace.reset(token)
 
 
-def send_edge_record(
+def build_edge_record(
     *,
     thread_id: str,
     root_id: str,
     parent_id: str | None = None,
     tool_call_id: str | None = None,
-) -> None:
-    """Hand one edge record to the (future) publisher.
+) -> bytes:
+    """Build one edge record's wire bytes.
 
     One record per traced prompt, written by the caller before the prompt
     is sent (observability.md, Trace Log). ``thread_id`` is the spawned
     thread (minted by this caller); ``root_id`` the tree's root (equal to
     ``thread_id`` when the spawn starts a tree); ``parent_id`` the calling
-    execution's own thread from the ambient trace, absent on a root. Not
-    implemented yet — deliberately a no-op so call sites and tests can
-    land first; later commits add the remaining fields, signing, and
-    delivery.
+    execution's own thread from the ambient trace, absent on a root.
+    Nulls are explicit (a root's ``parent_id`` is ``null``, not omitted);
+    ``record_id`` shares the 128-bit lowercase-hex shape of thread IDs
+    and doubles as the JetStream ``Nats-Msg-Id`` once acked delivery
+    lands; ``ts`` is unix seconds. The writer's identity lands with
+    signing.
     """
+    record = {
+        "version": EDGE_RECORD_VERSION,
+        "record_id": random_thread_id(),
+        "ts": int(time.time()),
+        "thread_id": thread_id,
+        "parent_id": parent_id,
+        "root_id": root_id,
+        "tool_call_id": tool_call_id,
+    }
+    return json.dumps(record, separators=(",", ":")).encode("utf-8")
 
 
 __all__ = [
+    "DEFAULT_EDGE_SUBJECT",
+    "EDGE_RECORD_VERSION",
     "THREAD_ID_HEX_LEN",
     "TOOL_CALL_ID_MAX_LEN",
     "ActiveTrace",
     "TraceOptions",
     "active_trace",
     "bind_active_trace",
+    "build_edge_record",
     "is_thread_id",
     "is_tool_call_id",
     "random_thread_id",

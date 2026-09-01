@@ -244,6 +244,12 @@ export { base64UrlDecode, base64UrlEncode, sha256, sha256Hex } from "./identity/
 export { type TraceOptions } from "./trace/options.js";
 export { type ActiveTrace, activeTrace, bindActiveTrace } from "./trace/context.js";
 export {
+  DEFAULT_EDGE_SUBJECT,
+  EDGE_RECORD_VERSION,
+  buildEdgeRecord,
+  type EdgeFields,
+} from "./trace/edge.js";
+export {
   THREAD_ID_HEX_LEN,
   TOOL_CALL_ID_MAX_LEN,
   isThreadId,

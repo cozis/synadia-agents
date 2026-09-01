@@ -1,29 +1,16 @@
 import { Empty, type Msg, type NatsConnection } from "@nats-io/nats-core";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { Agent } from "../../src/agent.js";
 import { buildAgentInfo, type RawServiceInfo } from "../../src/discovery/agent-info.js";
 import { decodeEnvelope, encodeEnvelope } from "../../src/prompt/envelope.js";
 import { activeTrace, bindActiveTrace, type ActiveTrace } from "../../src/trace/context.js";
+import { DEFAULT_EDGE_SUBJECT, EDGE_RECORD_VERSION } from "../../src/trace/edge.js";
 import { isThreadId, isToolCallId, randomThreadId, THREAD_ID_HEX_LEN } from "../../src/trace/ids.js";
 
-// The edge sender is a no-op stub for now; mock it so tests can assert the
-// call shape `prompt()` hands it.
 interface CapturedEdge {
-  threadId: string;
-  rootId: string;
-  parentId?: string;
-  toolCallId?: string;
+  subject: string;
+  record: Record<string, unknown>;
 }
-const edgeCalls = vi.hoisted(() => [] as CapturedEdge[]);
-vi.mock("../../src/trace/edge.js", () => ({
-  sendEdgeRecord: (fields: CapturedEdge) => {
-    edgeCalls.push(fields);
-  },
-}));
-
-beforeEach(() => {
-  edgeCalls.length = 0;
-});
 
 function info(): RawServiceInfo {
   return {
@@ -48,10 +35,25 @@ function info(): RawServiceInfo {
   };
 }
 
-/** Fake connection capturing the published prompt payload. */
-function captureNc(sink: { payload?: Uint8Array }): NatsConnection {
+interface Sink {
+  payload?: Uint8Array;
+  edges: CapturedEdge[];
+}
+
+function newSink(): Sink {
+  return { edges: [] };
+}
+
+/** Fake connection capturing the prompt payload and any edge publishes. */
+function captureNc(sink: Sink): NatsConnection {
   return {
     info: { max_payload: 1024 * 1024 },
+    publish: (subject: string, payload: Uint8Array) => {
+      sink.edges.push({
+        subject,
+        record: JSON.parse(new TextDecoder().decode(payload)) as Record<string, unknown>,
+      });
+    },
     requestMany: (_subject: string, payload: Uint8Array) => {
       sink.payload = payload;
       const messages = (async function* (): AsyncGenerator<Msg> {
@@ -65,7 +67,7 @@ function captureNc(sink: { payload?: Uint8Array }): NatsConnection {
 
 async function promptedWire(
   agent: Agent,
-  sink: { payload?: Uint8Array },
+  sink: Sink,
   opts: Parameters<Agent["prompt"]>[1] = {},
 ): Promise<unknown> {
   const stream = await agent.prompt("hello", opts);
@@ -110,14 +112,14 @@ describe("envelope lineage fields", () => {
 
 describe("prompt minting", () => {
   it("adds no lineage when tracing is off (byte-identical 0.3)", async () => {
-    const sink: { payload?: Uint8Array } = {};
+    const sink = newSink();
     const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000);
     const wire = (await promptedWire(agent, sink)) as Record<string, unknown>;
     expect(wire).toEqual({ prompt: "hello" });
   });
 
   it("mints thread_id and root_id (equal — a root) when tracing is on", async () => {
-    const sink: { payload?: Uint8Array } = {};
+    const sink = newSink();
     const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
     const wire = (await promptedWire(agent, sink)) as Record<string, unknown>;
     expect(wire["prompt"]).toBe("hello");
@@ -127,7 +129,7 @@ describe("prompt minting", () => {
   });
 
   it("mints a fresh thread_id per prompt", async () => {
-    const sink: { payload?: Uint8Array } = {};
+    const sink = newSink();
     const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
     const first = (await promptedWire(agent, sink)) as Record<string, unknown>;
     const second = (await promptedWire(agent, sink)) as Record<string, unknown>;
@@ -136,7 +138,7 @@ describe("prompt minting", () => {
 
   it("inherits root and parent from the ambient trace; the parent never transits the child", async () => {
     const ambient: ActiveTrace = { threadId: randomThreadId(), rootId: randomThreadId() };
-    const sink: { payload?: Uint8Array } = {};
+    const sink = newSink();
     const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
     const wire = (await bindActiveTrace(ambient, () =>
       promptedWire(agent, sink, { tool: "call_9xJ2" }),
@@ -146,15 +148,22 @@ describe("prompt minting", () => {
     expect(wire["thread_id"]).not.toBe(ambient.threadId);
     expect(wire).not.toHaveProperty("parent_id");
 
-    expect(edgeCalls).toHaveLength(1);
-    expect(edgeCalls[0]).toEqual({
-      threadId: wire["thread_id"],
-      rootId: ambient.rootId,
-      parentId: ambient.threadId,
-      toolCallId: "call_9xJ2",
+    expect(sink.edges).toHaveLength(1);
+    expect(sink.edges[0]!.record).toMatchObject({
+      thread_id: wire["thread_id"],
+      root_id: ambient.rootId,
+      parent_id: ambient.threadId,
+      tool_call_id: "call_9xJ2",
     });
   });
 
+  it("keeps the minted id internal — the envelope and the edge agree, nothing is exposed", async () => {
+    const sink = newSink();
+    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
+    const wire = (await promptedWire(agent, sink)) as Record<string, unknown>;
+    expect(sink.edges).toHaveLength(1);
+    expect(sink.edges[0]!.record["thread_id"]).toBe(wire["thread_id"]);
+  });
 });
 
 describe("tool call ids", () => {
@@ -169,30 +178,38 @@ describe("tool call ids", () => {
   });
 
   it("prompt() rejects an invalid tool option synchronously", () => {
-    const sink: { payload?: Uint8Array } = {};
+    const sink = newSink();
     const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
     expect(() => agent.prompt("hello", { tool: "bad tool" })).toThrow(/tool call id/);
     expect(sink.payload).toBeUndefined();
-    expect(edgeCalls).toHaveLength(0);
+    expect(sink.edges).toHaveLength(0);
   });
 
   it("prompt() hands thread and tool ids to the edge sender when tracing is on", async () => {
-    const sink: { payload?: Uint8Array } = {};
+    const sink = newSink();
     const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
     const wire = (await promptedWire(agent, sink, { tool: "call_9xJ2" })) as Record<
       string,
       unknown
     >;
-    expect(edgeCalls).toHaveLength(1);
-    expect(edgeCalls[0]!.threadId).toBe(wire["thread_id"]);
-    expect(edgeCalls[0]!.toolCallId).toBe("call_9xJ2");
+    expect(sink.edges).toHaveLength(1);
+    expect(sink.edges[0]!.subject).toBe(DEFAULT_EDGE_SUBJECT);
+    expect(sink.edges[0]!.record).toMatchObject({
+      version: EDGE_RECORD_VERSION,
+      thread_id: wire["thread_id"],
+      root_id: wire["root_id"],
+      parent_id: null,
+      tool_call_id: "call_9xJ2",
+    });
+    expect(isThreadId(sink.edges[0]!.record["record_id"] as string)).toBe(true);
+    expect(typeof sink.edges[0]!.record["ts"]).toBe("number");
   });
 
   it("prompt() does not touch the edge sender when tracing is off", async () => {
-    const sink: { payload?: Uint8Array } = {};
+    const sink = newSink();
     const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000);
     await promptedWire(agent, sink, { tool: "call_9xJ2" });
-    expect(edgeCalls).toHaveLength(0);
+    expect(sink.edges).toHaveLength(0);
   });
 });
 

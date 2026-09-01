@@ -1,9 +1,20 @@
 // Edge records — one per traced prompt, written by the caller before the
-// prompt is sent (observability.md, Trace Log). This module grows into
-// the real publisher (signing, queueing, acked delivery); for now it only
-// fixes the call shape.
+// prompt is sent (observability.md, Trace Log). Delivery is currently a
+// plain fire-and-forget core publish; later commits add signing and the
+// queued, acked best-effort publisher.
 
-/** Fields of one edge record known so far; later commits add the rest. */
+import { randomThreadId } from "./ids.js";
+
+/** Edge record schema version. */
+export const EDGE_RECORD_VERSION = 1;
+
+/**
+ * Default subject edge records are published to — the tenant-side short
+ * form; the account's import qualifies it to `TRACE.{account}.edges`.
+ */
+export const DEFAULT_EDGE_SUBJECT = "TRACE.edges";
+
+/** Per-spawn fields of one edge record (the writer's identity lands with signing). */
 export interface EdgeFields {
   /** The spawned thread — minted by this caller. */
   readonly threadId: string;
@@ -15,9 +26,20 @@ export interface EdgeFields {
 }
 
 /**
- * Hand one edge record to the (future) publisher. Not implemented yet —
- * deliberately a no-op so call sites and tests can land first.
+ * Build one edge record's wire bytes. Nulls are explicit (a root's
+ * `parent_id` is `null`, not omitted); `record_id` shares the 128-bit
+ * lowercase-hex shape of thread IDs and doubles as the JetStream
+ * `Nats-Msg-Id` once acked delivery lands. `ts` is unix seconds.
  */
-export function sendEdgeRecord(_fields: EdgeFields): void {
-  // Intentionally empty until the fire-and-forget publish lands.
+export function buildEdgeRecord(fields: EdgeFields): Uint8Array {
+  const record = {
+    version: EDGE_RECORD_VERSION,
+    record_id: randomThreadId(),
+    ts: Math.floor(Date.now() / 1000),
+    thread_id: fields.threadId,
+    parent_id: fields.parentId ?? null,
+    root_id: fields.rootId,
+    tool_call_id: fields.toolCallId ?? null,
+  };
+  return new TextEncoder().encode(JSON.stringify(record));
 }

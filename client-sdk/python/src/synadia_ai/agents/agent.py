@@ -46,9 +46,9 @@ from .trace import (
     TOOL_CALL_ID_MAX_LEN,
     TraceOptions,
     active_trace,
+    build_edge_record,
     is_tool_call_id,
     random_thread_id,
-    send_edge_record,
 )
 from .validation import (
     assert_attachments_allowed,
@@ -377,16 +377,21 @@ class Agent:
             )
         thread_id: str | None = None
         root_id: str | None = None
+        edge_publish: tuple[str, bytes] | None = None
         if self._trace is not None:
             thread_id = random_thread_id()
             ambient = active_trace()
             root_id = ambient.root_id if ambient is not None else thread_id
-            send_edge_record(
-                thread_id=thread_id,
-                root_id=root_id,
-                parent_id=ambient.thread_id if ambient is not None else None,
-                tool_call_id=tool,
-            )
+            if self._trace.edge_subject is not None:
+                edge_publish = (
+                    self._trace.edge_subject,
+                    build_edge_record(
+                        thread_id=thread_id,
+                        root_id=root_id,
+                        parent_id=ambient.thread_id if ambient is not None else None,
+                        tool_call_id=tool,
+                    ),
+                )
 
         if isinstance(text, Envelope):
             merged_attachments: list[Attachment] | None
@@ -446,6 +451,7 @@ class Agent:
             subject=publish_subject,
             sub=signed_subject,
             require_signed=require_signed,
+            edge_publish=edge_publish,
         )
 
     # --- status --------------------------------------------------------
@@ -616,6 +622,7 @@ class Agent:
         subject: str,
         sub: str,
         require_signed: bool,
+        edge_publish: tuple[str, bytes] | None = None,
     ) -> AsyncIterator[StreamMessage]:
         # Pre-flight: refuse outright if the owning Agents is already
         # closed. This catches the "called prompt() after close()" case
@@ -663,6 +670,15 @@ class Agent:
             # live binding request was in flight. Bail before publishing
             # rather than firing a request whose reply we won't consume.
             self._raise_if_closed()
+
+            # Observability: publish the edge before the prompt goes out,
+            # so an observer sees the node before it runs. Fire-and-forget
+            # and fail-open: a failed publish never fails the prompt.
+            if edge_publish is not None:
+                try:
+                    await self._nc.publish(edge_publish[0], edge_publish[1])
+                except Exception:
+                    log.exception("failed to publish edge record on %s", edge_publish[0])
 
             # Signed at publish time so `ts` / nonce are fresh even when the
             # caller iterates late; the signature covers exactly `encoded`.

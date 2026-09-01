@@ -9,6 +9,7 @@
 
 import { utf8ByteLength } from "../bytes.js";
 import { ProtocolError } from "../errors.js";
+import { isThreadId, THREAD_ID_HEX_LEN } from "../trace/ids.js";
 
 export interface RequestAttachment {
   readonly filename: string;
@@ -153,9 +154,11 @@ export function decodeEnvelope(data: Uint8Array): RequestEnvelope {
     throw new ProtocolError("envelope `prompt` must be a non-empty string");
   }
 
+  const lineage = decodeLineage(obj);
+
   const rawAttachments = obj["attachments"];
   if (rawAttachments === undefined) {
-    return { prompt };
+    return { prompt, ...lineage };
   }
   if (!Array.isArray(rawAttachments)) {
     throw new ProtocolError("envelope `attachments` must be an array");
@@ -164,7 +167,35 @@ export function decodeEnvelope(data: Uint8Array): RequestEnvelope {
   const attachments: RequestAttachment[] = rawAttachments.map((item, idx) =>
     decodeAttachment(item, idx),
   );
-  return attachments.length > 0 ? { prompt, attachments } : { prompt };
+  return attachments.length > 0 ? { prompt, attachments, ...lineage } : { prompt, ...lineage };
+}
+
+/**
+ * Observability lineage: `thread_id` and `root_id` travel together — SDK
+ * callers send both or neither — and each must be a valid thread ID.
+ * A violation is a malformed envelope (400), same as any other field.
+ */
+function decodeLineage(obj: Record<string, unknown>): {
+  threadId?: string;
+  rootId?: string;
+} {
+  const threadId = obj["thread_id"];
+  const rootId = obj["root_id"];
+  if (threadId === undefined && rootId === undefined) return {};
+  if (threadId === undefined || rootId === undefined) {
+    throw new ProtocolError("envelope `thread_id` and `root_id` must be sent together");
+  }
+  for (const [name, value] of [
+    ["thread_id", threadId],
+    ["root_id", rootId],
+  ] as const) {
+    if (typeof value !== "string" || !isThreadId(value)) {
+      throw new ProtocolError(
+        `envelope \`${name}\` must be ${THREAD_ID_HEX_LEN} lowercase hex chars (a thread id)`,
+      );
+    }
+  }
+  return { threadId: threadId as string, rootId: rootId as string };
 }
 
 /**

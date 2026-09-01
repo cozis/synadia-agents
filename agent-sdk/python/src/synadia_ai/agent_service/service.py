@@ -50,6 +50,7 @@ from synadia_ai.agents import (
     SERVICE_NAME,
     STATUS_ENDPOINT_NAME,
     STATUS_QUEUE_GROUP,
+    ActiveTrace,
     AgentSubject,
     Attachment,
     Chunk,
@@ -61,8 +62,10 @@ from synadia_ai.agents import (
     ResponseChunk,
     SenderResolver,
     StatusChunk,
+    bind_active_trace,
     decode,
     format_sender,
+    random_thread_id,
 )
 from synadia_ai.agents.identity import (
     DEFAULT_RESOLVE_TTL_S,
@@ -143,6 +146,24 @@ DEFAULT_ATTACHMENTS_OK = True
 DEFAULT_KEEPALIVE_INTERVAL_S: float = 30.0
 
 
+def _mint_root_trace() -> ActiveTrace:
+    thread_id = random_thread_id()
+    return ActiveTrace(thread_id=thread_id, root_id=thread_id)
+
+
+def _adopt_or_mint_trace(envelope: Envelope) -> ActiveTrace:
+    """Adopt the caller's ``(thread, root)`` or mint a root.
+
+    The envelope decoder enforced shape and both-or-neither; an ID-less
+    envelope (NATS CLI, legacy 0.3) gets a service-minted root. The
+    service writes no record either way — a mint-if-absent root is
+    advertised implicitly (observability.md).
+    """
+    if envelope.thread_id is not None and envelope.root_id is not None:
+        return ActiveTrace(thread_id=envelope.thread_id, root_id=envelope.root_id)
+    return _mint_root_trace()
+
+
 class PromptStream:
     """Handle given to a prompt handler for emitting response chunks.
 
@@ -158,10 +179,23 @@ class PromptStream:
         nc: NATSClient,
         *,
         sender: SenderInfo | None = None,
+        trace: ActiveTrace | None = None,
     ) -> None:
         self._request = request
         self._nc = nc
         self._sender = sender
+        self._trace = trace if trace is not None else _mint_root_trace()
+
+    @property
+    def trace(self) -> ActiveTrace:
+        """This execution's observability identity.
+
+        ``(thread, root)`` adopted from the envelope, or minted by the
+        service when the caller sent none. Also bound as the ambient
+        trace for the handler, so nested client calls inherit lineage
+        without plumbing.
+        """
+        return self._trace
 
     @property
     def sender(self) -> SenderInfo | None:
@@ -685,7 +719,9 @@ class AgentService:
             except Exception:
                 log.exception("failed to emit leading ack on %s", request.subject)
 
-            stream = PromptStream(request, self._nc, sender=sender)
+            stream = PromptStream(
+                request, self._nc, sender=sender, trace=_adopt_or_mint_trace(envelope)
+            )
             handler = self._prompt_handler
             if handler is None:  # pragma: no cover — start() rejects this path
                 raise RuntimeError("prompt handler invoked before on_prompt() registered one")
@@ -697,7 +733,8 @@ class AgentService:
                 )
 
             try:
-                await handler(envelope, stream)
+                with bind_active_trace(stream.trace):
+                    await handler(envelope, stream)
             except ProtocolError as exc:
                 log.warning(
                     "prompt handler rejected protocol input on %s: %s",

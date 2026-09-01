@@ -51,6 +51,7 @@ import {
   agentIdAccount,
   agentIdUser,
   AgentSubject,
+  bindActiveTrace,
   decodeEnvelope,
   encodeBase64,
   formatHumanBytes,
@@ -64,6 +65,7 @@ import {
   PROMPT_ENDPOINT_NAME,
   PROMPT_QUEUE_GROUP,
   ProtocolError,
+  randomThreadId,
   SDK_PROTOCOL_VERSION,
   selfId,
   SenderResolver,
@@ -72,6 +74,7 @@ import {
   SILENT_LOGGER,
   STATUS_ENDPOINT_NAME,
   STATUS_QUEUE_GROUP,
+  type ActiveTrace,
   type AgentId,
   type Logger,
   type MinSenderTrust,
@@ -298,6 +301,11 @@ function randomId(): string {
   return crypto.randomUUID().replace(/-/g, "");
 }
 
+function mintRootTrace(): ActiveTrace {
+  const threadId = randomThreadId();
+  return { threadId, rootId: threadId };
+}
+
 /**
  * Server-side handle given to a {@link PromptHandler} for emitting response
  * chunks back to the caller. The {@link AgentService} owns stream
@@ -316,11 +324,24 @@ export class PromptResponse {
    * `Agent-Sender` header arrived. Render with `formatSender()`.
    */
   readonly sender: SenderInfo | undefined;
+  /**
+   * This execution's observability identity: `(thread, root)` adopted
+   * from the envelope, or minted here when the caller sent none. Also
+   * bound as the ambient trace for the handler, so nested client calls
+   * inherit lineage without plumbing.
+   */
+  readonly trace: ActiveTrace;
 
-  constructor(msg: ServiceMsg, nc: NatsConnection, sender: SenderInfo | undefined = undefined) {
+  constructor(
+    msg: ServiceMsg,
+    nc: NatsConnection,
+    sender: SenderInfo | undefined = undefined,
+    trace: ActiveTrace | undefined = undefined,
+  ) {
     this.#msg = msg;
     this.#nc = nc;
     this.sender = sender;
+    this.trace = trace ?? mintRootTrace();
   }
 
   /**
@@ -814,7 +835,16 @@ export class AgentService {
     }
     this.#logger.debug("prompt request", { subject: msg.subject, sender: formatSender(sender) });
 
-    const response = new PromptResponse(msg, this.#options.nc, sender);
+    // Observability: adopt the caller's (thread, root) — decode enforced
+    // shape and both-or-neither — or mint a root for an ID-less envelope
+    // (CLI, legacy 0.3). The service writes no record either way; a
+    // mint-if-absent root is advertised implicitly (observability.md).
+    const trace: ActiveTrace =
+      envelope.threadId !== undefined && envelope.rootId !== undefined
+        ? { threadId: envelope.threadId, rootId: envelope.rootId }
+        : mintRootTrace();
+
+    const response = new PromptResponse(msg, this.#options.nc, sender, trace);
 
     // §6.4: emit the mandatory leading `ack` status chunk as the first
     // message on the reply subject, before the handler runs. Confirms
@@ -864,7 +894,7 @@ export class AgentService {
     };
 
     try {
-      await handler(envelope, response);
+      await bindActiveTrace(trace, () => handler(envelope, response));
     } catch (err) {
       // Stop keep-alive BEFORE the §9 error frame so an ack chunk can't
       // race in between the error and the terminator.

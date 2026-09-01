@@ -26,9 +26,10 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
 
 from .errors import ProtocolError
+from .trace import THREAD_ID_HEX_LEN, is_thread_id
 
 
 class Attachment(BaseModel):
@@ -82,8 +83,23 @@ class Envelope(BaseModel):
     attachments: list[Attachment] | None = None
     # Observability lineage (trace.py): both present on prompts from a
     # tracing-enabled caller, both absent otherwise (§5.6 tolerates them).
+    # Validated at this decode chokepoint because the values flow into
+    # records and HTTP header values on the agent side.
     thread_id: str | None = None
     root_id: str | None = None
+
+    @field_validator("thread_id", "root_id")
+    @classmethod
+    def _check_thread_id(cls, value: str | None) -> str | None:
+        if value is not None and not is_thread_id(value):
+            raise ValueError(f"must be {THREAD_ID_HEX_LEN} lowercase hex chars (a thread id)")
+        return value
+
+    @model_validator(mode="after")
+    def _check_lineage_pair(self) -> Envelope:
+        if (self.thread_id is None) != (self.root_id is None):
+            raise ValueError("thread_id and root_id must be sent together")
+        return self
 
 
 def encode(envelope: Envelope) -> bytes:

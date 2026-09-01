@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Agent } from "../../src/agent.js";
 import { buildAgentInfo, type RawServiceInfo } from "../../src/discovery/agent-info.js";
 import { decodeEnvelope, encodeEnvelope } from "../../src/prompt/envelope.js";
+import { activeTrace, bindActiveTrace, type ActiveTrace } from "../../src/trace/context.js";
 import { isThreadId, isToolCallId, randomThreadId, THREAD_ID_HEX_LEN } from "../../src/trace/ids.js";
 
 // The edge sender is a no-op stub for now; mock it so tests can assert the
@@ -167,10 +168,61 @@ describe("tool call ids", () => {
   });
 });
 
-describe("decodeEnvelope (pre-adoption)", () => {
-  it("still decodes a lineage-bearing envelope's prompt (fields adopted in a later commit)", () => {
+describe("decodeEnvelope lineage", () => {
+  it("adopts a valid thread_id/root_id pair", () => {
     const tid = randomThreadId();
-    const bytes = encodeEnvelope({ prompt: "hi", threadId: tid, rootId: tid });
-    expect(decodeEnvelope(bytes).prompt).toBe("hi");
+    const rid = randomThreadId();
+    const decoded = decodeEnvelope(encodeEnvelope({ prompt: "hi", threadId: tid, rootId: rid }));
+    expect(decoded).toEqual({ prompt: "hi", threadId: tid, rootId: rid });
+  });
+
+  it("leaves both fields absent on a plain envelope", () => {
+    const decoded = decodeEnvelope(encodeEnvelope({ prompt: "hi" }));
+    expect(decoded.threadId).toBeUndefined();
+    expect(decoded.rootId).toBeUndefined();
+  });
+
+  it("rejects a lone thread_id or root_id", () => {
+    const tid = randomThreadId();
+    const enc = (obj: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(obj));
+    expect(() => decodeEnvelope(enc({ prompt: "hi", thread_id: tid }))).toThrow(/sent together/);
+    expect(() => decodeEnvelope(enc({ prompt: "hi", root_id: tid }))).toThrow(/sent together/);
+  });
+
+  it("rejects malformed thread ids", () => {
+    const enc = (obj: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(obj));
+    const tid = randomThreadId();
+    expect(() =>
+      decodeEnvelope(enc({ prompt: "hi", thread_id: "nope", root_id: tid })),
+    ).toThrow(/thread id/);
+    expect(() =>
+      decodeEnvelope(enc({ prompt: "hi", thread_id: tid, root_id: 42 })),
+    ).toThrow(/thread id/);
+  });
+});
+
+describe("ambient trace context", () => {
+  it("is undefined outside a bound scope and visible inside, including across awaits", async () => {
+    expect(activeTrace()).toBeUndefined();
+    const trace: ActiveTrace = { threadId: randomThreadId(), rootId: randomThreadId() };
+    const seen = await bindActiveTrace(trace, async () => {
+      await Promise.resolve();
+      return activeTrace();
+    });
+    expect(seen).toBe(trace);
+    expect(activeTrace()).toBeUndefined();
+  });
+
+  it("nests: the inner binding wins and the outer is restored", async () => {
+    const outer: ActiveTrace = { threadId: randomThreadId(), rootId: randomThreadId() };
+    const inner: ActiveTrace = { threadId: randomThreadId(), rootId: outer.rootId };
+    await bindActiveTrace(outer, async () => {
+      expect(activeTrace()).toBe(outer);
+      await bindActiveTrace(inner, async () => {
+        await Promise.resolve();
+        expect(activeTrace()).toBe(inner);
+      });
+      expect(activeTrace()).toBe(outer);
+    });
   });
 });

@@ -2,10 +2,13 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, i
 import { connect as natsConnect, type Msg } from "@nats-io/transport-node";
 import type { NatsConnection } from "@nats-io/nats-core";
 import {
+  activeTrace,
   Agents,
   decodeBase64,
   decodeHeartbeatPayload,
+  isThreadId,
   ProtocolError,
+  type ActiveTrace,
   type StreamMessage,
 } from "@synadia-ai/agents";
 import { AgentService } from "../../src/service.js";
@@ -259,6 +262,76 @@ describe.skipIf(!natsUrl)("AgentService — round-trip via real broker", () => {
     expect(errorMsg).toBeDefined();
     const terminator = messages.find((m) => !m.headers && m.data.length === 0);
     expect(terminator).toBeDefined();
+  });
+
+  describe("observability trace adoption", () => {
+    async function rawPrompt(subject: string, payload: string): Promise<Msg[]> {
+      const reply = `_INBOX.agents.trace-${Math.random().toString(36).slice(2, 8)}`;
+      const sub = nc.subscribe(reply);
+      await nc.flush();
+      nc.publish(subject, new TextEncoder().encode(payload), { reply });
+      const messages: Msg[] = [];
+      for await (const m of sub) {
+        messages.push(m);
+        if (!m.headers && m.data.length === 0) {
+          sub.unsubscribe();
+          break;
+        }
+      }
+      return messages;
+    }
+
+    it("adopts the envelope's (thread, root) and binds it as the ambient trace", async () => {
+      const seen: { stream: ActiveTrace; ambient: ActiveTrace | undefined }[] = [];
+      const service = startService();
+      service.onPrompt(async (_envelope, response) => {
+        seen.push({ stream: response.trace, ambient: activeTrace() });
+        await response.send("ok");
+      });
+      await service.start();
+
+      const tid = "9f2c4b1e8a7d33051c6e0b42d78a91f0";
+      const rid = "5b8e2a90c4f1d7631e0a9b3c82d45f17";
+      await rawPrompt(
+        service.subject.prompt,
+        JSON.stringify({ prompt: "hi", thread_id: tid, root_id: rid }),
+      );
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.stream).toEqual({ threadId: tid, rootId: rid });
+      expect(seen[0]!.ambient).toEqual(seen[0]!.stream);
+    });
+
+    it("mints a root for an ID-less envelope and writes nothing", async () => {
+      const seen: ActiveTrace[] = [];
+      const service = startService();
+      service.onPrompt(async (_envelope, response) => {
+        seen.push(response.trace);
+        await response.send("ok");
+      });
+      await service.start();
+
+      await rawPrompt(service.subject.prompt, JSON.stringify({ prompt: "hi" }));
+      expect(seen).toHaveLength(1);
+      expect(isThreadId(seen[0]!.threadId)).toBe(true);
+      expect(seen[0]!.rootId).toBe(seen[0]!.threadId);
+    });
+
+    it("rejects a lone thread_id with 400 before the handler runs", async () => {
+      let handlerCalled = false;
+      const service = startService();
+      service.onPrompt(() => {
+        handlerCalled = true;
+      });
+      await service.start();
+
+      const messages = await rawPrompt(
+        service.subject.prompt,
+        JSON.stringify({ prompt: "hi", thread_id: "9f2c4b1e8a7d33051c6e0b42d78a91f0" }),
+      );
+      const errorMsg = messages.find((m) => m.headers?.get("Nats-Service-Error-Code") === "400");
+      expect(errorMsg).toBeDefined();
+      expect(handlerCalled).toBe(false);
+    });
   });
 
   it("maps handler-raised ProtocolError to a 400 response plus terminator", async () => {

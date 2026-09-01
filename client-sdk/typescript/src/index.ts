@@ -242,6 +242,7 @@ export { base64UrlDecode, base64UrlEncode, sha256, sha256Hex } from "./identity/
 
 // Observability tracing (opt-in)
 export { type TraceOptions } from "./trace/options.js";
+export { type ActiveTrace, activeTrace, bindActiveTrace } from "./trace/context.js";
 export {
   THREAD_ID_HEX_LEN,
   TOOL_CALL_ID_MAX_LEN,

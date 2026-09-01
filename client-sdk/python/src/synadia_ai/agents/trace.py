@@ -14,7 +14,13 @@ from __future__ import annotations
 
 import re
 import secrets
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 #: Length in hex characters of a thread ID — 128 bits. A thread ID names
 #: one prompt execution; it is minted by the caller at ``prompt()`` time
@@ -54,6 +60,42 @@ class TraceOptions:
     """Opt-in tracing configuration; passing an instance enables tracing."""
 
 
+@dataclass(frozen=True, slots=True)
+class ActiveTrace:
+    """Identity of the prompt execution running in the current async context.
+
+    ``thread_id`` is this execution's own thread ID — the parent of any
+    thread it spawns; ``root_id`` is the tree's root, inherited unchanged
+    (equal to ``thread_id`` on a root).
+    """
+
+    thread_id: str
+    root_id: str
+
+
+# The agent-sdk binds the execution's ActiveTrace around each prompt
+# handler; nested client calls read it to inherit lineage without any
+# plumbing through user code. contextvars flow into awaited work and
+# tasks created inside the bound scope.
+
+_active_trace: ContextVar[ActiveTrace | None] = ContextVar("synadia_active_trace", default=None)
+
+
+def active_trace() -> ActiveTrace | None:
+    """The ambient :class:`ActiveTrace`, or ``None`` outside a bound handler."""
+    return _active_trace.get()
+
+
+@contextmanager
+def bind_active_trace(trace: ActiveTrace) -> Iterator[None]:
+    """Run the block with ``trace`` as the ambient execution (used by the agent-sdk)."""
+    token = _active_trace.set(trace)
+    try:
+        yield
+    finally:
+        _active_trace.reset(token)
+
+
 def send_edge_record(*, thread_id: str, tool_call_id: str | None = None) -> None:
     """Hand one edge record to the (future) publisher.
 
@@ -67,7 +109,10 @@ def send_edge_record(*, thread_id: str, tool_call_id: str | None = None) -> None
 __all__ = [
     "THREAD_ID_HEX_LEN",
     "TOOL_CALL_ID_MAX_LEN",
+    "ActiveTrace",
     "TraceOptions",
+    "active_trace",
+    "bind_active_trace",
     "is_thread_id",
     "is_tool_call_id",
     "random_thread_id",

@@ -6,6 +6,7 @@ Mirrors ``client-sdk/typescript/test/unit/trace-options.test.ts`` and
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import TYPE_CHECKING, cast
@@ -15,11 +16,16 @@ import pytest
 import synadia_ai.agents.agent as agent_module
 from synadia_ai.agents import (
     THREAD_ID_HEX_LEN,
+    ActiveTrace,
     Agent,
     Agents,
     Envelope,
+    ProtocolError,
     TraceOptions,
+    active_trace,
+    bind_active_trace,
     build_agent_info,
+    decode,
     encode,
     is_thread_id,
     is_tool_call_id,
@@ -153,6 +159,51 @@ def test_prompt_mints_fresh_ids_per_call(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.undo()
     second = _captured_envelope(monkeypatch, agent, "hello")
     assert first.thread_id != second.thread_id
+
+
+def test_decode_adopts_a_valid_lineage_pair() -> None:
+    tid = random_thread_id()
+    rid = random_thread_id()
+    decoded = decode(encode(Envelope(prompt="hi", thread_id=tid, root_id=rid)))
+    assert decoded.thread_id == tid
+    assert decoded.root_id == rid
+
+
+def test_decode_rejects_a_lone_lineage_field() -> None:
+    tid = random_thread_id()
+    with pytest.raises(ProtocolError, match="sent together"):
+        decode(json.dumps({"prompt": "hi", "thread_id": tid}).encode())
+    with pytest.raises(ProtocolError, match="sent together"):
+        decode(json.dumps({"prompt": "hi", "root_id": tid}).encode())
+
+
+def test_decode_rejects_malformed_thread_ids() -> None:
+    tid = random_thread_id()
+    with pytest.raises(ProtocolError, match="thread id"):
+        decode(json.dumps({"prompt": "hi", "thread_id": "nope", "root_id": tid}).encode())
+
+
+def test_ambient_trace_binds_and_restores() -> None:
+    assert active_trace() is None
+    trace = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
+    with bind_active_trace(trace):
+        assert active_trace() is trace
+        inner = ActiveTrace(thread_id=random_thread_id(), root_id=trace.root_id)
+        with bind_active_trace(inner):
+            assert active_trace() is inner
+        assert active_trace() is trace
+    assert active_trace() is None
+
+
+async def test_ambient_trace_flows_into_awaited_work() -> None:
+    trace = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
+
+    async def probe() -> ActiveTrace | None:
+        await asyncio.sleep(0)
+        return active_trace()
+
+    with bind_active_trace(trace):
+        assert await probe() is trace
 
 
 def test_is_tool_call_id_bounds() -> None:

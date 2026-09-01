@@ -20,6 +20,7 @@ import {
   serializeSenderHeader,
 } from "./identity/sender-header.js";
 import { combineAbortSignals } from "./internal/abort.js";
+import { activeTrace } from "./trace/context.js";
 import { sendEdgeRecord } from "./trace/edge.js";
 import { isToolCallId, randomThreadId, TOOL_CALL_ID_MAX_LEN } from "./trace/ids.js";
 import type { TraceOptions } from "./trace/options.js";
@@ -177,23 +178,27 @@ export class Agent {
     // size is re-checked once the identity is known.
     const headerBound = identity?.mayAttachHeader() ? maxSenderHeaderBytes(sub, identity.name) : 0;
 
-    // Observability (opt-in): mint this prompt's thread ID and hand the
-    // edge to the (future) publisher. The root is the minted ID itself
-    // until ambient-lineage inheritance lands. `tool` is validated even
-    // with tracing off — a bad value is a caller bug either way.
+    // Observability (opt-in): mint this prompt's thread ID, inherit the
+    // root and parent from the ambient trace (a root when none is bound),
+    // and hand the edge to the (future) publisher. `tool` is validated
+    // even with tracing off — a bad value is a caller bug either way.
     if (opts.tool !== undefined && !isToolCallId(opts.tool)) {
       throw new NatsAgentError(
         `invalid tool call id (must be 1-${TOOL_CALL_ID_MAX_LEN} visible-ASCII characters)`,
       );
     }
-    const lineage = this.#trace !== undefined ? mintRootLineage() : undefined;
+    const lineage = this.#trace !== undefined ? mintLineage() : undefined;
     if (lineage !== undefined) {
-      sendEdgeRecord({ threadId: lineage.threadId, toolCallId: opts.tool });
+      sendEdgeRecord({ ...lineage, toolCallId: opts.tool });
     }
+    // The envelope carries only what the receiver must inherit; the
+    // parent stays in the edge record and never transits the child.
+    const envLineage =
+      lineage !== undefined ? { threadId: lineage.threadId, rootId: lineage.rootId } : undefined;
 
     // Fast path: text-only — max_payload check is sync.
     if (!hasAttachments) {
-      const envelope: RequestEnvelope = { prompt: text, ...lineage };
+      const envelope: RequestEnvelope = { prompt: text, ...envLineage };
       assertWithinMaxPayload(
         encodedEnvelopeSize(envelope),
         this.promptEndpoint,
@@ -206,7 +211,7 @@ export class Agent {
     // With attachments: load files, then check max_payload on the final encoded size.
     return (async (): Promise<PromptStream> => {
       const attachments = await normalizeAttachments(attachmentInputs);
-      const envelope: RequestEnvelope = { prompt: text, attachments, ...lineage };
+      const envelope: RequestEnvelope = { prompt: text, attachments, ...envLineage };
       assertWithinMaxPayload(
         encodedEnvelopeSize(envelope),
         this.promptEndpoint,
@@ -317,7 +322,9 @@ export class Agent {
   }
 }
 
-function mintRootLineage(): { threadId: string; rootId: string } {
+function mintLineage(): { threadId: string; rootId: string; parentId?: string } {
   const threadId = randomThreadId();
-  return { threadId, rootId: threadId };
+  const ambient = activeTrace();
+  if (ambient === undefined) return { threadId, rootId: threadId };
+  return { threadId, rootId: ambient.rootId, parentId: ambient.threadId };
 }

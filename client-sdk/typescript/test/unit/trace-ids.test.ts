@@ -8,9 +8,15 @@ import { isThreadId, isToolCallId, randomThreadId, THREAD_ID_HEX_LEN } from "../
 
 // The edge sender is a no-op stub for now; mock it so tests can assert the
 // call shape `prompt()` hands it.
-const edgeCalls = vi.hoisted(() => [] as { threadId: string; toolCallId?: string }[]);
+interface CapturedEdge {
+  threadId: string;
+  rootId: string;
+  parentId?: string;
+  toolCallId?: string;
+}
+const edgeCalls = vi.hoisted(() => [] as CapturedEdge[]);
 vi.mock("../../src/trace/edge.js", () => ({
-  sendEdgeRecord: (fields: { threadId: string; toolCallId?: string }) => {
+  sendEdgeRecord: (fields: CapturedEdge) => {
     edgeCalls.push(fields);
   },
 }));
@@ -127,6 +133,28 @@ describe("prompt minting", () => {
     const second = (await promptedWire(agent, sink)) as Record<string, unknown>;
     expect(first["thread_id"]).not.toBe(second["thread_id"]);
   });
+
+  it("inherits root and parent from the ambient trace; the parent never transits the child", async () => {
+    const ambient: ActiveTrace = { threadId: randomThreadId(), rootId: randomThreadId() };
+    const sink: { payload?: Uint8Array } = {};
+    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
+    const wire = (await bindActiveTrace(ambient, () =>
+      promptedWire(agent, sink, { tool: "call_9xJ2" }),
+    )) as Record<string, unknown>;
+
+    expect(wire["root_id"]).toBe(ambient.rootId);
+    expect(wire["thread_id"]).not.toBe(ambient.threadId);
+    expect(wire).not.toHaveProperty("parent_id");
+
+    expect(edgeCalls).toHaveLength(1);
+    expect(edgeCalls[0]).toEqual({
+      threadId: wire["thread_id"],
+      rootId: ambient.rootId,
+      parentId: ambient.threadId,
+      toolCallId: "call_9xJ2",
+    });
+  });
+
 });
 
 describe("tool call ids", () => {

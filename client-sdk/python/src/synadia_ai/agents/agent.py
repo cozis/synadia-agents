@@ -45,6 +45,7 @@ from .messages import QueryChunk, ResponseChunk, StatusChunk, decode_chunk
 from .trace import (
     TOOL_CALL_ID_MAX_LEN,
     TraceOptions,
+    active_trace,
     is_tool_call_id,
     random_thread_id,
     send_edge_record,
@@ -363,11 +364,13 @@ class Agent:
                 f"max_wait_s must be > 0 (got {max_wait_s!r}); pass None to use the default."
             )
 
-        # Observability (opt-in): mint this prompt's thread ID and hand the
-        # edge to the (future) publisher. The root is the minted ID itself
-        # until ambient-lineage inheritance lands. `tool` is validated even
-        # with tracing off — a bad value is a caller bug either way.
-        # Lineage already set on an explicit Envelope wins over minting.
+        # Observability (opt-in): mint this prompt's thread ID, inherit the
+        # root and parent from the ambient trace (a root when none is
+        # bound), and hand the edge to the (future) publisher. The envelope
+        # carries only (thread, root) — the parent stays in the edge record
+        # and never transits the child. `tool` is validated even with
+        # tracing off — a bad value is a caller bug either way. Lineage
+        # already set on an explicit Envelope wins over minting.
         if tool is not None and not is_tool_call_id(tool):
             raise ValueError(
                 f"invalid tool call id (must be 1-{TOOL_CALL_ID_MAX_LEN} visible-ASCII characters)"
@@ -376,8 +379,14 @@ class Agent:
         root_id: str | None = None
         if self._trace is not None:
             thread_id = random_thread_id()
-            root_id = thread_id
-            send_edge_record(thread_id=thread_id, tool_call_id=tool)
+            ambient = active_trace()
+            root_id = ambient.root_id if ambient is not None else thread_id
+            send_edge_record(
+                thread_id=thread_id,
+                root_id=root_id,
+                parent_id=ambient.thread_id if ambient is not None else None,
+                tool_call_id=tool,
+            )
 
         if isinstance(text, Envelope):
             merged_attachments: list[Attachment] | None

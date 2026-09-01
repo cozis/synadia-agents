@@ -96,13 +96,23 @@ def bind_active_trace(trace: ActiveTrace) -> Iterator[None]:
         _active_trace.reset(token)
 
 
-def send_edge_record(*, thread_id: str, tool_call_id: str | None = None) -> None:
+def send_edge_record(
+    *,
+    thread_id: str,
+    root_id: str,
+    parent_id: str | None = None,
+    tool_call_id: str | None = None,
+) -> None:
     """Hand one edge record to the (future) publisher.
 
     One record per traced prompt, written by the caller before the prompt
-    is sent (observability.md, Trace Log). Not implemented yet —
-    deliberately a no-op so call sites and tests can land first; later
-    commits add the remaining fields, signing, and delivery.
+    is sent (observability.md, Trace Log). ``thread_id`` is the spawned
+    thread (minted by this caller); ``root_id`` the tree's root (equal to
+    ``thread_id`` when the spawn starts a tree); ``parent_id`` the calling
+    execution's own thread from the ambient trace, absent on a root. Not
+    implemented yet — deliberately a no-op so call sites and tests can
+    land first; later commits add the remaining fields, signing, and
+    delivery.
     """
 
 

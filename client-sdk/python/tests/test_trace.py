@@ -224,25 +224,73 @@ def test_prompt_rejects_an_invalid_tool_synchronously(monkeypatch: pytest.Monkey
         agent.prompt("hello", tool="bad tool")
 
 
+def _capture_edges(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str | None]]:
+    edges: list[dict[str, str | None]] = []
+
+    def capture_edge(
+        *,
+        thread_id: str,
+        root_id: str,
+        parent_id: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> None:
+        edges.append(
+            {
+                "thread_id": thread_id,
+                "root_id": root_id,
+                "parent_id": parent_id,
+                "tool_call_id": tool_call_id,
+            }
+        )
+
+    monkeypatch.setattr(agent_module, "send_edge_record", capture_edge)
+    return edges
+
+
 def test_prompt_hands_thread_and_tool_ids_to_the_edge_sender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     info = build_agent_info(_info())
     assert info is not None
     agent = Agent(_NC, info, trace=TraceOptions())
-    edges: list[dict[str, str | None]] = []
-
-    def capture_edge(*, thread_id: str, tool_call_id: str | None = None) -> None:
-        edges.append({"thread_id": thread_id, "tool_call_id": tool_call_id})
-
-    monkeypatch.setattr(agent_module, "send_edge_record", capture_edge)
+    edges = _capture_edges(monkeypatch)
     envelope = _captured_envelope(monkeypatch, agent, "hello")  # tool-less path
-    assert edges == [{"thread_id": envelope.thread_id, "tool_call_id": None}]
+    assert edges == [
+        {
+            "thread_id": envelope.thread_id,
+            "root_id": envelope.thread_id,
+            "parent_id": None,
+            "tool_call_id": None,
+        }
+    ]
 
     edges.clear()
     agent.prompt("hello", tool="call_9xJ2")
     assert len(edges) == 1
     assert edges[0]["tool_call_id"] == "call_9xJ2"
+
+
+def test_prompt_inherits_ambient_lineage(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = build_agent_info(_info())
+    assert info is not None
+    agent = Agent(_NC, info, trace=TraceOptions())
+    edges = _capture_edges(monkeypatch)
+    ambient = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
+    with bind_active_trace(ambient):
+        envelope = _captured_envelope(monkeypatch, agent, "hello")
+
+    # The envelope carries only (thread, root); the parent rides the edge.
+    assert envelope.root_id == ambient.root_id
+    assert envelope.thread_id != ambient.thread_id
+    assert "parent_id" not in json.loads(encode(envelope))
+    assert edges == [
+        {
+            "thread_id": envelope.thread_id,
+            "root_id": ambient.root_id,
+            "parent_id": ambient.thread_id,
+            "tool_call_id": None,
+        }
+    ]
 
 
 def test_prompt_skips_the_edge_sender_when_tracing_is_off(

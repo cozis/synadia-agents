@@ -5,7 +5,12 @@
 
 /** Fields of one edge record known so far; later commits add the rest. */
 export interface EdgeFields {
+  /** The spawned thread — minted by this caller. */
   readonly threadId: string;
+  /** The tree's root; equals `threadId` when this spawn starts a tree. */
+  readonly rootId: string;
+  /** The calling execution's own thread, from the ambient trace; absent on a root. */
+  readonly parentId?: string | undefined;
   readonly toolCallId?: string | undefined;
 }
 

@@ -1,7 +1,11 @@
-import { Empty, type Msg, type NatsConnection } from "@nats-io/nats-core";
+import { Empty, type Msg, type MsgHdrs, type NatsConnection } from "@nats-io/nats-core";
 import { describe, expect, it } from "vitest";
 import { Agent } from "../../src/agent.js";
+import { createUser } from "@nats-io/nkeys";
 import { buildAgentInfo, type RawServiceInfo } from "../../src/discovery/agent-info.js";
+import { newAgentId } from "../../src/identity/agent-id.js";
+import type { IdentityContext } from "../../src/identity/context.js";
+import { buildClaimHeader } from "../../src/identity/sender-header.js";
 import { decodeEnvelope, encodeEnvelope } from "../../src/prompt/envelope.js";
 import {
   activeTrace,
@@ -22,6 +26,34 @@ import { isThreadId, isToolCallId, randomThreadId, THREAD_ID_HEX_LEN } from "../
 interface CapturedEdge {
   subject: string;
   record: Record<string, unknown>;
+  signed: boolean;
+  msgId: string | undefined;
+}
+
+// Edge records are only published when a signer is configured (consumers
+// ignore unsigned ones), so traced handles in these tests carry a fake
+// identity whose plan produces a claim header.
+function fakeIdentity(): IdentityContext {
+  const id = newAgentId("$G", createUser().getPublicKey());
+  return {
+    signer: {} as unknown as IdentityContext["signer"],
+    name: undefined,
+    sendUnsignedClaim: false,
+    mayAttachHeader: () => false,
+    plan: (sub: string) =>
+      Promise.resolve({
+        id,
+        signed: true,
+        sub,
+        wireBytes: 256,
+        build: () => Promise.resolve(buildClaimHeader({ id })),
+      }),
+  } as unknown as IdentityContext;
+}
+
+/** A traced handle: tracing on, identity able to sign its edge records. */
+function tracedAgent(sink: Sink, trace: TraceOptions = {}): Agent {
+  return new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, fakeIdentity(), trace);
 }
 
 function info(): RawServiceInfo {
@@ -62,10 +94,12 @@ function captureNc(sink: Sink): NatsConnection {
     info: { max_payload: 1024 * 1024 },
     // Edge records travel as acked requests through the background
     // publisher; record them and ack immediately.
-    request: (subject: string, payload: Uint8Array) => {
+    request: (subject: string, payload: Uint8Array, opts?: { headers?: MsgHdrs }) => {
       sink.edges.push({
         subject,
         record: JSON.parse(new TextDecoder().decode(payload)) as Record<string, unknown>,
+        signed: opts?.headers?.get("Agent-Sender") !== undefined,
+        msgId: opts?.headers?.get("Nats-Msg-Id"),
       });
       return Promise.resolve({} as Msg);
     },
@@ -143,7 +177,7 @@ describe("prompt minting", () => {
 
   it("mints thread_id and root_id (equal — a root) when tracing is on", async () => {
     const sink = newSink();
-    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
+    const agent = tracedAgent(sink);
     const wire = (await promptedWire(agent, sink)) as Record<string, unknown>;
     expect(wire["prompt"]).toBe("hello");
     const threadId = wire["thread_id"] as string;
@@ -153,7 +187,7 @@ describe("prompt minting", () => {
 
   it("mints a fresh thread_id per prompt", async () => {
     const sink = newSink();
-    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
+    const agent = tracedAgent(sink);
     const first = (await promptedWire(agent, sink)) as Record<string, unknown>;
     const second = (await promptedWire(agent, sink)) as Record<string, unknown>;
     expect(first["thread_id"]).not.toBe(second["thread_id"]);
@@ -162,7 +196,7 @@ describe("prompt minting", () => {
   it("inherits root and parent from the ambient trace; the parent never transits the child", async () => {
     const ambient: ActiveTrace = { threadId: randomThreadId(), rootId: randomThreadId() };
     const sink = newSink();
-    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
+    const agent = tracedAgent(sink);
     const wire = (await bindActiveTrace(ambient, () =>
       promptedWire(agent, sink, { tool: "call_9xJ2" }),
     )) as Record<string, unknown>;
@@ -182,17 +216,36 @@ describe("prompt minting", () => {
 
   it("keeps the minted id internal — the envelope and the edge agree, nothing is exposed", async () => {
     const sink = newSink();
-    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
+    const agent = tracedAgent(sink);
     const wire = (await promptedWire(agent, sink)) as Record<string, unknown>;
     expect(sink.edges).toHaveLength(1);
     expect(sink.edges[0]!.record["thread_id"]).toBe(wire["thread_id"]);
   });
 });
 
+describe("signing gate", () => {
+  it("publishes no edge records when tracing is on but no signer is configured", async () => {
+    const sink = newSink();
+    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
+    const wire = (await promptedWire(agent, sink)) as Record<string, unknown>;
+    // Minting and envelope lineage need no identity and still happen.
+    expect(isThreadId(wire["thread_id"] as string)).toBe(true);
+    expect(sink.edges).toHaveLength(0);
+  });
+
+  it("signs each record it publishes", async () => {
+    const sink = newSink();
+    await promptedWire(tracedAgent(sink), sink);
+    expect(sink.edges).toHaveLength(1);
+    expect(sink.edges[0]!.signed).toBe(true);
+    expect(sink.edges[0]!.msgId).toBe(sink.edges[0]!.record["record_id"]);
+  });
+});
+
 describe("turn_count_hint on edges", () => {
   it("is omitted when the parent has made no model call", async () => {
     const sink = newSink();
-    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
+    const agent = tracedAgent(sink);
     await promptedWire(agent, sink);
     expect(sink.edges[0]!.record).not.toHaveProperty("turn_count_hint");
   });
@@ -200,7 +253,7 @@ describe("turn_count_hint on edges", () => {
   it("carries the parent's model-call count at spawn time", async () => {
     const ambient: ActiveTrace = { threadId: randomThreadId(), rootId: randomThreadId() };
     const sink = newSink();
-    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
+    const agent = tracedAgent(sink);
     await bindActiveTrace(ambient, async () => {
       traceHeaders();
       traceHeaders();
@@ -257,7 +310,13 @@ describe("inherited tracing configuration", () => {
 
   it("traces an unconfigured handle when the enclosing service handed config down", async () => {
     const sink = newSink();
-    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000);
+    const agent = new Agent(
+      captureNc(sink),
+      buildAgentInfo(info())!,
+      1_000,
+      undefined,
+      fakeIdentity(),
+    );
     expect(agent.tracingEnabled).toBe(false); // no config of its own
     const wire = (await bind(() => promptedWire(agent, sink), {})) as Record<string, unknown>;
     expect(isThreadId(wire["thread_id"] as string)).toBe(true);
@@ -277,8 +336,7 @@ describe("inherited tracing configuration", () => {
 
   it("prefers the handle's own configuration over the inherited one", async () => {
     const sink = newSink();
-    const own: TraceOptions = { edgeSubject: "TRACE.own" };
-    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, own);
+    const agent = tracedAgent(sink, { edgeSubject: "TRACE.own" });
     await bind(() => promptedWire(agent, sink), { edgeSubject: "TRACE.inherited" });
     expect(sink.edges).toHaveLength(1);
     expect(sink.edges[0]!.subject).toBe("TRACE.own");
@@ -298,7 +356,7 @@ describe("tool call ids", () => {
 
   it("prompt() rejects an invalid tool option synchronously", () => {
     const sink = newSink();
-    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
+    const agent = tracedAgent(sink);
     expect(() => agent.prompt("hello", { tool: "bad tool" })).toThrow(/tool call id/);
     expect(sink.payload).toBeUndefined();
     expect(sink.edges).toHaveLength(0);
@@ -306,7 +364,7 @@ describe("tool call ids", () => {
 
   it("prompt() hands thread and tool ids to the edge sender when tracing is on", async () => {
     const sink = newSink();
-    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
+    const agent = tracedAgent(sink);
     const wire = (await promptedWire(agent, sink, { tool: "call_9xJ2" })) as Record<
       string,
       unknown

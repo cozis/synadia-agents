@@ -24,6 +24,7 @@ from synadia_ai.agents import (
     Agent,
     Agents,
     Envelope,
+    Identity,
     ProtocolError,
     TraceOptions,
     active_trace,
@@ -44,6 +45,8 @@ if TYPE_CHECKING:
 
     from nats.aio.client import Client as NATSClient
 
+    from synadia_ai.agents import SenderSigner
+
 
 class _StubConnection:
     """Weak-referenceable stand-in — the publisher registry keys on identity."""
@@ -52,6 +55,12 @@ class _StubConnection:
 # Tracker/resolver only store the connection at construction time, so a
 # bare stub is enough for option-plumbing tests.
 _NC = cast("NATSClient", _StubConnection())
+
+
+def _signing_identity() -> Identity:
+    """Edge records are only published with a signer; the fake never signs
+    (the publisher is stubbed out in these tests)."""
+    return Identity(signer=cast("SenderSigner", object()))
 
 
 def _info() -> dict[str, object]:
@@ -137,7 +146,9 @@ class _FakePublisher:
     def __init__(self) -> None:
         self.enqueued: list[tuple[str, bytes, str]] = []
 
-    def enqueue(self, subject: str, payload: bytes, record_id: str) -> None:
+    def enqueue(
+        self, subject: str, payload: bytes, record_id: str, sign: object = None
+    ) -> None:
         self.enqueued.append((subject, payload, record_id))
 
 
@@ -171,7 +182,7 @@ def test_prompt_adds_no_lineage_when_tracing_is_off(monkeypatch: pytest.MonkeyPa
 def test_prompt_mints_a_root_when_tracing_is_on(monkeypatch: pytest.MonkeyPatch) -> None:
     info = build_agent_info(_info())
     assert info is not None
-    agent = Agent(_NC, info, trace=TraceOptions())
+    agent = Agent(_NC, info, trace=TraceOptions(), identity=_signing_identity())
     envelope = _captured_envelope(monkeypatch, agent, "hello")
     assert envelope.thread_id is not None
     assert is_thread_id(envelope.thread_id)
@@ -181,7 +192,7 @@ def test_prompt_mints_a_root_when_tracing_is_on(monkeypatch: pytest.MonkeyPatch)
 def test_prompt_mints_fresh_ids_per_call(monkeypatch: pytest.MonkeyPatch) -> None:
     info = build_agent_info(_info())
     assert info is not None
-    agent = Agent(_NC, info, trace=TraceOptions())
+    agent = Agent(_NC, info, trace=TraceOptions(), identity=_signing_identity())
     first = _captured_envelope(monkeypatch, agent, "hello")
     monkeypatch.undo()
     second = _captured_envelope(monkeypatch, agent, "hello")
@@ -238,7 +249,7 @@ def test_turn_count_hint_is_omitted_when_the_parent_made_no_model_call(
 ) -> None:
     info = build_agent_info(_info())
     assert info is not None
-    agent = Agent(_NC, info, trace=TraceOptions())
+    agent = Agent(_NC, info, trace=TraceOptions(), identity=_signing_identity())
     _, edge = _captured_edge(monkeypatch, agent, "hello")
     assert edge is not None
     assert "turn_count_hint" not in json.loads(edge[1])
@@ -249,7 +260,7 @@ def test_turn_count_hint_carries_the_parents_model_call_count(
 ) -> None:
     info = build_agent_info(_info())
     assert info is not None
-    agent = Agent(_NC, info, trace=TraceOptions())
+    agent = Agent(_NC, info, trace=TraceOptions(), identity=_signing_identity())
     ambient = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
     with bind_active_trace(ambient):
         trace_headers()
@@ -311,7 +322,7 @@ def test_is_tool_call_id_bounds() -> None:
 def test_prompt_rejects_an_invalid_tool_synchronously(monkeypatch: pytest.MonkeyPatch) -> None:
     info = build_agent_info(_info())
     assert info is not None
-    agent = Agent(_NC, info, trace=TraceOptions())
+    agent = Agent(_NC, info, trace=TraceOptions(), identity=_signing_identity())
     with pytest.raises(ValueError, match="tool call id"):
         agent.prompt("hello", tool="bad tool")
 
@@ -349,7 +360,7 @@ def _captured_edge(
 def test_prompt_publishes_a_root_edge_record(monkeypatch: pytest.MonkeyPatch) -> None:
     info = build_agent_info(_info())
     assert info is not None
-    agent = Agent(_NC, info, trace=TraceOptions())
+    agent = Agent(_NC, info, trace=TraceOptions(), identity=_signing_identity())
     envelope, edge = _captured_edge(monkeypatch, agent, "hello", tool="call_9xJ2")
     assert edge is not None
     subject, payload = edge
@@ -367,7 +378,7 @@ def test_prompt_publishes_a_root_edge_record(monkeypatch: pytest.MonkeyPatch) ->
 def test_prompt_inherits_ambient_lineage(monkeypatch: pytest.MonkeyPatch) -> None:
     info = build_agent_info(_info())
     assert info is not None
-    agent = Agent(_NC, info, trace=TraceOptions())
+    agent = Agent(_NC, info, trace=TraceOptions(), identity=_signing_identity())
     ambient = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
     with bind_active_trace(ambient):
         envelope, edge = _captured_edge(monkeypatch, agent, "hello")
@@ -386,7 +397,7 @@ def test_prompt_inherits_ambient_lineage(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_propagate_only_mints_without_publishing(monkeypatch: pytest.MonkeyPatch) -> None:
     info = build_agent_info(_info())
     assert info is not None
-    agent = Agent(_NC, info, trace=TraceOptions(edge_subject=None))
+    agent = Agent(_NC, info, trace=TraceOptions(edge_subject=None), identity=_signing_identity())
     envelope, edge = _captured_edge(monkeypatch, agent, "hello")
     assert envelope.thread_id is not None
     assert edge is None
@@ -397,7 +408,7 @@ def test_unconfigured_handle_traces_when_the_service_handed_config_down(
 ) -> None:
     info = build_agent_info(_info())
     assert info is not None
-    agent = Agent(_NC, info)  # no configuration of its own
+    agent = Agent(_NC, info, identity=_signing_identity())  # no config of its own
     assert agent.tracing_enabled is False
     trace = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
     with bind_active_trace(trace, TraceOptions()):
@@ -426,12 +437,24 @@ def test_own_configuration_wins_over_the_inherited_one(
 ) -> None:
     info = build_agent_info(_info())
     assert info is not None
-    agent = Agent(_NC, info, trace=TraceOptions(edge_subject="TRACE.own"))
+    agent = Agent(
+        _NC, info, trace=TraceOptions(edge_subject="TRACE.own"), identity=_signing_identity()
+    )
     trace = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
     with bind_active_trace(trace, TraceOptions(edge_subject="TRACE.inherited")):
         _, edge = _captured_edge(monkeypatch, agent, "hello")
     assert edge is not None
     assert edge[0] == "TRACE.own"
+
+
+def test_no_edge_is_published_without_a_signer(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = build_agent_info(_info())
+    assert info is not None
+    agent = Agent(_NC, info, trace=TraceOptions())  # tracing on, no signer
+    envelope, edge = _captured_edge(monkeypatch, agent, "hello")
+    # Minting and envelope lineage need no identity and still happen.
+    assert envelope.thread_id is not None
+    assert edge is None
 
 
 def test_prompt_publishes_no_edge_when_tracing_is_off(
@@ -447,7 +470,7 @@ def test_prompt_publishes_no_edge_when_tracing_is_off(
 def test_explicit_envelope_lineage_wins_over_minting(monkeypatch: pytest.MonkeyPatch) -> None:
     info = build_agent_info(_info())
     assert info is not None
-    agent = Agent(_NC, info, trace=TraceOptions())
+    agent = Agent(_NC, info, trace=TraceOptions(), identity=_signing_identity())
     tid = random_thread_id()
     rid = random_thread_id()
     explicit = Envelope(prompt="hi", thread_id=tid, root_id=rid)

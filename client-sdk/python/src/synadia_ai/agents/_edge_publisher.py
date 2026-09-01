@@ -28,6 +28,8 @@ from weakref import WeakKeyDictionary
 from ._logging import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from nats.aio.client import Client as NATSClient
 
 log = get_logger(__name__)
@@ -48,7 +50,8 @@ DEFAULT_EDGE_CLOSE_DRAIN_S = 2.0
 # Backoff jitter, ±15%, so a fleet does not retry in lockstep after an outage.
 _JITTER = 0.15
 
-_MSG_ID_HEADER = "Nats-Msg-Id"
+#: JetStream de-duplication header, set to the record id.
+MSG_ID_HEADER = "Nats-Msg-Id"
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,11 +66,14 @@ class EdgePublisherOptions:
     close_drain_s: float = DEFAULT_EDGE_CLOSE_DRAIN_S
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _QueuedEdge:
     subject: str
     payload: bytes
     record_id: str
+    #: Builds the record's ``Agent-Sender`` header; run once, then cached.
+    sign: Callable[[bytes], Awaitable[dict[str, str]]]
+    headers: dict[str, str] | None = None
 
 
 class EdgePublisher:
@@ -92,7 +98,13 @@ class EdgePublisher:
         """Records waiting to be delivered."""
         return len(self._queue)
 
-    def enqueue(self, subject: str, payload: bytes, record_id: str) -> None:
+    def enqueue(
+        self,
+        subject: str,
+        payload: bytes,
+        record_id: str,
+        sign: Callable[[bytes], Awaitable[dict[str, str]]],
+    ) -> None:
         """Hand one record to the publisher.
 
         Never blocks, never raises: a full ring evicts its oldest entry
@@ -103,7 +115,9 @@ class EdgePublisher:
         if len(self._queue) >= self._options.queue_capacity:
             self._queue.popleft()
             self._dropped += 1
-        self._queue.append(_QueuedEdge(subject=subject, payload=payload, record_id=record_id))
+        self._queue.append(
+            _QueuedEdge(subject=subject, payload=payload, record_id=record_id, sign=sign)
+        )
         if self._drain_task is None or self._drain_task.done():
             self._drain_task = asyncio.create_task(self._drain(), name="synadia-edge-drain")
 
@@ -125,6 +139,11 @@ class EdgePublisher:
         while self._queue and not self._closed:
             head = self._queue[0]
             try:
+                if head.headers is None:
+                    # Signed once and cached, so a retry re-sends
+                    # byte-identical headers — consumers verify in stored
+                    # mode, where freshness is not checked.
+                    head.headers = await head.sign(head.payload)
                 # Request-style: the reply is the stream's PubAck, relayed
                 # back through the account import. A duplicate (a retry
                 # after a lost ack) is absorbed by the stream's
@@ -133,7 +152,7 @@ class EdgePublisher:
                     head.subject,
                     head.payload,
                     timeout=self._options.ack_timeout_s,
-                    headers={_MSG_ID_HEADER: head.record_id},
+                    headers=head.headers,
                 )
             except Exception:
                 # Ambiguous by construction: the record may be stored with
@@ -193,6 +212,7 @@ __all__ = [
     "DEFAULT_EDGE_MAX_RETRY_DELAY_S",
     "DEFAULT_EDGE_QUEUE_CAPACITY",
     "DEFAULT_EDGE_RETRY_DELAY_FACTOR",
+    "MSG_ID_HEADER",
     "EdgePublisher",
     "EdgePublisherOptions",
     "close_edge_publisher_for",

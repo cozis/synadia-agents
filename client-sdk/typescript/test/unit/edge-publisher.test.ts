@@ -1,6 +1,17 @@
 import type { Msg, MsgHdrs, NatsConnection } from "@nats-io/nats-core";
 import { describe, expect, it } from "vitest";
-import { EdgePublisher, type EdgePublisherOptions } from "../../src/trace/publisher.js";
+import {
+  EdgePublisher,
+  msgIdHeaders,
+  type EdgePublisherOptions,
+} from "../../src/trace/publisher.js";
+
+/** Stand-in for the identity signing step; the publisher only awaits it. */
+const sign = (recordId: string) => (): Promise<MsgHdrs> => {
+  const h = msgIdHeaders(recordId);
+  h.set("Agent-Sender", '{"v":1,"account":"$G","user":"U"}');
+  return Promise.resolve(h);
+};
 
 // Delays are ~0 so the retry schedule is observable without waiting out
 // real backoff intervals.
@@ -15,6 +26,7 @@ interface Recorded {
   subject: string;
   payload: Uint8Array;
   msgId: string | undefined;
+  signed: boolean;
 }
 
 /** Fake connection recording requests; fails the first `failTimes` of them. */
@@ -27,7 +39,12 @@ function fakeNc(failTimes = 0): { nc: NatsConnection; requests: Recorded[] } {
       payload: Uint8Array,
       opts?: { headers?: MsgHdrs },
     ): Promise<Msg> => {
-      requests.push({ subject, payload, msgId: opts?.headers?.get("Nats-Msg-Id") });
+      requests.push({
+        subject,
+        payload,
+        msgId: opts?.headers?.get("Nats-Msg-Id"),
+        signed: opts?.headers?.get("Agent-Sender") !== undefined,
+      });
       if (remaining > 0) {
         remaining -= 1;
         return Promise.reject(new Error("no ack"));
@@ -52,19 +69,20 @@ describe("EdgePublisher", () => {
   it("publishes request-style with the record id as Nats-Msg-Id", async () => {
     const { nc, requests } = fakeNc();
     const publisher = new EdgePublisher(nc, FAST);
-    publisher.enqueue("TRACE.edges", new TextEncoder().encode('{"x":1}'), "abc123");
+    publisher.enqueue("TRACE.edges", new TextEncoder().encode('{"x":1}'), "abc123", sign("abc123"));
     await drained(publisher);
     expect(requests).toHaveLength(1);
     expect(requests[0]!.subject).toBe("TRACE.edges");
     expect(text(requests[0]!.payload)).toBe('{"x":1}');
     expect(requests[0]!.msgId).toBe("abc123");
+    expect(requests[0]!.signed).toBe(true);
     expect(publisher.dropped).toBe(0);
   });
 
   it("retries the same bytes until acked", async () => {
     const { nc, requests } = fakeNc(2);
     const publisher = new EdgePublisher(nc, FAST);
-    publisher.enqueue("TRACE.edges", new TextEncoder().encode('{"x":1}'), "abc123");
+    publisher.enqueue("TRACE.edges", new TextEncoder().encode('{"x":1}'), "abc123", sign("abc123"));
     await drained(publisher);
     // Three attempts, byte-identical: the retry is idempotent at the
     // stream via Nats-Msg-Id.
@@ -78,7 +96,12 @@ describe("EdgePublisher", () => {
     const { nc, requests } = fakeNc();
     const publisher = new EdgePublisher(nc, FAST);
     for (let i = 0; i < 5; i++) {
-      publisher.enqueue("TRACE.edges", new TextEncoder().encode(String(i)), `rec${i}`);
+      publisher.enqueue(
+        "TRACE.edges",
+        new TextEncoder().encode(String(i)),
+        `rec${i}`,
+        sign(`rec${i}`),
+      );
     }
     await drained(publisher);
     expect(requests.map((r) => text(r.payload))).toEqual(["0", "1", "2", "3", "4"]);
@@ -89,7 +112,12 @@ describe("EdgePublisher", () => {
     const { nc } = fakeNc(10_000);
     const publisher = new EdgePublisher(nc, { ...FAST, queueCapacity: 3 });
     for (let i = 0; i < 5; i++) {
-      publisher.enqueue("TRACE.edges", new TextEncoder().encode(String(i)), `rec${i}`);
+      publisher.enqueue(
+        "TRACE.edges",
+        new TextEncoder().encode(String(i)),
+        `rec${i}`,
+        sign(`rec${i}`),
+      );
     }
     expect(publisher.queued).toBe(3);
     expect(publisher.dropped).toBe(2);
@@ -100,7 +128,7 @@ describe("EdgePublisher", () => {
     const { nc, requests } = fakeNc();
     const publisher = new EdgePublisher(nc, FAST);
     await publisher.close();
-    publisher.enqueue("TRACE.edges", new TextEncoder().encode("x"), "rec");
+    publisher.enqueue("TRACE.edges", new TextEncoder().encode("x"), "rec", sign("rec"));
     await new Promise((r) => setTimeout(r, 20));
     expect(requests).toHaveLength(0);
     expect(publisher.queued).toBe(0);
@@ -110,7 +138,12 @@ describe("EdgePublisher", () => {
     const { nc, requests } = fakeNc();
     const publisher = new EdgePublisher(nc, FAST);
     for (let i = 0; i < 3; i++) {
-      publisher.enqueue("TRACE.edges", new TextEncoder().encode(String(i)), `rec${i}`);
+      publisher.enqueue(
+        "TRACE.edges",
+        new TextEncoder().encode(String(i)),
+        `rec${i}`,
+        sign(`rec${i}`),
+      );
     }
     await publisher.close();
     expect(requests).toHaveLength(3);

@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeAlias
+from weakref import WeakSet
 
 import pydantic
 
-from ._edge_publisher import edge_publisher_for
+from ._edge_publisher import MSG_ID_HEADER, edge_publisher_for
 from ._logging import get_logger
 from ._mux import mux_for
 from ._request import request_one
@@ -64,6 +65,22 @@ if TYPE_CHECKING:
     from nats.aio.msg import Msg
 
 log = get_logger(__name__)
+
+# One warning per connection: a noisy per-prompt log would itself be a way
+# for observability to disturb an agent.
+_warned_unsigned: WeakSet[NATSClient] = WeakSet()
+
+
+def _warn_edges_unsigned(nc: NATSClient) -> None:
+    if nc in _warned_unsigned:
+        return
+    _warned_unsigned.add(nc)
+    log.warning(
+        "tracing is enabled but no identity signer is configured; edge records "
+        "are not published (consumers ignore unsigned records). Pass "
+        "identity=Identity(signer=...) to sign them."
+    )
+
 
 _SERVICE_ERROR_CODE_HEADER = "Nats-Service-Error-Code"
 _SERVICE_ERROR_HEADER = "Nats-Service-Error"
@@ -387,7 +404,16 @@ class Agent:
             thread_id = random_thread_id()
             ambient = active_trace()
             root_id = ambient.root_id if ambient is not None else thread_id
-            if trace_options.edge_subject is not None:
+            # Consumers ignore unsigned records, so publishing without a
+            # signer would be pure waste: warn once per connection and
+            # skip. Minting and envelope lineage need no identity and still
+            # happen, so downstream agents with identity keep tracing.
+            sender_identity = self._sender_identity
+            if trace_options.edge_subject is not None and (
+                sender_identity is None or sender_identity.signer is None
+            ):
+                _warn_edges_unsigned(self._nc)
+            elif trace_options.edge_subject is not None:
                 record_id, payload = build_edge_record(
                     thread_id=thread_id,
                     root_id=root_id,
@@ -401,8 +427,14 @@ class Agent:
                 # in a background drain nothing awaits, so tracing can
                 # never slow a prompt. A full queue evicts its oldest
                 # record, counted.
+                edge_subject = trace_options.edge_subject
+                edge_record_id = record_id
+
+                def sign_edge(edge_payload: bytes) -> Awaitable[dict[str, str]]:
+                    return self._sign_edge(edge_subject, edge_payload, edge_record_id)
+
                 edge_publisher_for(self._nc, trace_options.delivery).enqueue(
-                    trace_options.edge_subject, payload, record_id
+                    edge_subject, payload, record_id, sign_edge
                 )
 
         if isinstance(text, Envelope):
@@ -623,6 +655,23 @@ class Agent:
         """Raise if :meth:`Agents.close` fired during an active stream."""
         if self._close_event is not None and self._close_event.is_set():
             raise ProtocolError(f"prompt stream cancelled: owning Agents is closed (reply={reply})")
+
+    async def _sign_edge(self, subject: str, payload: bytes, record_id: str) -> dict[str, str]:
+        """``Agent-Sender`` over the edge record plus ``Nats-Msg-Id``.
+
+        Signed over the short-form subject the record is published to —
+        per the identity design a remap that only drops the account token
+        is not a rename, so no ``sub`` override is needed. Consumers
+        verify in stored mode.
+        """
+        plan = await plan_sender_header(
+            self._sender_identity, self._nc, subject, require_signed=True
+        )
+        if plan is None:  # pragma: no cover — guarded at the call site
+            raise SenderSignatureRequiredError(subject)
+        headers = await plan.build_headers(payload)
+        headers[MSG_ID_HEADER] = record_id
+        return headers
 
     async def _stream_prompt(
         self,

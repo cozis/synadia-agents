@@ -43,6 +43,9 @@ interface QueuedEdge {
   readonly subject: string;
   readonly payload: Uint8Array;
   readonly recordId: string;
+  /** Builds the record's `Agent-Sender` header; run once, then cached. */
+  readonly sign: (payload: Uint8Array) => Promise<MsgHdrs>;
+  headers?: MsgHdrs;
 }
 
 export class EdgePublisher {
@@ -85,13 +88,18 @@ export class EdgePublisher {
    * Hand one record to the publisher. Never blocks, never throws: a full
    * ring evicts its oldest entry (counted) to make room for the newest.
    */
-  enqueue(subject: string, payload: Uint8Array, recordId: string): void {
+  enqueue(
+    subject: string,
+    payload: Uint8Array,
+    recordId: string,
+    sign: (payload: Uint8Array) => Promise<MsgHdrs>,
+  ): void {
     if (this.#closed) return;
     if (this.#queue.length >= this.#capacity) {
       this.#queue.shift();
       this.#dropped += 1;
     }
-    this.#queue.push({ subject, payload, recordId });
+    this.#queue.push({ subject, payload, recordId, sign });
     this.#draining ??= this.#drain().finally(() => {
       this.#draining = null;
     });
@@ -117,12 +125,16 @@ export class EdgePublisher {
     while (this.#queue.length > 0 && !this.#closed) {
       const head = this.#queue[0]!;
       try {
+        // Signed once and cached, so a retry re-sends byte-identical
+        // headers — consumers verify in stored mode, where freshness is
+        // not checked.
+        head.headers ??= await head.sign(head.payload);
         // Request-style: the reply is the stream's PubAck, relayed back
         // through the account import. A duplicate (a retry after a lost
         // ack) is absorbed by the stream's `Nats-Msg-Id` window.
         await this.#nc.request(head.subject, head.payload, {
           timeout: this.#ackTimeoutMs,
-          headers: msgIdHeaders(head.recordId),
+          headers: head.headers,
         });
         this.#queue.shift();
         this.#delayMs = this.#initialDelayMs;
@@ -149,7 +161,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** `Nats-Msg-Id` = the record id, so stream de-duplication absorbs retries. */
-function msgIdHeaders(recordId: string): MsgHdrs {
+export function msgIdHeaders(recordId: string): MsgHdrs {
   const h = natsHeaders();
   h.set("Nats-Msg-Id", recordId);
   return h;

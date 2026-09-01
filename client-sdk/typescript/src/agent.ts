@@ -22,7 +22,7 @@ import {
 import { combineAbortSignals } from "./internal/abort.js";
 import { activeTrace, activeTurnCount, inheritedTraceOptions } from "./trace/context.js";
 import { buildEdgeRecord, DEFAULT_EDGE_SUBJECT } from "./trace/edge.js";
-import { edgePublisherFor } from "./trace/publisher.js";
+import { edgePublisherFor, msgIdHeaders } from "./trace/publisher.js";
 import { isToolCallId, randomThreadId, TOOL_CALL_ID_MAX_LEN } from "./trace/ids.js";
 import type { TraceOptions } from "./trace/options.js";
 import { STATUS_ENDPOINT_NAME } from "./internal/service-name.js";
@@ -203,7 +203,13 @@ export class Agent {
       const edgeSubject = trace?.edgeSubject === undefined
         ? DEFAULT_EDGE_SUBJECT
         : trace.edgeSubject;
-      if (edgeSubject !== null) {
+      // Consumers ignore unsigned records, so publishing without a signer
+      // would be pure waste: warn once per connection and skip. Minting
+      // and envelope lineage need no identity and still happen, so
+      // downstream agents with identity keep tracing.
+      if (edgeSubject !== null && !identity?.signer) {
+        warnEdgesUnsigned(this.#nc);
+      } else if (edgeSubject !== null) {
         const record = buildEdgeRecord({
           ...lineage,
           toolCallId: opts.tool,
@@ -211,13 +217,14 @@ export class Agent {
           // ordered within the parent's timeline.
           turnCountHint: activeTurnCount(),
         });
-        // Enqueue only — delivery (acks, retries, backoff) happens in a
-        // background drain nothing awaits, so tracing can never slow a
+        // Enqueue only — delivery (signing, acks, retries, backoff) happens
+        // in a background drain nothing awaits, so tracing can never slow a
         // prompt. A full queue evicts its oldest record, counted.
         edgePublisherFor(this.#nc, trace?.delivery ?? {}).enqueue(
           edgeSubject,
           record.payload,
           record.recordId,
+          (payload) => this.#signEdge(edgeSubject, payload, record.recordId),
         );
       }
     }
@@ -350,6 +357,36 @@ export class Agent {
     );
     return this.#headersFor(plan, payload);
   }
+
+  /**
+   * `Agent-Sender` over the edge record plus `Nats-Msg-Id`. Signed over
+   * the short-form subject the record is published to — per the identity
+   * design a remap that only drops the account token is not a rename, so
+   * no `sub` override is needed. Consumers verify in stored mode.
+   */
+  async #signEdge(subject: string, payload: Uint8Array, recordId: string): Promise<MsgHdrs> {
+    const identity = this.#identity;
+    if (!identity?.signer) throw new SenderSignatureRequiredError(subject);
+    const plan = await identity.plan(subject, true);
+    if (!plan) throw new SenderSignatureRequiredError(subject);
+    const hdrs = msgIdHeaders(recordId);
+    hdrs.set(AGENT_SENDER_HEADER, serializeSenderHeader(await plan.build(payload)));
+    return hdrs;
+  }
+}
+
+// One warning per connection: a noisy per-prompt log would itself be a
+// way for observability to disturb an agent.
+const warnedUnsigned = new WeakSet<NatsConnection>();
+
+function warnEdgesUnsigned(nc: NatsConnection): void {
+  if (warnedUnsigned.has(nc)) return;
+  warnedUnsigned.add(nc);
+  console.warn(
+    "@synadia-ai/agents: tracing is enabled but no identity signer is configured; " +
+      "edge records are not published (consumers ignore unsigned records). " +
+      "Pass identity: { signer } to sign them.",
+  );
 }
 
 function mintLineage(): { threadId: string; rootId: string; parentId?: string } {

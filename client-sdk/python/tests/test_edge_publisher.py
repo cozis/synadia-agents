@@ -12,10 +12,25 @@ import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
-from synadia_ai.agents import EdgePublisher, EdgePublisherOptions
+from synadia_ai.agents import MSG_ID_HEADER, EdgePublisher, EdgePublisherOptions
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from nats.aio.client import Client as NATSClient
+
+
+def _sign(record_id: str) -> Callable[[bytes], Awaitable[dict[str, str]]]:
+    """Stand-in for the identity signing step; the publisher only awaits it."""
+
+    async def sign(_payload: bytes) -> dict[str, str]:
+        return {
+            MSG_ID_HEADER: record_id,
+            "Agent-Sender": '{"v":1,"account":"$G","user":"U"}',
+        }
+
+    return sign
+
 
 FAST = EdgePublisherOptions(
     ack_timeout_s=0.05,
@@ -62,20 +77,21 @@ async def _drain(publisher: EdgePublisher, timeout: float = 2.0) -> None:
 async def test_publishes_request_style_with_the_record_id_as_msg_id() -> None:
     nc = FakeConnection()
     publisher = _publisher(nc)
-    publisher.enqueue("TRACE.edges", b'{"x":1}', "abc123")
+    publisher.enqueue("TRACE.edges", b'{"x":1}', "abc123", _sign("abc123"))
     await _drain(publisher)
     assert len(nc.requests) == 1
     subject, payload, headers = nc.requests[0]
     assert subject == "TRACE.edges"
     assert payload == b'{"x":1}'
     assert headers["Nats-Msg-Id"] == "abc123"
+    assert "Agent-Sender" in headers
     assert publisher.dropped == 0
 
 
 async def test_retries_the_same_bytes_until_acked() -> None:
     nc = FakeConnection(fail_times=2)
     publisher = _publisher(nc)
-    publisher.enqueue("TRACE.edges", b'{"x":1}', "abc123")
+    publisher.enqueue("TRACE.edges", b'{"x":1}', "abc123", _sign("abc123"))
     await _drain(publisher)
     # Three attempts, byte-identical: the retry is idempotent at the
     # stream via Nats-Msg-Id.
@@ -89,7 +105,7 @@ async def test_preserves_fifo_order_across_records() -> None:
     nc = FakeConnection()
     publisher = _publisher(nc)
     for i in range(5):
-        publisher.enqueue("TRACE.edges", str(i).encode(), f"rec{i}")
+        publisher.enqueue("TRACE.edges", str(i).encode(), f"rec{i}", _sign(f"rec{i}"))
     await _drain(publisher)
     assert [r[1] for r in nc.requests] == [b"0", b"1", b"2", b"3", b"4"]
 
@@ -99,7 +115,7 @@ async def test_full_ring_evicts_the_oldest_and_counts_it() -> None:
     nc = FakeConnection(fail_times=10_000)
     publisher = _publisher(nc, replace(FAST, queue_capacity=3))
     for i in range(5):
-        publisher.enqueue("TRACE.edges", str(i).encode(), f"rec{i}")
+        publisher.enqueue("TRACE.edges", str(i).encode(), f"rec{i}", _sign(f"rec{i}"))
     assert publisher.queued == 3
     assert publisher.dropped == 2
     await publisher.close()
@@ -109,7 +125,7 @@ async def test_enqueue_after_close_is_ignored() -> None:
     nc = FakeConnection()
     publisher = _publisher(nc)
     await publisher.close()
-    publisher.enqueue("TRACE.edges", b"x", "rec")
+    publisher.enqueue("TRACE.edges", b"x", "rec", _sign("rec"))
     await asyncio.sleep(0.02)
     assert nc.requests == []
     assert publisher.queued == 0
@@ -119,7 +135,7 @@ async def test_close_flushes_what_is_queued() -> None:
     nc = FakeConnection()
     publisher = _publisher(nc)
     for i in range(3):
-        publisher.enqueue("TRACE.edges", str(i).encode(), f"rec{i}")
+        publisher.enqueue("TRACE.edges", str(i).encode(), f"rec{i}", _sign(f"rec{i}"))
     await publisher.close()
     assert len(nc.requests) == 3
     assert publisher.queued == 0

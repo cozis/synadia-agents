@@ -46,6 +46,7 @@ import {
 } from "./identity/sender-header.js";
 import { type Logger, SILENT_LOGGER } from "./internal/logger.js";
 import type { TraceOptions } from "./trace/options.js";
+import { closeEdgePublisherFor } from "./trace/publisher.js";
 
 /** Default per-stream inactivity timeout (§6.6) — 60 seconds. */
 export const DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS = 60_000;
@@ -385,6 +386,9 @@ export class Agents {
     this.#closed = true;
     this.#closeController.abort(new Error("@synadia-ai/agents: Agents is closed"));
     await this.#tracker.stop();
+    // Give queued edge records a bounded chance to reach the stream, so a
+    // clean shutdown loses none (observability, best-effort by contract).
+    if (this.#trace !== undefined) await closeEdgePublisherFor(this.#nc);
   }
 
   /** True if `close()` has been called. */

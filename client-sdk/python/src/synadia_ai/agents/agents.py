@@ -36,6 +36,7 @@ import asyncio
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
+from ._edge_publisher import close_edge_publisher_for
 from ._logging import get_logger
 from ._request import request_one
 from .agent import DEFAULT_PROMPT_MAX_WAIT_S, DEFAULT_STREAM_INACTIVITY_TIMEOUT_S, Agent
@@ -406,6 +407,11 @@ class Agents:
         self._closed = True
         self._close_event.set()
         await self._tracker.stop()
+        # Give queued edge records a bounded chance to reach the stream, so
+        # a clean shutdown loses none (observability, best-effort by
+        # contract).
+        if self._trace is not None:
+            await close_edge_publisher_for(self._nc)
 
     def _ensure_open(self) -> None:
         if self._closed:

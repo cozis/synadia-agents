@@ -5,6 +5,8 @@
 // `AgentService` passes its config down). Omission means byte-identical
 // protocol-0.3 prompts: no thread IDs minted, no lineage on the wire.
 
+import type { EdgePublisherOptions } from "./publisher.js";
+
 /**
  * Opt-in tracing configuration. Passing this object (even empty, for all
  * defaults) enables tracing on the client; omitting it disables tracing
@@ -18,4 +20,10 @@ export interface TraceOptions {
    * publish no edge records.
    */
   readonly edgeSubject?: string | null;
+  /**
+   * Delivery tuning for the background edge publisher — queue capacity,
+   * ack timeout, and the retry backoff. Defaults are in
+   * `trace/publisher.ts`; a deployment rarely needs to change them.
+   */
+  readonly delivery?: EdgePublisherOptions;
 }

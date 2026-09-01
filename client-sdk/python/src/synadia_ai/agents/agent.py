@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, TypeAlias
 
 import pydantic
 
+from ._edge_publisher import edge_publisher_for
 from ._logging import get_logger
 from ._mux import mux_for
 from ._request import request_one
@@ -381,20 +382,23 @@ class Agent:
         trace_options = self._trace if self._trace is not None else inherited_trace_options()
         thread_id: str | None = None
         root_id: str | None = None
-        edge_publish: tuple[str, bytes] | None = None
         if trace_options is not None:
             thread_id = random_thread_id()
             ambient = active_trace()
             root_id = ambient.root_id if ambient is not None else thread_id
             if trace_options.edge_subject is not None:
-                edge_publish = (
-                    trace_options.edge_subject,
-                    build_edge_record(
-                        thread_id=thread_id,
-                        root_id=root_id,
-                        parent_id=ambient.thread_id if ambient is not None else None,
-                        tool_call_id=tool,
-                    ),
+                record_id, payload = build_edge_record(
+                    thread_id=thread_id,
+                    root_id=root_id,
+                    parent_id=ambient.thread_id if ambient is not None else None,
+                    tool_call_id=tool,
+                )
+                # Enqueue only — delivery (acks, retries, backoff) happens
+                # in a background drain nothing awaits, so tracing can
+                # never slow a prompt. A full queue evicts its oldest
+                # record, counted.
+                edge_publisher_for(self._nc, trace_options.delivery).enqueue(
+                    trace_options.edge_subject, payload, record_id
                 )
 
         if isinstance(text, Envelope):
@@ -455,7 +459,6 @@ class Agent:
             subject=publish_subject,
             sub=signed_subject,
             require_signed=require_signed,
-            edge_publish=edge_publish,
         )
 
     # --- status --------------------------------------------------------
@@ -626,7 +629,6 @@ class Agent:
         subject: str,
         sub: str,
         require_signed: bool,
-        edge_publish: tuple[str, bytes] | None = None,
     ) -> AsyncIterator[StreamMessage]:
         # Pre-flight: refuse outright if the owning Agents is already
         # closed. This catches the "called prompt() after close()" case
@@ -674,15 +676,6 @@ class Agent:
             # live binding request was in flight. Bail before publishing
             # rather than firing a request whose reply we won't consume.
             self._raise_if_closed()
-
-            # Observability: publish the edge before the prompt goes out,
-            # so an observer sees the node before it runs. Fire-and-forget
-            # and fail-open: a failed publish never fails the prompt.
-            if edge_publish is not None:
-                try:
-                    await self._nc.publish(edge_publish[0], edge_publish[1])
-                except Exception:
-                    log.exception("failed to publish edge record on %s", edge_publish[0])
 
             # Signed at publish time so `ts` / nonce are fresh even when the
             # caller iterates late; the signature covers exactly `encoded`.

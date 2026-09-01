@@ -25,21 +25,29 @@ export interface EdgeFields {
   readonly toolCallId?: string | undefined;
 }
 
+/** One built edge record: its wire bytes and the id that de-duplicates it. */
+export interface BuiltEdgeRecord {
+  readonly recordId: string;
+  readonly payload: Uint8Array;
+}
+
 /**
- * Build one edge record's wire bytes. Nulls are explicit (a root's
- * `parent_id` is `null`, not omitted); `record_id` shares the 128-bit
- * lowercase-hex shape of thread IDs and doubles as the JetStream
- * `Nats-Msg-Id` once acked delivery lands. `ts` is unix seconds.
+ * Build one edge record. Nulls are explicit (a root's `parent_id` is
+ * `null`, not omitted); `record_id` shares the 128-bit lowercase-hex
+ * shape of thread IDs and travels as the JetStream `Nats-Msg-Id`, so a
+ * retry after a lost ack is absorbed by the stream's duplicate window.
+ * `ts` is unix seconds.
  */
-export function buildEdgeRecord(fields: EdgeFields): Uint8Array {
+export function buildEdgeRecord(fields: EdgeFields): BuiltEdgeRecord {
+  const recordId = randomThreadId();
   const record = {
     version: EDGE_RECORD_VERSION,
-    record_id: randomThreadId(),
+    record_id: recordId,
     ts: Math.floor(Date.now() / 1000),
     thread_id: fields.threadId,
     parent_id: fields.parentId ?? null,
     root_id: fields.rootId,
     tool_call_id: fields.toolCallId ?? null,
   };
-  return new TextEncoder().encode(JSON.stringify(record));
+  return { recordId, payload: new TextEncoder().encode(JSON.stringify(record)) };
 }

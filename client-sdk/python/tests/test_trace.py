@@ -39,9 +39,14 @@ if TYPE_CHECKING:
 
     from nats.aio.client import Client as NATSClient
 
+
+class _StubConnection:
+    """Weak-referenceable stand-in — the publisher registry keys on identity."""
+
+
 # Tracker/resolver only store the connection at construction time, so a
 # bare stub is enough for option-plumbing tests.
-_NC = cast("NATSClient", object())
+_NC = cast("NATSClient", _StubConnection())
 
 
 def _info() -> dict[str, object]:
@@ -121,6 +126,16 @@ def test_encode_emits_lineage_when_present_and_omits_when_absent() -> None:
 # --- prompt minting ---------------------------------------------------
 
 
+class _FakePublisher:
+    """Records what `prompt()` enqueues instead of delivering it."""
+
+    def __init__(self) -> None:
+        self.enqueued: list[tuple[str, bytes, str]] = []
+
+    def enqueue(self, subject: str, payload: bytes, record_id: str) -> None:
+        self.enqueued.append((subject, payload, record_id))
+
+
 def _captured_envelope(
     monkeypatch: pytest.MonkeyPatch, agent: Agent, text: str | Envelope
 ) -> Envelope:
@@ -132,6 +147,9 @@ def _captured_envelope(
         return encode(envelope)
 
     monkeypatch.setattr(agent_module, "encode", capture)
+    # Keep delivery out of these tests: the publisher would start a drain
+    # task, and there is no running loop in the sync half.
+    monkeypatch.setattr(agent_module, "edge_publisher_for", lambda *a, **k: _FakePublisher())
     agent.prompt(text)  # sync half builds + encodes; iterator never started
     assert len(seen) == 1
     return seen[0]
@@ -234,17 +252,15 @@ def _captured_edge(
     text: str | Envelope,
     tool: str | None = None,
 ) -> tuple[Envelope, tuple[str, bytes] | None]:
-    """Run the sync half of ``prompt()``; capture the envelope and edge publish."""
+    """Run the sync half of ``prompt()``; capture the envelope and edge record."""
     seen: list[Envelope] = []
-    edge: list[tuple[str, bytes] | None] = []
+    publisher = _FakePublisher()
 
     def capture(envelope: Envelope) -> bytes:
         seen.append(envelope)
         return encode(envelope)
 
     def capture_stream(*args: object, **kw: object) -> AsyncIterator[object]:
-        edge.append(cast("tuple[str, bytes] | None", kw.get("edge_publish")))
-
         async def _empty() -> AsyncIterator[object]:
             return
             yield  # pragma: no cover
@@ -252,10 +268,12 @@ def _captured_edge(
         return _empty()
 
     monkeypatch.setattr(agent_module, "encode", capture)
+    monkeypatch.setattr(agent_module, "edge_publisher_for", lambda *a, **k: publisher)
     monkeypatch.setattr(agent, "_stream_prompt", capture_stream)
     agent.prompt(text, tool=tool)
     assert len(seen) == 1
-    return seen[0], edge[0]
+    edge = (publisher.enqueued[0][0], publisher.enqueued[0][1]) if publisher.enqueued else None
+    return seen[0], edge
 
 
 def test_prompt_publishes_a_root_edge_record(monkeypatch: pytest.MonkeyPatch) -> None:

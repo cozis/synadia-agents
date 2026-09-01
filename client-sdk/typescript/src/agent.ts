@@ -22,6 +22,7 @@ import {
 import { combineAbortSignals } from "./internal/abort.js";
 import { activeTrace, inheritedTraceOptions } from "./trace/context.js";
 import { buildEdgeRecord, DEFAULT_EDGE_SUBJECT } from "./trace/edge.js";
+import { edgePublisherFor } from "./trace/publisher.js";
 import { isToolCallId, randomThreadId, TOOL_CALL_ID_MAX_LEN } from "./trace/ids.js";
 import type { TraceOptions } from "./trace/options.js";
 import { STATUS_ENDPOINT_NAME } from "./internal/service-name.js";
@@ -203,11 +204,15 @@ export class Agent {
         ? DEFAULT_EDGE_SUBJECT
         : trace.edgeSubject;
       if (edgeSubject !== null) {
-        try {
-          this.#nc.publish(edgeSubject, buildEdgeRecord({ ...lineage, toolCallId: opts.tool }));
-        } catch {
-          // Nothing in the observability layer may break an agent.
-        }
+        const record = buildEdgeRecord({ ...lineage, toolCallId: opts.tool });
+        // Enqueue only — delivery (acks, retries, backoff) happens in a
+        // background drain nothing awaits, so tracing can never slow a
+        // prompt. A full queue evicts its oldest record, counted.
+        edgePublisherFor(this.#nc, trace?.delivery ?? {}).enqueue(
+          edgeSubject,
+          record.payload,
+          record.recordId,
+        );
       }
     }
     // The envelope carries only what the receiver must inherit; the

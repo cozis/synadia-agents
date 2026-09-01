@@ -252,8 +252,21 @@ export {
   DEFAULT_EDGE_SUBJECT,
   EDGE_RECORD_VERSION,
   buildEdgeRecord,
+  type BuiltEdgeRecord,
   type EdgeFields,
 } from "./trace/edge.js";
+export {
+  DEFAULT_EDGE_ACK_TIMEOUT_MS,
+  DEFAULT_EDGE_CLOSE_DRAIN_MS,
+  DEFAULT_EDGE_INITIAL_RETRY_DELAY_MS,
+  DEFAULT_EDGE_MAX_RETRY_DELAY_MS,
+  DEFAULT_EDGE_QUEUE_CAPACITY,
+  DEFAULT_EDGE_RETRY_DELAY_FACTOR,
+  EdgePublisher,
+  closeEdgePublisherFor,
+  edgePublisherFor,
+  type EdgePublisherOptions,
+} from "./trace/publisher.js";
 export {
   THREAD_ID_HEX_LEN,
   TOOL_CALL_ID_MAX_LEN,

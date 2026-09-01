@@ -34,6 +34,18 @@ convention (``jetstream(nc)``, ``Svcm(nc)``, ``Kvm(nc)``…).
 
 from __future__ import annotations
 
+from ._edge_publisher import (
+    DEFAULT_EDGE_ACK_TIMEOUT_S,
+    DEFAULT_EDGE_CLOSE_DRAIN_S,
+    DEFAULT_EDGE_INITIAL_RETRY_DELAY_S,
+    DEFAULT_EDGE_MAX_RETRY_DELAY_S,
+    DEFAULT_EDGE_QUEUE_CAPACITY,
+    DEFAULT_EDGE_RETRY_DELAY_FACTOR,
+    EdgePublisher,
+    EdgePublisherOptions,
+    close_edge_publisher_for,
+    edge_publisher_for,
+)
 from .agent import (
     DEFAULT_PROMPT_MAX_WAIT_S,
     DEFAULT_STATUS_TIMEOUT_S,
@@ -171,6 +183,12 @@ __all__ = [
     "AGENT_SENDER_SIGNED_INPUT_TAG",
     "DEFAULT_DISCOVER_MAX_WAIT_S",
     "DEFAULT_DISCOVER_STALL_S",
+    "DEFAULT_EDGE_ACK_TIMEOUT_S",
+    "DEFAULT_EDGE_CLOSE_DRAIN_S",
+    "DEFAULT_EDGE_INITIAL_RETRY_DELAY_S",
+    "DEFAULT_EDGE_MAX_RETRY_DELAY_S",
+    "DEFAULT_EDGE_QUEUE_CAPACITY",
+    "DEFAULT_EDGE_RETRY_DELAY_FACTOR",
     "DEFAULT_EDGE_SUBJECT",
     "DEFAULT_LIVENESS_SLACK",
     "DEFAULT_PROMPT_MAX_WAIT_S",
@@ -212,6 +230,8 @@ __all__ = [
     "ClaimedSender",
     "CredentialSource",
     "DiscoverFilter",
+    "EdgePublisher",
+    "EdgePublisherOptions",
     "EndpointInfo",
     "Envelope",
     "HeartbeatPayload",
@@ -260,7 +280,9 @@ __all__ = [
     "build_edge_record",
     "build_signed_input",
     "check_subject_acceptance",
+    "close_edge_publisher_for",
     "decode",
+    "edge_publisher_for",
     "encode",
     "encoded_header_length",
     "expected_sender_header_bytes",

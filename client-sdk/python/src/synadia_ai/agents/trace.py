@@ -21,6 +21,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ._edge_publisher import EdgePublisherOptions
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -71,10 +73,14 @@ class TraceOptions:
 
     ``edge_subject`` is where edge records are published (default
     ``TRACE.edges``); ``None`` selects propagate-only mode — mint IDs and
-    forward lineage, but publish no edge records.
+    forward lineage, but publish no edge records. ``delivery`` tunes the
+    background publisher (queue capacity, ack timeout, retry backoff);
+    the defaults in :mod:`._edge_publisher` suit every deployment we know
+    of.
     """
 
     edge_subject: str | None = DEFAULT_EDGE_SUBJECT
+    delivery: EdgePublisherOptions | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,8 +149,8 @@ def build_edge_record(
     root_id: str,
     parent_id: str | None = None,
     tool_call_id: str | None = None,
-) -> bytes:
-    """Build one edge record's wire bytes.
+) -> tuple[str, bytes]:
+    """Build one edge record: its de-duplication id and its wire bytes.
 
     One record per traced prompt, written by the caller before the prompt
     is sent (observability.md, Trace Log). ``thread_id`` is the spawned
@@ -153,20 +159,21 @@ def build_edge_record(
     execution's own thread from the ambient trace, absent on a root.
     Nulls are explicit (a root's ``parent_id`` is ``null``, not omitted);
     ``record_id`` shares the 128-bit lowercase-hex shape of thread IDs
-    and doubles as the JetStream ``Nats-Msg-Id`` once acked delivery
-    lands; ``ts`` is unix seconds. The writer's identity lands with
-    signing.
+    and travels as the JetStream ``Nats-Msg-Id``, so a retry after a lost
+    ack is absorbed by the stream's duplicate window; ``ts`` is unix
+    seconds. The writer's identity lands with signing.
     """
+    record_id = random_thread_id()
     record = {
         "version": EDGE_RECORD_VERSION,
-        "record_id": random_thread_id(),
+        "record_id": record_id,
         "ts": int(time.time()),
         "thread_id": thread_id,
         "parent_id": parent_id,
         "root_id": root_id,
         "tool_call_id": tool_call_id,
     }
-    return json.dumps(record, separators=(",", ":")).encode("utf-8")
+    return record_id, json.dumps(record, separators=(",", ":")).encode("utf-8")
 
 
 __all__ = [

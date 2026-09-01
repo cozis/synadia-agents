@@ -49,11 +49,14 @@ function newSink(): Sink {
 function captureNc(sink: Sink): NatsConnection {
   return {
     info: { max_payload: 1024 * 1024 },
-    publish: (subject: string, payload: Uint8Array) => {
+    // Edge records travel as acked requests through the background
+    // publisher; record them and ack immediately.
+    request: (subject: string, payload: Uint8Array) => {
       sink.edges.push({
         subject,
         record: JSON.parse(new TextDecoder().decode(payload)) as Record<string, unknown>,
       });
+      return Promise.resolve({} as Msg);
     },
     requestMany: (_subject: string, payload: Uint8Array) => {
       sink.payload = payload;
@@ -76,7 +79,15 @@ async function promptedWire(
     // drain the single terminator
   }
   expect(sink.payload).toBeDefined();
+  // The edge publish is a background drain; give it its microtask turns
+  // so assertions on `sink.edges` are deterministic.
+  await settle();
   return JSON.parse(new TextDecoder().decode(sink.payload));
+}
+
+/** Let the publisher's drain run to completion. */
+function settle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 5));
 }
 
 describe("thread ids", () => {

@@ -80,6 +80,10 @@ class Envelope(BaseModel):
 
     prompt: str
     attachments: list[Attachment] | None = None
+    # Observability lineage (trace.py): both present on prompts from a
+    # tracing-enabled caller, both absent otherwise (§5.6 tolerates them).
+    thread_id: str | None = None
+    root_id: str | None = None
 
 
 def encode(envelope: Envelope) -> bytes:

@@ -149,7 +149,7 @@ from .identity import (
 )
 from .messages import Chunk, QueryChunk, ResponseChunk, StatusChunk
 from .subjects import AgentSubject
-from .trace import TraceOptions
+from .trace import THREAD_ID_HEX_LEN, TraceOptions, is_thread_id, random_thread_id
 
 __all__ = [
     "AGENT_ID_SIGNED_INPUT_TAG",
@@ -178,6 +178,7 @@ __all__ = [
     "SIGNATURE_REQUIRED_DESCRIPTION",
     "STATUS_ENDPOINT_NAME",
     "STATUS_QUEUE_GROUP",
+    "THREAD_ID_HEX_LEN",
     "USER_INFO_SUBJECT",
     "Agent",
     "AgentId",
@@ -244,6 +245,7 @@ __all__ = [
     "expected_sender_header_bytes",
     "format_sender",
     "format_sender_timestamp",
+    "is_thread_id",
     "load_context_options",
     "max_sender_header_bytes",
     "normalize_account_token_position",
@@ -251,6 +253,7 @@ __all__ = [
     "parse_nats_url",
     "parse_sender_header",
     "peek_self_id",
+    "random_thread_id",
     "read_context_file",
     "read_sender_header_value",
     "refresh_self_id",

@@ -42,7 +42,7 @@ from .heartbeat import HeartbeatPayload
 from .identity.agent_id import AgentId
 from .identity.options import Identity, plan_sender_header, sender_header_bound
 from .messages import QueryChunk, ResponseChunk, StatusChunk, decode_chunk
-from .trace import TraceOptions
+from .trace import TraceOptions, random_thread_id
 from .validation import (
     assert_attachments_allowed,
     assert_prompt_non_empty,
@@ -351,6 +351,15 @@ class Agent:
                 f"max_wait_s must be > 0 (got {max_wait_s!r}); pass None to use the default."
             )
 
+        # Observability (opt-in): mint this prompt's thread ID. The root is
+        # the minted ID itself until ambient-lineage inheritance lands.
+        # Lineage already set on an explicit Envelope wins over minting.
+        thread_id: str | None = None
+        root_id: str | None = None
+        if self._trace is not None:
+            thread_id = random_thread_id()
+            root_id = thread_id
+
         if isinstance(text, Envelope):
             merged_attachments: list[Attachment] | None
             if attachments:
@@ -358,14 +367,21 @@ class Agent:
                 merged_attachments.extend(attachments)
             else:
                 merged_attachments = list(text.attachments) if text.attachments else None
+            if text.thread_id is not None or text.root_id is not None:
+                thread_id = text.thread_id
+                root_id = text.root_id
             envelope = Envelope(
                 prompt=text.prompt,
                 attachments=merged_attachments,
+                thread_id=thread_id,
+                root_id=root_id,
             )
         else:
             envelope = Envelope(
                 prompt=text,
                 attachments=list(attachments) if attachments else None,
+                thread_id=thread_id,
+                root_id=root_id,
             )
 
         # §5.4: local validation happens synchronously BEFORE any wire I/O.

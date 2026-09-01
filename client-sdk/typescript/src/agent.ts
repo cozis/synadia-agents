@@ -20,6 +20,7 @@ import {
   serializeSenderHeader,
 } from "./identity/sender-header.js";
 import { combineAbortSignals } from "./internal/abort.js";
+import { randomThreadId } from "./trace/ids.js";
 import type { TraceOptions } from "./trace/options.js";
 import { STATUS_ENDPOINT_NAME } from "./internal/service-name.js";
 import { normalizeAttachments } from "./prompt/attachments.js";
@@ -175,9 +176,13 @@ export class Agent {
     // size is re-checked once the identity is known.
     const headerBound = identity?.mayAttachHeader() ? maxSenderHeaderBytes(sub, identity.name) : 0;
 
+    // Observability (opt-in): mint this prompt's thread ID. The root is the
+    // minted ID itself until ambient-lineage inheritance lands.
+    const lineage = this.#trace !== undefined ? mintRootLineage() : undefined;
+
     // Fast path: text-only — max_payload check is sync.
     if (!hasAttachments) {
-      const envelope: RequestEnvelope = { prompt: text };
+      const envelope: RequestEnvelope = { prompt: text, ...lineage };
       assertWithinMaxPayload(
         encodedEnvelopeSize(envelope),
         this.promptEndpoint,
@@ -190,7 +195,7 @@ export class Agent {
     // With attachments: load files, then check max_payload on the final encoded size.
     return (async (): Promise<PromptStream> => {
       const attachments = await normalizeAttachments(attachmentInputs);
-      const envelope: RequestEnvelope = { prompt: text, attachments };
+      const envelope: RequestEnvelope = { prompt: text, attachments, ...lineage };
       assertWithinMaxPayload(
         encodedEnvelopeSize(envelope),
         this.promptEndpoint,
@@ -299,4 +304,9 @@ export class Agent {
     );
     return this.#headersFor(plan, payload);
   }
+}
+
+function mintRootLineage(): { threadId: string; rootId: string } {
+  const threadId = randomThreadId();
+  return { threadId, rootId: threadId };
 }

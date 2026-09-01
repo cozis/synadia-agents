@@ -1,13 +1,29 @@
-"""Tracing opt-in switch — off unless a ``trace=`` option is passed.
+"""Tracing opt-in switch, thread-ID minting, and envelope lineage.
 
-Mirrors ``client-sdk/typescript/test/unit/trace-options.test.ts``.
+Mirrors ``client-sdk/typescript/test/unit/trace-options.test.ts`` and
+``trace-ids.test.ts``.
 """
 
 from __future__ import annotations
 
+import json
+import re
 from typing import TYPE_CHECKING, cast
 
-from synadia_ai.agents import Agent, Agents, TraceOptions, build_agent_info
+import pytest
+
+import synadia_ai.agents.agent as agent_module
+from synadia_ai.agents import (
+    THREAD_ID_HEX_LEN,
+    Agent,
+    Agents,
+    Envelope,
+    TraceOptions,
+    build_agent_info,
+    encode,
+    is_thread_id,
+    random_thread_id,
+)
 
 if TYPE_CHECKING:
     from nats.aio.client import Client as NATSClient
@@ -58,3 +74,93 @@ def test_trace_option_reaches_agent_handles() -> None:
     assert off.tracing_enabled is False
     on = Agent(_NC, info, trace=TraceOptions())
     assert on.tracing_enabled is True
+
+
+# --- thread ids -------------------------------------------------------
+
+
+def test_random_thread_id_shape_and_uniqueness() -> None:
+    a = random_thread_id()
+    b = random_thread_id()
+    assert len(a) == THREAD_ID_HEX_LEN
+    assert re.fullmatch(r"[0-9a-f]{32}", a)
+    assert a != b
+
+
+def test_is_thread_id_validates_the_normative_shape() -> None:
+    assert is_thread_id(random_thread_id())
+    assert not is_thread_id("")
+    assert not is_thread_id("9f2c4b1e8a7d33051c6e0b42d78a91f")  # 31 chars
+    assert not is_thread_id("9f2c4b1e8a7d33051c6e0b42d78a91f00")  # 33 chars
+    assert not is_thread_id("9F2C4B1E8A7D33051C6E0B42D78A91F0")  # upper case
+    assert not is_thread_id("gf2c4b1e8a7d33051c6e0b42d78a91f0")  # non-hex
+
+
+# --- envelope lineage fields ------------------------------------------
+
+
+def test_encode_emits_lineage_when_present_and_omits_when_absent() -> None:
+    tid = random_thread_id()
+    with_lineage = json.loads(encode(Envelope(prompt="hi", thread_id=tid, root_id=tid)))
+    assert with_lineage == {"prompt": "hi", "thread_id": tid, "root_id": tid}
+    without = json.loads(encode(Envelope(prompt="hi")))
+    assert without == {"prompt": "hi"}
+
+
+# --- prompt minting ---------------------------------------------------
+
+
+def _captured_envelope(
+    monkeypatch: pytest.MonkeyPatch, agent: Agent, text: str | Envelope
+) -> Envelope:
+    """Run the sync half of ``prompt()`` and capture the envelope it encodes."""
+    seen: list[Envelope] = []
+
+    def capture(envelope: Envelope) -> bytes:
+        seen.append(envelope)
+        return encode(envelope)
+
+    monkeypatch.setattr(agent_module, "encode", capture)
+    agent.prompt(text)  # sync half builds + encodes; iterator never started
+    assert len(seen) == 1
+    return seen[0]
+
+
+def test_prompt_adds_no_lineage_when_tracing_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = build_agent_info(_info())
+    assert info is not None
+    envelope = _captured_envelope(monkeypatch, Agent(_NC, info), "hello")
+    assert envelope.thread_id is None
+    assert envelope.root_id is None
+
+
+def test_prompt_mints_a_root_when_tracing_is_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = build_agent_info(_info())
+    assert info is not None
+    agent = Agent(_NC, info, trace=TraceOptions())
+    envelope = _captured_envelope(monkeypatch, agent, "hello")
+    assert envelope.thread_id is not None
+    assert is_thread_id(envelope.thread_id)
+    assert envelope.root_id == envelope.thread_id
+
+
+def test_prompt_mints_fresh_ids_per_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = build_agent_info(_info())
+    assert info is not None
+    agent = Agent(_NC, info, trace=TraceOptions())
+    first = _captured_envelope(monkeypatch, agent, "hello")
+    monkeypatch.undo()
+    second = _captured_envelope(monkeypatch, agent, "hello")
+    assert first.thread_id != second.thread_id
+
+
+def test_explicit_envelope_lineage_wins_over_minting(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = build_agent_info(_info())
+    assert info is not None
+    agent = Agent(_NC, info, trace=TraceOptions())
+    tid = random_thread_id()
+    rid = random_thread_id()
+    explicit = Envelope(prompt="hi", thread_id=tid, root_id=rid)
+    envelope = _captured_envelope(monkeypatch, agent, explicit)
+    assert envelope.thread_id == tid
+    assert envelope.root_id == rid

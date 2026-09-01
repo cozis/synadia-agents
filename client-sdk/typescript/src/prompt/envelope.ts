@@ -18,6 +18,10 @@ export interface RequestAttachment {
 export interface RequestEnvelope {
   readonly prompt: string;
   readonly attachments?: ReadonlyArray<RequestAttachment>;
+  // Observability lineage (trace/ids.ts): both present on prompts from a
+  // tracing-enabled caller, both absent otherwise (§5.6 tolerates them).
+  readonly threadId?: string;
+  readonly rootId?: string;
 }
 
 /** Serialize a request envelope to UTF-8 bytes per §5.1. */
@@ -38,6 +42,8 @@ function envelopeObject(env: RequestEnvelope): Record<string, unknown> {
       content: encodeBase64(a.content),
     }));
   }
+  if (env.threadId !== undefined) obj["thread_id"] = env.threadId;
+  if (env.rootId !== undefined) obj["root_id"] = env.rootId;
   return obj;
 }
 

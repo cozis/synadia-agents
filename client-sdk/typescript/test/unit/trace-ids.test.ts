@@ -5,6 +5,7 @@ import { buildAgentInfo, type RawServiceInfo } from "../../src/discovery/agent-i
 import { decodeEnvelope, encodeEnvelope } from "../../src/prompt/envelope.js";
 import { activeTrace, bindActiveTrace, type ActiveTrace } from "../../src/trace/context.js";
 import { DEFAULT_EDGE_SUBJECT, EDGE_RECORD_VERSION } from "../../src/trace/edge.js";
+import type { TraceOptions } from "../../src/trace/options.js";
 import { isThreadId, isToolCallId, randomThreadId, THREAD_ID_HEX_LEN } from "../../src/trace/ids.js";
 
 interface CapturedEdge {
@@ -163,6 +164,40 @@ describe("prompt minting", () => {
     const wire = (await promptedWire(agent, sink)) as Record<string, unknown>;
     expect(sink.edges).toHaveLength(1);
     expect(sink.edges[0]!.record["thread_id"]).toBe(wire["thread_id"]);
+  });
+});
+
+describe("inherited tracing configuration", () => {
+  const bind = <T>(fn: () => T, options: TraceOptions | undefined): T =>
+    bindActiveTrace({ threadId: randomThreadId(), rootId: randomThreadId() }, fn, options);
+
+  it("traces an unconfigured handle when the enclosing service handed config down", async () => {
+    const sink = newSink();
+    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000);
+    expect(agent.tracingEnabled).toBe(false); // no config of its own
+    const wire = (await bind(() => promptedWire(agent, sink), {})) as Record<string, unknown>;
+    expect(isThreadId(wire["thread_id"] as string)).toBe(true);
+    expect(sink.edges).toHaveLength(1);
+  });
+
+  it("stays off when neither the handle nor the enclosing service configured tracing", async () => {
+    const sink = newSink();
+    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000);
+    const wire = (await bind(() => promptedWire(agent, sink), undefined)) as Record<
+      string,
+      unknown
+    >;
+    expect(wire).toEqual({ prompt: "hello" });
+    expect(sink.edges).toHaveLength(0);
+  });
+
+  it("prefers the handle's own configuration over the inherited one", async () => {
+    const sink = newSink();
+    const own: TraceOptions = { edgeSubject: "TRACE.own" };
+    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, own);
+    await bind(() => promptedWire(agent, sink), { edgeSubject: "TRACE.inherited" });
+    expect(sink.edges).toHaveLength(1);
+    expect(sink.edges[0]!.subject).toBe("TRACE.own");
   });
 });
 

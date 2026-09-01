@@ -47,6 +47,7 @@ from .trace import (
     TraceOptions,
     active_trace,
     build_edge_record,
+    inherited_trace_options,
     is_tool_call_id,
     random_thread_id,
 )
@@ -375,16 +376,19 @@ class Agent:
             raise ValueError(
                 f"invalid tool call id (must be 1-{TOOL_CALL_ID_MAX_LEN} visible-ASCII characters)"
             )
+        # Effective configuration: this handle's own, else the one handed
+        # down by the enclosing AgentService, else tracing is off.
+        trace_options = self._trace if self._trace is not None else inherited_trace_options()
         thread_id: str | None = None
         root_id: str | None = None
         edge_publish: tuple[str, bytes] | None = None
-        if self._trace is not None:
+        if trace_options is not None:
             thread_id = random_thread_id()
             ambient = active_trace()
             root_id = ambient.root_id if ambient is not None else thread_id
-            if self._trace.edge_subject is not None:
+            if trace_options.edge_subject is not None:
                 edge_publish = (
-                    self._trace.edge_subject,
+                    trace_options.edge_subject,
                     build_edge_record(
                         thread_id=thread_id,
                         root_id=root_id,

@@ -20,7 +20,7 @@ import {
   serializeSenderHeader,
 } from "./identity/sender-header.js";
 import { combineAbortSignals } from "./internal/abort.js";
-import { activeTrace } from "./trace/context.js";
+import { activeTrace, inheritedTraceOptions } from "./trace/context.js";
 import { buildEdgeRecord, DEFAULT_EDGE_SUBJECT } from "./trace/edge.js";
 import { isToolCallId, randomThreadId, TOOL_CALL_ID_MAX_LEN } from "./trace/ids.js";
 import type { TraceOptions } from "./trace/options.js";
@@ -115,7 +115,11 @@ export class Agent {
     return this.#nc;
   }
 
-  /** `true` iff tracing was enabled on this handle (a `trace` option was passed). */
+  /**
+   * `true` iff tracing was enabled on this handle. Inherited tracing (from
+   * an enclosing `AgentService`) is resolved per call, so this reports only
+   * the handle's own configuration.
+   */
   get tracingEnabled(): boolean {
     return this.#trace !== undefined;
   }
@@ -187,14 +191,17 @@ export class Agent {
         `invalid tool call id (must be 1-${TOOL_CALL_ID_MAX_LEN} visible-ASCII characters)`,
       );
     }
-    const lineage = this.#trace !== undefined ? mintLineage() : undefined;
+    // Effective configuration: this handle's own, else the one handed
+    // down by the enclosing AgentService, else tracing is off.
+    const trace = this.#trace ?? inheritedTraceOptions();
+    const lineage = trace !== undefined ? mintLineage() : undefined;
     if (lineage !== undefined) {
       // Publish the edge before the prompt goes out, so an observer sees
       // the node before it runs. Fire-and-forget and fail-open: a failed
       // publish never fails the prompt.
-      const edgeSubject = this.#trace?.edgeSubject === undefined
+      const edgeSubject = trace?.edgeSubject === undefined
         ? DEFAULT_EDGE_SUBJECT
-        : this.#trace.edgeSubject;
+        : trace.edgeSubject;
       if (edgeSubject !== null) {
         try {
           this.#nc.publish(edgeSubject, buildEdgeRecord({ ...lineage, toolCallId: opts.tool }));

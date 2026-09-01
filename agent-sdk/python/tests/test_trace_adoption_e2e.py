@@ -20,7 +20,14 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
-from synadia_ai.agents import ActiveTrace, Envelope, active_trace, is_thread_id
+from synadia_ai.agents import (
+    ActiveTrace,
+    Envelope,
+    TraceOptions,
+    active_trace,
+    inherited_trace_options,
+    is_thread_id,
+)
 
 from synadia_ai.agent_service import AgentService, PromptStream
 
@@ -116,6 +123,65 @@ async def test_service_mints_a_root_for_an_id_less_envelope(
         assert is_thread_id(stream_trace.thread_id)
         assert stream_trace.root_id == stream_trace.thread_id
         assert seen[0]["ambient"] == stream_trace
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_service_hands_its_trace_config_down_to_clients(
+    nc: NATSClient, evidence: EvidenceRecorder
+) -> None:
+    """A service's ``trace=`` config reaches an unconfigured nested client."""
+    seen: list[TraceOptions | None] = []
+
+    async def _handler(envelope: Envelope, stream: PromptStream) -> None:
+        seen.append(inherited_trace_options())
+        await stream.send(envelope.prompt)
+
+    options = TraceOptions(edge_subject="TRACE.edges")
+    service = AgentService(
+        agent=AGENT,
+        owner=OWNER,
+        session_name="trace-passdown",
+        nc=nc,
+        heartbeat_interval_s=HEARTBEAT_INTERVAL_S,
+        keepalive_interval_s=None,
+        trace=options,
+    )
+    service.on_prompt(_handler)
+    await service.start()
+    try:
+        await _drain_reply(nc, service.subject.prompt, b'{"prompt":"hi"}')
+        evidence.write_json("inherited-config.json", {"edge_subject": options.edge_subject})
+        assert seen == [options]
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_service_without_trace_config_hands_down_nothing(
+    nc: NATSClient, evidence: EvidenceRecorder
+) -> None:
+    seen: list[TraceOptions | None] = []
+
+    async def _handler(envelope: Envelope, stream: PromptStream) -> None:
+        seen.append(inherited_trace_options())
+        await stream.send(envelope.prompt)
+
+    service = AgentService(
+        agent=AGENT,
+        owner=OWNER,
+        session_name="trace-nopassdown",
+        nc=nc,
+        heartbeat_interval_s=HEARTBEAT_INTERVAL_S,
+        keepalive_interval_s=None,
+    )
+    service.on_prompt(_handler)
+    await service.start()
+    try:
+        await _drain_reply(nc, service.subject.prompt, b'{"prompt":"hi"}')
+        evidence.write_json("inherited-config.json", {"inherited": None})
+        assert seen == [None]
     finally:
         await service.stop()
 

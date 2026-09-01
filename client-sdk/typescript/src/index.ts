@@ -242,7 +242,12 @@ export { base64UrlDecode, base64UrlEncode, sha256, sha256Hex } from "./identity/
 
 // Observability tracing (opt-in)
 export { type TraceOptions } from "./trace/options.js";
-export { type ActiveTrace, activeTrace, bindActiveTrace } from "./trace/context.js";
+export {
+  type ActiveTrace,
+  activeTrace,
+  bindActiveTrace,
+  inheritedTraceOptions,
+} from "./trace/context.js";
 export {
   DEFAULT_EDGE_SUBJECT,
   EDGE_RECORD_VERSION,

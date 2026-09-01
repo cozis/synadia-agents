@@ -93,24 +93,48 @@ class ActiveTrace:
 # The agent-sdk binds the execution's ActiveTrace around each prompt
 # handler; nested client calls read it to inherit lineage without any
 # plumbing through user code. contextvars flow into awaited work and
-# tasks created inside the bound scope.
+# tasks created inside the bound scope. The binding also carries the
+# service's tracing configuration, so an agent configured once passes
+# tracing down to every client it uses inside the handler.
 
-_active_trace: ContextVar[ActiveTrace | None] = ContextVar("synadia_active_trace", default=None)
+
+@dataclass(frozen=True, slots=True)
+class _TraceScope:
+    trace: ActiveTrace
+    options: TraceOptions | None
+
+
+_active_scope: ContextVar[_TraceScope | None] = ContextVar("synadia_active_trace", default=None)
 
 
 def active_trace() -> ActiveTrace | None:
     """The ambient :class:`ActiveTrace`, or ``None`` outside a bound handler."""
-    return _active_trace.get()
+    scope = _active_scope.get()
+    return scope.trace if scope is not None else None
+
+
+def inherited_trace_options() -> TraceOptions | None:
+    """Tracing configuration handed down by the enclosing ``AgentService``.
+
+    ``None`` when the service has none, or outside a handler. A client
+    with no configuration of its own inherits this one.
+    """
+    scope = _active_scope.get()
+    return scope.options if scope is not None else None
 
 
 @contextmanager
-def bind_active_trace(trace: ActiveTrace) -> Iterator[None]:
-    """Run the block with ``trace`` as the ambient execution (used by the agent-sdk)."""
-    token = _active_trace.set(trace)
+def bind_active_trace(trace: ActiveTrace, options: TraceOptions | None = None) -> Iterator[None]:
+    """Run the block with ``trace`` as the ambient execution (used by the agent-sdk).
+
+    ``options``, when given, is the service's tracing configuration and is
+    inherited by clients used inside the block.
+    """
+    token = _active_scope.set(_TraceScope(trace=trace, options=options))
     try:
         yield
     finally:
-        _active_trace.reset(token)
+        _active_scope.reset(token)
 
 
 def build_edge_record(
@@ -155,6 +179,7 @@ __all__ = [
     "active_trace",
     "bind_active_trace",
     "build_edge_record",
+    "inherited_trace_options",
     "is_thread_id",
     "is_tool_call_id",
     "random_thread_id",

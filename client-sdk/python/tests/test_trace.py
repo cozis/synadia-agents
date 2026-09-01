@@ -304,6 +304,48 @@ def test_propagate_only_mints_without_publishing(monkeypatch: pytest.MonkeyPatch
     assert edge is None
 
 
+def test_unconfigured_handle_traces_when_the_service_handed_config_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info = build_agent_info(_info())
+    assert info is not None
+    agent = Agent(_NC, info)  # no configuration of its own
+    assert agent.tracing_enabled is False
+    trace = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
+    with bind_active_trace(trace, TraceOptions()):
+        envelope, edge = _captured_edge(monkeypatch, agent, "hello")
+    assert envelope.thread_id is not None
+    assert envelope.root_id == trace.root_id
+    assert edge is not None
+    assert edge[0] == DEFAULT_EDGE_SUBJECT
+
+
+def test_tracing_stays_off_when_neither_side_configured_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info = build_agent_info(_info())
+    assert info is not None
+    agent = Agent(_NC, info)
+    trace = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
+    with bind_active_trace(trace, None):
+        envelope, edge = _captured_edge(monkeypatch, agent, "hello")
+    assert envelope.thread_id is None
+    assert edge is None
+
+
+def test_own_configuration_wins_over_the_inherited_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info = build_agent_info(_info())
+    assert info is not None
+    agent = Agent(_NC, info, trace=TraceOptions(edge_subject="TRACE.own"))
+    trace = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
+    with bind_active_trace(trace, TraceOptions(edge_subject="TRACE.inherited")):
+        _, edge = _captured_edge(monkeypatch, agent, "hello")
+    assert edge is not None
+    assert edge[0] == "TRACE.own"
+
+
 def test_prompt_publishes_no_edge_when_tracing_is_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

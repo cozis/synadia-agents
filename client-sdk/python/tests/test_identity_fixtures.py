@@ -58,6 +58,8 @@ EXPECTED_USERS_PER_CONF: dict[str, frozenset[str]] = {
     "nkey-deny-sys.conf": frozenset({"alice"}),
     "accounts.conf": frozenset({"alice", "bob", "carol", "dave", "erin"}),
     "account-token-position.conf": frozenset({"alice", "bob", "dave"}),
+    # FABRIC hosts the TRACE stream; APP is the tenant publishing edges.
+    "trace-atp.conf": frozenset({"alice", "bob"}),
 }
 ALL_USERS = frozenset({"alice", "bob", "carol", "dave", "erin"})
 USER_KEY = re.compile(r"^U[A-Z2-7]{55}$")

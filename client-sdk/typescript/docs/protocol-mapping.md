@@ -27,6 +27,7 @@ Every SDK call mapped to its Synadia Agent Protocol for NATS section, for implem
 | Pre-publish `max_payload`            | Throws `PayloadTooLargeError` on serialized UTF-8 byte length. Effective limit is `min(endpoint.maxPayloadBytes, nc.info?.max_payload)` — caller's broker cap binds when smaller. | §5.4       |
 | Empty prompt                         | Throws `PromptEmptyError` locally.                                                                                                                                                | §5.1, §5.3 |
 | Endpoint subject resolution          | Always `endpoints[].subject` from the discovery record - never constructed.                                                                                                       | §4.3, §12  |
+| Observability lineage (extension)    | `RequestEnvelope.threadId` / `rootId` (wire `thread_id` / `root_id`), sent together or not at all, each 32 lowercase hex; a lone field or a bad shape is a `ProtocolError` (`400`). Tolerated by 0.3 peers per §5.6; absent entirely when tracing is off. See [`observability.md`](https://github.com/synadia-ai/synadia-agent-fabric-docs/blob/master/docs/observability.md). | §5.6 |
 | Unknown envelope fields              | Preserved by decoders; the SDK's reference agent passes them through.                                                                                                             | §5.6       |
 
 ## Response streaming (§6)

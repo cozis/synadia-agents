@@ -8,6 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Observability tracing.** `AgentService` adopts the caller's
+  `(threadId, rootId)` from the envelope, or mints a root for an ID-less one
+  (NATS CLI, legacy 0.3 caller) — writing nothing to `TRACE` either way; such
+  roots are advertised implicitly. The execution's identity is bound as the
+  ambient trace around the handler, so nested `Agent.prompt()` calls join the
+  tree with no plumbing, and is exposed as `PromptResponse.trace`.
+  `PromptResponse.traceHeaders()` returns `X-Synadia-Thread-ID` /
+  `X-Synadia-Root-ID` for the model calls the handler issues (each call counts
+  one model turn). `AgentService({ trace })` hands tracing down to clients used
+  inside handlers; a client resolves its effective config as explicit own >
+  inherited > off. Design:
+  [`observability.md`](https://github.com/synadia-ai/synadia-agent-fabric-docs/blob/master/docs/observability.md).
+
+### Added
+
 - **Sender identity (the sender-identity extension).** `AgentService`
   classifies every `prompt` request before the §6.4 ack: a malformed
   `Agent-Sender` header → `400`; a failing signature, replayed nonce,

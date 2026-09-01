@@ -8,6 +8,21 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ## [Unreleased]
 
+### Added
+
+- **Observability tracing.** `AgentService` adopts the caller's
+  `(thread_id, root_id)` from the envelope, or mints a root for an ID-less
+  one (NATS CLI, legacy 0.3 caller) — writing nothing to `TRACE` either way;
+  such roots are advertised implicitly. The execution's identity is bound as
+  the ambient trace around the handler, so nested `Agent.prompt()` calls join
+  the tree with no plumbing, and is exposed as `PromptStream.trace`.
+  `PromptStream.trace_headers()` returns `X-Synadia-Thread-ID` /
+  `X-Synadia-Root-ID` for the model calls the handler issues (each call counts
+  one model turn). `AgentService(trace=TraceOptions(...))` hands tracing down
+  to clients used inside handlers; a client resolves its effective config as
+  explicit own > inherited > off. Design:
+  [`observability.md`](https://github.com/synadia-ai/synadia-agent-fabric-docs/blob/master/docs/observability.md).
+
 ### Changed
 
 - Host identity registration is now opt-in: omitting `identity` performs no

@@ -178,6 +178,46 @@ Subpath exports:
 
 The host-side `ReferenceAgent` previously available at `@synadia-ai/agents/testing` moved to [`@synadia-ai/agent-service/testing`](../../agent-sdk/typescript/) when the SDK split into caller + host packages. Anything you used to import from there is in the new sister package now.
 
+## Observability tracing (opt-in)
+
+Pass `trace` and every prompt gets a trace identity, so a fabric console can
+rebuild the interaction tree across agents. Off by default — omitted, prompts
+are byte-identical to plain protocol 0.3.
+
+```ts
+const agents = new Agents({
+  nc,
+  identity: { signer },     // required: consumers ignore unsigned records
+  trace: {},                // defaults: publish edges to `TRACE.edges`
+});
+
+const stream = await found[0]!.prompt("summarize this", { tool: "call_9xJ2" });
+```
+
+What happens per prompt: a 128-bit `thread_id` is minted, `root_id` and the
+parent thread are inherited from the ambient trace when the call is made inside
+a prompt handler, and one **edge record** — signed with `Agent-Sender`, keyed by
+`Nats-Msg-Id` — is published to `TRACE.edges` *before* the prompt goes out, so a
+node is visible even if the callee never runs. The envelope carries only
+`thread_id` + `root_id`; the parent stays in the edge record.
+
+Inside an agent, stamp `traceHeaders()` (`X-Synadia-Thread-ID` /
+`X-Synadia-Root-ID`) on every model call so the proxy files each completion
+under its thread; each call also counts a model turn, which orders the child
+prompts that follow.
+
+Delivery is best-effort by contract and acked in practice: a bounded
+per-connection ring (100 records, drop-oldest, counted) drained in the
+background with exponential backoff, flushed on `agents.close()`. `prompt()`
+only enqueues, so tracing never slows a caller. Records reach the fabric
+through a per-tenant service import — `TRACE.edges` arrives as
+`TRACE.{account}.edges`, which the tenant can write but not read.
+
+`trace: { edgeSubject: null }` is propagate-only (mint and forward lineage,
+publish nothing); without a signer nothing is published either, and the SDK
+warns once. Design:
+[`observability.md`](https://github.com/synadia-ai/synadia-agent-fabric-docs/blob/master/docs/observability.md).
+
 ## Documentation
 
 - [Getting started](./docs/getting-started.md) - end-to-end walkthrough with error handling, cancellation, and liveness.

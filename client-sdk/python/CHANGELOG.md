@@ -10,6 +10,42 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Added
 
+- **Observability tracing (opt-in).** Pass `trace=TraceOptions(...)` to
+  `Agents` to give every prompt a trace identity and write the interaction
+  tree to the fabric's `TRACE` stream. Design:
+  [`observability.md`](https://github.com/synadia-ai/synadia-agent-fabric-docs/blob/master/docs/observability.md).
+  - `Agent.prompt()` mints a 128-bit `thread_id`, inherits `root_id` (and the
+    parent thread) from the ambient trace when called inside a prompt handler,
+    and publishes one signed **edge record** to `TRACE.edges` before sending —
+    so a node is visible even if the callee never runs. The envelope carries
+    only `thread_id` + `root_id`; the parent never transits the child.
+  - `prompt(text, tool=...)` labels the edge with the model tool call it serves.
+  - Delivery is best-effort by contract and acked in practice: a bounded
+    per-connection ring (100 records, drop-oldest, counted) drained by one
+    background task with `Nats-Msg-Id` = `record_id`, exponential backoff on
+    failure, and a flush on `Agents.close()`. `prompt()` only enqueues, so
+    tracing never slows a caller. Tune via `TraceOptions(delivery=...)`.
+  - `trace_headers()` returns `X-Synadia-Thread-ID` / `X-Synadia-Root-ID` for
+    the ambient execution (`{}` outside one) — attach them to model calls so
+    the proxy can file each completion under its thread; each call also counts
+    a model turn, which labels the edges the execution spawns next
+    (`turn_count_hint`).
+  - `TraceOptions(edge_subject=None)` is propagate-only: mint and forward
+    lineage, publish nothing. Without an identity signer nothing is published
+    either (consumers ignore unsigned records) and the SDK warns once.
+  - New exports: `TraceOptions`, `ActiveTrace`, `active_trace`,
+    `bind_active_trace`, `inherited_trace_options`, `active_turn_count`,
+    `trace_headers`, `format_trace_headers`, `build_edge_record`,
+    `EdgePublisher`, and the `HEADER_*` / `DEFAULT_EDGE_*` constants.
+
+### Changed
+
+- `Envelope` gains optional `thread_id` / `root_id`, validated at the decode
+  chokepoint: a lone field or a malformed id is a `ProtocolError` (a `400` on
+  the agent side). Untraced prompts stay byte-identical to protocol 0.3.
+
+### Added
+
 - `resolve_nats_connection_bundle(...)` snapshots a selected `nats` CLI
   context or direct URL plus `.creds` / nkey connection source exactly once.
   `identity="off"` is the default and exposes no signer;

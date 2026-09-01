@@ -203,6 +203,49 @@ What to know:
 - `scripts/whoami.py` prints what `self_id()` resolves for a connection
   (or why it resolves nothing).
 
+## Observability tracing (opt-in)
+
+Pass `trace=` and every prompt gets a trace identity, so a fabric console can
+rebuild the interaction tree across agents. Off by default — omitted, prompts
+are byte-identical to plain protocol 0.3.
+
+```python
+from synadia_ai.agents import Agents, Identity, TraceOptions
+
+agents = Agents(
+    nc=nc,
+    identity=Identity(signer=signer),  # required: consumers ignore unsigned records
+    trace=TraceOptions(),              # defaults: publish edges to `TRACE.edges`
+)
+
+async for msg in agent.prompt("summarize this", tool="call_9xJ2"):
+    ...
+```
+
+What happens per prompt: a 128-bit `thread_id` is minted, `root_id` and the
+parent thread are inherited from the ambient trace when the call is made inside
+a prompt handler, and one **edge record** — signed with `Agent-Sender`, keyed by
+`Nats-Msg-Id` — is published to `TRACE.edges` *before* the prompt goes out, so a
+node is visible even if the callee never runs. The envelope carries only
+`thread_id` + `root_id`; the parent stays in the edge record.
+
+Inside an agent, stamp `trace_headers()` (`X-Synadia-Thread-ID` /
+`X-Synadia-Root-ID`) on every model call so the proxy files each completion
+under its thread; each call also counts a model turn, which orders the child
+prompts that follow.
+
+Delivery is best-effort by contract and acked in practice: a bounded
+per-connection ring (100 records, drop-oldest, counted) drained by one
+background task with exponential backoff, flushed on `agents.close()`.
+`prompt()` only enqueues, so tracing never slows a caller. Records reach the
+fabric through a per-tenant service import — `TRACE.edges` arrives as
+`TRACE.{account}.edges`, which the tenant can write but not read.
+
+`TraceOptions(edge_subject=None)` is propagate-only (mint and forward lineage,
+publish nothing); without a signer nothing is published either, and the SDK
+warns once. Design:
+[`observability.md`](https://github.com/synadia-ai/synadia-agent-fabric-docs/blob/master/docs/observability.md).
+
 ## Mid-stream queries
 
 Agent handlers can pause their response stream to ask the caller a

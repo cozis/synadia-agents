@@ -49,6 +49,8 @@ const EXPECTED_USERS_PER_CONF: Readonly<Record<string, ReadonlyArray<string>>> =
   "nkey-deny-sys.conf": ["alice"],
   "accounts.conf": ["alice", "bob", "carol", "dave", "erin"],
   "account-token-position.conf": ["alice", "bob", "dave"],
+  // FABRIC hosts the TRACE stream; APP is the tenant publishing edges.
+  "trace-atp.conf": ["alice", "bob"],
 };
 
 const ALL_USERS = ["alice", "bob", "carol", "dave", "erin"];

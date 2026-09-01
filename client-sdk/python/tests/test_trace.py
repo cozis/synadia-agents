@@ -146,9 +146,7 @@ class _FakePublisher:
     def __init__(self) -> None:
         self.enqueued: list[tuple[str, bytes, str]] = []
 
-    def enqueue(
-        self, subject: str, payload: bytes, record_id: str, sign: object = None
-    ) -> None:
+    def enqueue(self, subject: str, payload: bytes, record_id: str, sign: object = None) -> None:
         self.enqueued.append((subject, payload, record_id))
 
 

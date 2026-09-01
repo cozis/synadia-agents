@@ -48,6 +48,7 @@ import type { NatsConnection } from "@nats-io/nats-core";
 import { Svcm, type Service, type ServiceHandler, type ServiceMsg } from "@nats-io/services";
 
 import {
+  activeTrace,
   agentIdAccount,
   agentIdUser,
   AgentSubject,
@@ -75,6 +76,7 @@ import {
   SILENT_LOGGER,
   STATUS_ENDPOINT_NAME,
   STATUS_QUEUE_GROUP,
+  traceHeaders,
   type ActiveTrace,
   type AgentId,
   type Logger,
@@ -361,7 +363,9 @@ export class PromptResponse {
    * ambient `traceHeaders()` from `@synadia-ai/agents`.
    */
   traceHeaders(): Record<string, string> {
-    return formatTraceHeaders(this.trace);
+    // Inside the handler the ambient scope is this execution's, so the
+    // ambient helper both formats and counts the turn.
+    return activeTrace() !== undefined ? traceHeaders() : formatTraceHeaders(this.trace);
   }
 
   /**

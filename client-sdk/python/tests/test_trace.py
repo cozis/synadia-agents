@@ -27,6 +27,7 @@ from synadia_ai.agents import (
     ProtocolError,
     TraceOptions,
     active_trace,
+    active_turn_count,
     bind_active_trace,
     build_agent_info,
     decode,
@@ -251,6 +252,20 @@ async def test_trace_headers_is_empty_outside_a_handler_and_populated_inside() -
     with bind_active_trace(trace):
         assert await probe() == format_trace_headers(trace)
     assert trace_headers() == {}
+
+
+async def test_turn_counter_ticks_per_trace_headers_call() -> None:
+    assert active_turn_count() == 0
+    trace_headers()  # outside a handler: no scope to count against
+    assert active_turn_count() == 0
+
+    trace = ActiveTrace(thread_id=random_thread_id(), root_id=random_thread_id())
+    with bind_active_trace(trace):
+        assert active_turn_count() == 0
+        trace_headers()
+        trace_headers()
+        assert active_turn_count() == 2
+    assert active_turn_count() == 0
 
 
 def test_is_tool_call_id_bounds() -> None:

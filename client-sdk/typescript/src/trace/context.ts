@@ -23,6 +23,8 @@ export interface ActiveTrace {
 interface TraceScope {
   readonly trace: ActiveTrace;
   readonly options: TraceOptions | undefined;
+  /** Model-call count for this execution — mutable, shared by the scope. */
+  readonly turns: { count: number };
 }
 
 const storage = new AsyncLocalStorage<TraceScope>();
@@ -51,5 +53,20 @@ export function bindActiveTrace<T>(
   fn: () => T,
   options: TraceOptions | undefined = undefined,
 ): T {
-  return storage.run({ trace, options }, fn);
+  return storage.run({ trace, options, turns: { count: 0 } }, fn);
+}
+
+/**
+ * Model calls this execution has made so far, counted by `traceHeaders()`;
+ * `0` outside a bound handler. A prompt spawned now carries this as its
+ * edge record's `turn_count_hint`.
+ */
+export function activeTurnCount(): number {
+  return storage.getStore()?.turns.count ?? 0;
+}
+
+/** Count one model call against the ambient execution; no-op outside one. */
+export function countTurn(): void {
+  const scope = storage.getStore();
+  if (scope !== undefined) scope.turns.count += 1;
 }

@@ -104,10 +104,18 @@ class ActiveTrace:
 # tracing down to every client it uses inside the handler.
 
 
+@dataclass(slots=True)
+class _TurnCounter:
+    """Model-call count for one execution — mutable, shared by the scope."""
+
+    count: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class _TraceScope:
     trace: ActiveTrace
     options: TraceOptions | None
+    turns: _TurnCounter
 
 
 _active_scope: ContextVar[_TraceScope | None] = ContextVar("synadia_active_trace", default=None)
@@ -136,7 +144,7 @@ def bind_active_trace(trace: ActiveTrace, options: TraceOptions | None = None) -
     ``options``, when given, is the service's tracing configuration and is
     inherited by clients used inside the block.
     """
-    token = _active_scope.set(_TraceScope(trace=trace, options=options))
+    token = _active_scope.set(_TraceScope(trace=trace, options=options, turns=_TurnCounter()))
     try:
         yield
     finally:
@@ -168,7 +176,29 @@ def trace_headers() -> dict[str, str]:
     when untraced.
     """
     trace = active_trace()
-    return format_trace_headers(trace) if trace is not None else {}
+    if trace is None:
+        return {}
+    # Each call stands for one model turn; the count labels the edges this
+    # execution spawns next (`turn_count_hint`).
+    count_turn()
+    return format_trace_headers(trace)
+
+
+def active_turn_count() -> int:
+    """Model calls this execution has made so far, counted by :func:`trace_headers`.
+
+    ``0`` outside a bound handler. A prompt spawned now carries this as
+    its edge record's ``turn_count_hint``.
+    """
+    scope = _active_scope.get()
+    return scope.turns.count if scope is not None else 0
+
+
+def count_turn() -> None:
+    """Count one model call against the ambient execution; no-op outside one."""
+    scope = _active_scope.get()
+    if scope is not None:
+        scope.turns.count += 1
 
 
 def build_edge_record(
@@ -214,8 +244,10 @@ __all__ = [
     "ActiveTrace",
     "TraceOptions",
     "active_trace",
+    "active_turn_count",
     "bind_active_trace",
     "build_edge_record",
+    "count_turn",
     "format_trace_headers",
     "inherited_trace_options",
     "is_thread_id",

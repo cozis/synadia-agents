@@ -63,11 +63,13 @@ from synadia_ai.agents import (
     SenderResolver,
     StatusChunk,
     TraceOptions,
+    active_trace,
     bind_active_trace,
     decode,
     format_sender,
     format_trace_headers,
     random_thread_id,
+    trace_headers,
 )
 from synadia_ai.agents.identity import (
     DEFAULT_RESOLVE_TTL_S,
@@ -206,6 +208,10 @@ class PromptStream:
         files the call under this thread and tree. Same values as the
         ambient :func:`synadia_ai.agents.trace_headers`.
         """
+        # Inside the handler the ambient scope is this execution's, so the
+        # ambient helper both formats and counts the turn.
+        if active_trace() is not None:
+            return trace_headers()
         return format_trace_headers(self._trace)
 
     @property

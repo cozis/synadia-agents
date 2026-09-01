@@ -6,7 +6,7 @@
 // needs no parent or tool-call header — hierarchy is the edge records'
 // job.
 
-import { activeTrace, type ActiveTrace } from "./context.js";
+import { activeTrace, countTurn, type ActiveTrace } from "./context.js";
 
 /** The execution's own thread ID. */
 export const HEADER_THREAD_ID = "X-Synadia-Thread-ID";
@@ -28,5 +28,9 @@ export function formatTraceHeaders(trace: ActiveTrace): Record<string, string> {
  */
 export function traceHeaders(): Record<string, string> {
   const trace = activeTrace();
-  return trace !== undefined ? formatTraceHeaders(trace) : {};
+  if (trace === undefined) return {};
+  // Each call stands for one model turn; the count labels the edges this
+  // execution spawns next (`turn_count_hint`).
+  countTurn();
+  return formatTraceHeaders(trace);
 }

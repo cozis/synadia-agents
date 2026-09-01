@@ -3,7 +3,12 @@ import { describe, expect, it } from "vitest";
 import { Agent } from "../../src/agent.js";
 import { buildAgentInfo, type RawServiceInfo } from "../../src/discovery/agent-info.js";
 import { decodeEnvelope, encodeEnvelope } from "../../src/prompt/envelope.js";
-import { activeTrace, bindActiveTrace, type ActiveTrace } from "../../src/trace/context.js";
+import {
+  activeTrace,
+  activeTurnCount,
+  bindActiveTrace,
+  type ActiveTrace,
+} from "../../src/trace/context.js";
 import { DEFAULT_EDGE_SUBJECT, EDGE_RECORD_VERSION } from "../../src/trace/edge.js";
 import {
   formatTraceHeaders,
@@ -202,6 +207,24 @@ describe("trace headers", () => {
     });
     expect(inside).toEqual(formatTraceHeaders(trace));
     expect(traceHeaders()).toEqual({});
+  });
+});
+
+describe("turn counter", () => {
+  it("counts one turn per traceHeaders() call and stays at zero outside a handler", async () => {
+    expect(activeTurnCount()).toBe(0);
+    traceHeaders(); // outside a handler: no scope to count against
+    expect(activeTurnCount()).toBe(0);
+
+    const trace: ActiveTrace = { threadId: randomThreadId(), rootId: randomThreadId() };
+    await bindActiveTrace(trace, async () => {
+      await Promise.resolve();
+      expect(activeTurnCount()).toBe(0);
+      traceHeaders();
+      traceHeaders();
+      expect(activeTurnCount()).toBe(2);
+    });
+    expect(activeTurnCount()).toBe(0);
   });
 });
 

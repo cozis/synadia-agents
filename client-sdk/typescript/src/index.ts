@@ -240,6 +240,9 @@ export {
 export { type IdentityOptions } from "./identity/context.js";
 export { base64UrlDecode, base64UrlEncode, sha256, sha256Hex } from "./identity/crypto.js";
 
+// Observability tracing (opt-in)
+export { type TraceOptions } from "./trace/options.js";
+
 // Logging
 export { type Logger, SILENT_LOGGER } from "./internal/logger.js";
 

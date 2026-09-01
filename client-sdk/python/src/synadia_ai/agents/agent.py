@@ -42,6 +42,7 @@ from .heartbeat import HeartbeatPayload
 from .identity.agent_id import AgentId
 from .identity.options import Identity, plan_sender_header, sender_header_bound
 from .messages import QueryChunk, ResponseChunk, StatusChunk, decode_chunk
+from .trace import TraceOptions
 from .validation import (
     assert_attachments_allowed,
     assert_prompt_non_empty,
@@ -143,6 +144,7 @@ class Agent:
         prompt_max_wait_s: float = DEFAULT_PROMPT_MAX_WAIT_S,
         close_event: asyncio.Event | None = None,
         identity: Identity | None = None,
+        trace: TraceOptions | None = None,
     ) -> None:
         if prompt_max_wait_s <= 0:
             raise ValueError(f"prompt_max_wait_s must be > 0 (got {prompt_max_wait_s!r}).")
@@ -152,6 +154,12 @@ class Agent:
         self._default_max_wait_s = prompt_max_wait_s
         self._close_event = close_event
         self._sender_identity = identity
+        self._trace = trace
+
+    @property
+    def tracing_enabled(self) -> bool:
+        """``True`` iff tracing was enabled on this handle (a ``trace=`` option was passed)."""
+        return self._trace is not None
 
     # --- flat read-only identity / capability fields -------------------
 

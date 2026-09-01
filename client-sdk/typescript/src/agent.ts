@@ -20,6 +20,7 @@ import {
   serializeSenderHeader,
 } from "./identity/sender-header.js";
 import { combineAbortSignals } from "./internal/abort.js";
+import type { TraceOptions } from "./trace/options.js";
 import { STATUS_ENDPOINT_NAME } from "./internal/service-name.js";
 import { normalizeAttachments } from "./prompt/attachments.js";
 import { encodedEnvelopeSize, encodeEnvelope, type RequestEnvelope } from "./prompt/envelope.js";
@@ -65,6 +66,7 @@ export class Agent {
   readonly #defaultInactivityTimeoutMs: number;
   readonly #closeSignal: AbortSignal | undefined;
   readonly #identity: IdentityContext | undefined;
+  readonly #trace: TraceOptions | undefined;
 
   constructor(
     nc: NatsConnection,
@@ -72,11 +74,13 @@ export class Agent {
     defaultInactivityTimeoutMs: number,
     closeSignal: AbortSignal | undefined = undefined,
     identity: IdentityContext | undefined = undefined,
+    trace: TraceOptions | undefined = undefined,
   ) {
     this.#nc = nc;
     this.#defaultInactivityTimeoutMs = defaultInactivityTimeoutMs;
     this.#closeSignal = closeSignal;
     this.#identity = identity;
+    this.#trace = trace;
     this.instanceId = info.instanceId;
     this.agent = info.agent;
     this.owner = info.owner;
@@ -106,6 +110,11 @@ export class Agent {
   /** The `NatsConnection` this agent uses (shared with its `Agents`). */
   get connection(): NatsConnection {
     return this.#nc;
+  }
+
+  /** `true` iff tracing was enabled on this handle (a `trace` option was passed). */
+  get tracingEnabled(): boolean {
+    return this.#trace !== undefined;
   }
 
   /**

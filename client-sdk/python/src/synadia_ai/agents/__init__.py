@@ -149,6 +149,7 @@ from .identity import (
 )
 from .messages import Chunk, QueryChunk, ResponseChunk, StatusChunk
 from .subjects import AgentSubject
+from .trace import TraceOptions
 
 __all__ = [
     "AGENT_ID_SIGNED_INPUT_TAG",
@@ -229,6 +230,7 @@ __all__ = [
     "StreamMaxWaitExceededError",
     "StreamMessage",
     "StreamStalledError",
+    "TraceOptions",
     "ValidationError",
     "VerifiedSender",
     "VerifyMode",

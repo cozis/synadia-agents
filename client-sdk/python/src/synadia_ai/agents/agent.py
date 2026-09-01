@@ -42,7 +42,13 @@ from .heartbeat import HeartbeatPayload
 from .identity.agent_id import AgentId
 from .identity.options import Identity, plan_sender_header, sender_header_bound
 from .messages import QueryChunk, ResponseChunk, StatusChunk, decode_chunk
-from .trace import TraceOptions, random_thread_id
+from .trace import (
+    TOOL_CALL_ID_MAX_LEN,
+    TraceOptions,
+    is_tool_call_id,
+    random_thread_id,
+    send_edge_record,
+)
 from .validation import (
     assert_attachments_allowed,
     assert_prompt_non_empty,
@@ -261,12 +267,18 @@ class Agent:
         max_wait_s: float | None = None,
         subject: str | None = None,
         sub: str | None = None,
+        tool: str | None = None,
     ) -> AsyncIterator[StreamMessage]:
         """Send a prompt and return an async iterator of streamed messages.
 
         ``text`` is either a bare string or a fully-constructed
         :class:`Envelope`. ``attachments``, when provided, are attached to
         the envelope (per §5.1).
+
+        ``tool`` (observability) is the model tool call this prompt
+        serves — it labels the edge between the calling execution and the
+        spawned thread. 1-256 visible-ASCII characters; ignored unless
+        tracing is enabled. An invalid value raises :class:`ValueError`.
 
         Under v0.3 the session is the 5th subject token, not a kwarg —
         callers pick a session by discovering the agent whose
@@ -351,14 +363,21 @@ class Agent:
                 f"max_wait_s must be > 0 (got {max_wait_s!r}); pass None to use the default."
             )
 
-        # Observability (opt-in): mint this prompt's thread ID. The root is
-        # the minted ID itself until ambient-lineage inheritance lands.
+        # Observability (opt-in): mint this prompt's thread ID and hand the
+        # edge to the (future) publisher. The root is the minted ID itself
+        # until ambient-lineage inheritance lands. `tool` is validated even
+        # with tracing off — a bad value is a caller bug either way.
         # Lineage already set on an explicit Envelope wins over minting.
+        if tool is not None and not is_tool_call_id(tool):
+            raise ValueError(
+                f"invalid tool call id (must be 1-{TOOL_CALL_ID_MAX_LEN} visible-ASCII characters)"
+            )
         thread_id: str | None = None
         root_id: str | None = None
         if self._trace is not None:
             thread_id = random_thread_id()
             root_id = thread_id
+            send_edge_record(thread_id=thread_id, tool_call_id=tool)
 
         if isinstance(text, Envelope):
             merged_attachments: list[Attachment] | None

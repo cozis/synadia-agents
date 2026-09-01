@@ -149,7 +149,14 @@ from .identity import (
 )
 from .messages import Chunk, QueryChunk, ResponseChunk, StatusChunk
 from .subjects import AgentSubject
-from .trace import THREAD_ID_HEX_LEN, TraceOptions, is_thread_id, random_thread_id
+from .trace import (
+    THREAD_ID_HEX_LEN,
+    TOOL_CALL_ID_MAX_LEN,
+    TraceOptions,
+    is_thread_id,
+    is_tool_call_id,
+    random_thread_id,
+)
 
 __all__ = [
     "AGENT_ID_SIGNED_INPUT_TAG",
@@ -179,6 +186,7 @@ __all__ = [
     "STATUS_ENDPOINT_NAME",
     "STATUS_QUEUE_GROUP",
     "THREAD_ID_HEX_LEN",
+    "TOOL_CALL_ID_MAX_LEN",
     "USER_INFO_SUBJECT",
     "Agent",
     "AgentId",
@@ -246,6 +254,7 @@ __all__ = [
     "format_sender",
     "format_sender_timestamp",
     "is_thread_id",
+    "is_tool_call_id",
     "load_context_options",
     "max_sender_header_bytes",
     "normalize_account_token_position",

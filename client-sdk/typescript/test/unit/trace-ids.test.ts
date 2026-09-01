@@ -1,9 +1,22 @@
 import { Empty, type Msg, type NatsConnection } from "@nats-io/nats-core";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Agent } from "../../src/agent.js";
 import { buildAgentInfo, type RawServiceInfo } from "../../src/discovery/agent-info.js";
 import { decodeEnvelope, encodeEnvelope } from "../../src/prompt/envelope.js";
-import { isThreadId, randomThreadId, THREAD_ID_HEX_LEN } from "../../src/trace/ids.js";
+import { isThreadId, isToolCallId, randomThreadId, THREAD_ID_HEX_LEN } from "../../src/trace/ids.js";
+
+// The edge sender is a no-op stub for now; mock it so tests can assert the
+// call shape `prompt()` hands it.
+const edgeCalls = vi.hoisted(() => [] as { threadId: string; toolCallId?: string }[]);
+vi.mock("../../src/trace/edge.js", () => ({
+  sendEdgeRecord: (fields: { threadId: string; toolCallId?: string }) => {
+    edgeCalls.push(fields);
+  },
+}));
+
+beforeEach(() => {
+  edgeCalls.length = 0;
+});
 
 function info(): RawServiceInfo {
   return {
@@ -43,8 +56,12 @@ function captureNc(sink: { payload?: Uint8Array }): NatsConnection {
   } as unknown as NatsConnection;
 }
 
-async function promptedWire(agent: Agent, sink: { payload?: Uint8Array }): Promise<unknown> {
-  const stream = await agent.prompt("hello");
+async function promptedWire(
+  agent: Agent,
+  sink: { payload?: Uint8Array },
+  opts: Parameters<Agent["prompt"]>[1] = {},
+): Promise<unknown> {
+  const stream = await agent.prompt("hello", opts);
   for await (const _ of stream) {
     // drain the single terminator
   }
@@ -108,6 +125,45 @@ describe("prompt minting", () => {
     const first = (await promptedWire(agent, sink)) as Record<string, unknown>;
     const second = (await promptedWire(agent, sink)) as Record<string, unknown>;
     expect(first["thread_id"]).not.toBe(second["thread_id"]);
+  });
+});
+
+describe("tool call ids", () => {
+  it("accepts 1-256 visible-ASCII characters", () => {
+    expect(isToolCallId("call_9xJ2")).toBe(true);
+    expect(isToolCallId("x".repeat(256))).toBe(true);
+    expect(isToolCallId("")).toBe(false);
+    expect(isToolCallId("x".repeat(257))).toBe(false);
+    expect(isToolCallId("has space")).toBe(false);
+    expect(isToolCallId("newline\n")).toBe(false);
+    expect(isToolCallId("émoji")).toBe(false);
+  });
+
+  it("prompt() rejects an invalid tool option synchronously", () => {
+    const sink: { payload?: Uint8Array } = {};
+    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
+    expect(() => agent.prompt("hello", { tool: "bad tool" })).toThrow(/tool call id/);
+    expect(sink.payload).toBeUndefined();
+    expect(edgeCalls).toHaveLength(0);
+  });
+
+  it("prompt() hands thread and tool ids to the edge sender when tracing is on", async () => {
+    const sink: { payload?: Uint8Array } = {};
+    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000, undefined, undefined, {});
+    const wire = (await promptedWire(agent, sink, { tool: "call_9xJ2" })) as Record<
+      string,
+      unknown
+    >;
+    expect(edgeCalls).toHaveLength(1);
+    expect(edgeCalls[0]!.threadId).toBe(wire["thread_id"]);
+    expect(edgeCalls[0]!.toolCallId).toBe("call_9xJ2");
+  });
+
+  it("prompt() does not touch the edge sender when tracing is off", async () => {
+    const sink: { payload?: Uint8Array } = {};
+    const agent = new Agent(captureNc(sink), buildAgentInfo(info())!, 1_000);
+    await promptedWire(agent, sink, { tool: "call_9xJ2" });
+    expect(edgeCalls).toHaveLength(0);
   });
 });
 

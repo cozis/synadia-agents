@@ -20,7 +20,8 @@ import {
   serializeSenderHeader,
 } from "./identity/sender-header.js";
 import { combineAbortSignals } from "./internal/abort.js";
-import { randomThreadId } from "./trace/ids.js";
+import { sendEdgeRecord } from "./trace/edge.js";
+import { isToolCallId, randomThreadId, TOOL_CALL_ID_MAX_LEN } from "./trace/ids.js";
 import type { TraceOptions } from "./trace/options.js";
 import { STATUS_ENDPOINT_NAME } from "./internal/service-name.js";
 import { normalizeAttachments } from "./prompt/attachments.js";
@@ -176,9 +177,19 @@ export class Agent {
     // size is re-checked once the identity is known.
     const headerBound = identity?.mayAttachHeader() ? maxSenderHeaderBytes(sub, identity.name) : 0;
 
-    // Observability (opt-in): mint this prompt's thread ID. The root is the
-    // minted ID itself until ambient-lineage inheritance lands.
+    // Observability (opt-in): mint this prompt's thread ID and hand the
+    // edge to the (future) publisher. The root is the minted ID itself
+    // until ambient-lineage inheritance lands. `tool` is validated even
+    // with tracing off — a bad value is a caller bug either way.
+    if (opts.tool !== undefined && !isToolCallId(opts.tool)) {
+      throw new NatsAgentError(
+        `invalid tool call id (must be 1-${TOOL_CALL_ID_MAX_LEN} visible-ASCII characters)`,
+      );
+    }
     const lineage = this.#trace !== undefined ? mintRootLineage() : undefined;
+    if (lineage !== undefined) {
+      sendEdgeRecord({ threadId: lineage.threadId, toolCallId: opts.tool });
+    }
 
     // Fast path: text-only — max_payload check is sync.
     if (!hasAttachments) {

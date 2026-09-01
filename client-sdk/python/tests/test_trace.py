@@ -22,6 +22,7 @@ from synadia_ai.agents import (
     build_agent_info,
     encode,
     is_thread_id,
+    is_tool_call_id,
     random_thread_id,
 )
 
@@ -152,6 +153,60 @@ def test_prompt_mints_fresh_ids_per_call(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.undo()
     second = _captured_envelope(monkeypatch, agent, "hello")
     assert first.thread_id != second.thread_id
+
+
+def test_is_tool_call_id_bounds() -> None:
+    assert is_tool_call_id("call_9xJ2")
+    assert is_tool_call_id("x" * 256)
+    assert not is_tool_call_id("")
+    assert not is_tool_call_id("x" * 257)
+    assert not is_tool_call_id("has space")
+    assert not is_tool_call_id("newline\n")
+    assert not is_tool_call_id("émoji")
+
+
+def test_prompt_rejects_an_invalid_tool_synchronously(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = build_agent_info(_info())
+    assert info is not None
+    agent = Agent(_NC, info, trace=TraceOptions())
+    with pytest.raises(ValueError, match="tool call id"):
+        agent.prompt("hello", tool="bad tool")
+
+
+def test_prompt_hands_thread_and_tool_ids_to_the_edge_sender(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info = build_agent_info(_info())
+    assert info is not None
+    agent = Agent(_NC, info, trace=TraceOptions())
+    edges: list[dict[str, str | None]] = []
+
+    def capture_edge(*, thread_id: str, tool_call_id: str | None = None) -> None:
+        edges.append({"thread_id": thread_id, "tool_call_id": tool_call_id})
+
+    monkeypatch.setattr(agent_module, "send_edge_record", capture_edge)
+    envelope = _captured_envelope(monkeypatch, agent, "hello")  # tool-less path
+    assert edges == [{"thread_id": envelope.thread_id, "tool_call_id": None}]
+
+    edges.clear()
+    agent.prompt("hello", tool="call_9xJ2")
+    assert len(edges) == 1
+    assert edges[0]["tool_call_id"] == "call_9xJ2"
+
+
+def test_prompt_skips_the_edge_sender_when_tracing_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info = build_agent_info(_info())
+    assert info is not None
+    edges: list[str] = []
+    monkeypatch.setattr(
+        agent_module,
+        "send_edge_record",
+        lambda **kwargs: edges.append("called"),
+    )
+    Agent(_NC, info).prompt("hello", tool="call_9xJ2")
+    assert edges == []
 
 
 def test_explicit_envelope_lineage_wins_over_minting(monkeypatch: pytest.MonkeyPatch) -> None:

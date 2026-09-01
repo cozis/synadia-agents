@@ -24,3 +24,16 @@ export function randomThreadId(): string {
   for (const b of bytes) out += b.toString(16).padStart(2, "0");
   return out;
 }
+
+// Tool-call IDs flow into edge records (and eventually header values), so
+// they are bounded to a single line of visible ASCII.
+
+/** Maximum length of a tool-call ID. */
+export const TOOL_CALL_ID_MAX_LEN = 256;
+
+const TOOL_CALL_ID_RE = /^[\x21-\x7e]+$/;
+
+/** `true` iff `value` is a valid tool-call ID: 1–256 visible-ASCII characters. */
+export function isToolCallId(value: string): boolean {
+  return value.length <= TOOL_CALL_ID_MAX_LEN && TOOL_CALL_ID_RE.test(value);
+}

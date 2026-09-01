@@ -35,6 +35,12 @@ export interface PromptOptions {
    * token).
    */
   readonly sub?: string;
+  /**
+   * Observability: the model tool call this prompt serves — labels the
+   * edge between the calling execution and the spawned thread. 1–256
+   * visible-ASCII characters; ignored unless tracing is enabled.
+   */
+  readonly tool?: string;
 }
 
 /** `Agent.status()` options — the same remap overrides as {@link PromptOptions}. */

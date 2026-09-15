@@ -31,9 +31,10 @@ export interface NatsAccountConfig {
   minSenderTrust?: SenderTrustMode;
   /**
    * Observability tracing: adopt a traced caller's thread, or mint one for
-   * a prompt that carries none, and publish signed `served` records
-   * binding each prompt to the OpenClaw session it ran in. Needs
-   * `senderIdentity: "signed"` — the records are signed.
+   * a prompt that carries none; put a trace id of the plugin's own on the
+   * turn's model calls; and publish signed `served` records binding each
+   * prompt to that id. Needs `senderIdentity: "signed"` — the records are
+   * signed.
    */
   tracing?: TracingMode;
 }

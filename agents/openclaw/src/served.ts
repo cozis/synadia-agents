@@ -1,15 +1,16 @@
 /**
  * The `served` record — this plugin's binding of one prompt execution to
- * the OpenClaw session it ran in.
+ * the harness thread id its model calls carry.
  *
  * An SDK-built agent stamps the thread on every model request it makes,
  * so those requests carry the thread the caller minted. A channel plugin
- * cannot do that to OpenClaw's provider requests, and OpenClaw sends no
- * session header of its own, so nothing on those calls names the thread.
- * The plugin publishes the binding instead: one record at `start`, stamped
- * with the prompt's arrival and naming the thread and `openclaw:<session
- * id>`, and one at `end` with the outcome. Between the two, the agent's
- * model calls belong to the thread.
+ * cannot add a header to OpenClaw's provider requests, but every request
+ * of a turn carries OpenClaw's own `traceparent`, and the plugin decides
+ * its trace id by seeding OpenClaw's trace scope (see trace-scope.ts).
+ * The plugin publishes the binding: one record at `start`, stamped with
+ * the prompt's arrival and naming the thread and `openclaw:<trace id>`,
+ * and one at `end` with the outcome. Between the two, the model calls
+ * carrying that id belong to the thread.
  *
  * Both records are signed with `Agent-Sender` by the host identity and
  * carry one id as body `record_id`, header nonce and `Nats-Msg-Id`, like
@@ -41,21 +42,21 @@ export const HARNESS = "openclaw";
 export type ServedPhase = "start" | "end";
 export type ServedStatus = "ok" | "error";
 
-/** Longest accepted session id, in Unicode code points. */
-export const SESSION_ID_MAX = 256;
+/** Longest accepted harness id, in Unicode code points. */
+export const HARNESS_ID_MAX = 256;
 
-// Same class the SDK uses for subjects: the session id ends up in a JSON
-// field matched against what OpenClaw itself reports, so anything a
-// session id could never be — empty, whitespace, control characters — is
-// refused rather than published.
+// Same class the SDK uses for subjects: the harness id ends up in a JSON
+// field matched against a header value, so anything a header value could
+// never hold — empty, whitespace, control characters — is refused rather
+// than published.
 const FORBIDDEN =
   /[\u0000-\u0020\u007f\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]/;
 
-/** `true` iff `value` can be the session id a served record names. */
-export function validSessionId(value: unknown): value is string {
+/** `true` iff `value` can be the harness id a served record names. */
+export function validHarnessId(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0) return false;
   if (FORBIDDEN.test(value)) return false;
-  return Array.from(value).length <= SESSION_ID_MAX;
+  return Array.from(value).length <= HARNESS_ID_MAX;
 }
 
 /** Now, in unix seconds — the served record's `ts` resolution. */
@@ -74,15 +75,16 @@ export interface BuiltServedRecord {
  * the payload so the publisher can stamp it as `Nats-Msg-Id` and sign
  * with it as the `Agent-Sender` nonce. `agent` is the host identity, in
  * canonical `{account}.{user}` form — the identity that signs the record.
- * `status` is required on `end` and must be absent on `start`. `ts` is
- * unix seconds — when the prompt arrived for `start`, when the turn ended
- * for `end`.
+ * `harnessId` is the bare trace id; the record carries it prefixed with
+ * the harness kind. `status` is required on `end` and must be absent on
+ * `start`. `ts` is unix seconds — when the prompt arrived for `start`,
+ * when the turn ended for `end`.
  */
 export function buildServedRecord(
   agent: AgentId,
   threadId: string,
   rootId: string,
-  sessionId: string,
+  harnessId: string,
   phase: ServedPhase,
   status?: ServedStatus,
   ts: number = unixSeconds(),
@@ -108,7 +110,7 @@ export function buildServedRecord(
     thread_id: threadId,
     root_id: rootId,
     harness: HARNESS,
-    harness_thread_id: `${HARNESS}:${sessionId}`,
+    harness_thread_id: `${HARNESS}:${harnessId}`,
     phase,
     ...(status !== undefined ? { status } : {}),
   };
@@ -130,14 +132,14 @@ export interface ServedPublisherOptions {
 }
 
 /**
- * One prompt's served pair. `bind` names the session once and publishes
+ * One prompt's served pair. `bind` names the harness id once and publishes
  * `start` stamped with the prompt's arrival; `settle` records the outcome
- * when the turn ends and publishes `end` if the session is known. A
- * session bound after settling is refused: the pair is the turn's window,
- * not something to backfill.
+ * when the turn ends and publishes `end` if the id is known. An id bound
+ * after settling is refused: the pair is the turn's window, not something
+ * to backfill.
  */
 export interface ServedTurn {
-  bind(sessionId: string): void;
+  bind(harnessId: string): void;
   settle(status: ServedStatus): void;
 }
 
@@ -163,38 +165,38 @@ export class ServedPublisher {
   beginTurn(scope: TraceScope | undefined): ServedTurn | undefined {
     if (scope === undefined) return undefined;
     const arrivedAt = unixSeconds();
-    let sessionId: string | undefined;
+    let harnessId: string | undefined;
     let settled = false;
     return {
       bind: (id: string): void => {
         if (settled) {
           this.#options.logger.warn(
-            "served: session bound after the turn ended; no served record",
+            "served: harness id bound after the turn ended; no served record",
           );
           return;
         }
-        if (sessionId !== undefined) {
-          if (id !== sessionId) {
+        if (harnessId !== undefined) {
+          if (id !== harnessId) {
             this.#options.logger.warn(
-              "served: session already bound for this prompt; ignored",
+              "served: harness id already bound for this prompt; ignored",
             );
           }
           return;
         }
-        if (!validSessionId(id)) {
+        if (!validHarnessId(id)) {
           this.#options.logger.warn(
-            "served: unusable session id bound; no served record",
+            "served: unusable harness id bound; no served record",
           );
           return;
         }
-        sessionId = id;
+        harnessId = id;
         this.publish(scope, id, "start", undefined, arrivedAt);
       },
       settle: (status: ServedStatus): void => {
         if (settled) return;
         settled = true;
-        if (sessionId !== undefined) {
-          this.publish(scope, sessionId, "end", status, unixSeconds());
+        if (harnessId !== undefined) {
+          this.publish(scope, harnessId, "end", status, unixSeconds());
         }
       },
     };
@@ -210,7 +212,7 @@ export class ServedPublisher {
    */
   publish(
     scope: TraceScope,
-    sessionId: string,
+    harnessId: string,
     phase: ServedPhase,
     status: ServedStatus | undefined,
     ts: number,
@@ -229,7 +231,7 @@ export class ServedPublisher {
       return Promise.resolve();
     }
     const next = this.#chain.then(() =>
-      this.#send(id, signer, scope, sessionId, phase, status, ts),
+      this.#send(id, signer, scope, harnessId, phase, status, ts),
     );
     this.#chain = next;
     return next;
@@ -247,7 +249,7 @@ export class ServedPublisher {
     id: AgentId,
     signer: SenderSigner,
     scope: TraceScope,
-    sessionId: string,
+    harnessId: string,
     phase: ServedPhase,
     status: ServedStatus | undefined,
     ts: number,
@@ -258,7 +260,7 @@ export class ServedPublisher {
         id,
         scope.threadId,
         scope.rootId,
-        sessionId,
+        harnessId,
         phase,
         status,
         ts,

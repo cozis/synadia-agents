@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
   connectToNats: vi.fn(),
   drainConnection: vi.fn(),
   dispatch: vi.fn(),
-  getSessionEntry: vi.fn(),
+  runWithTraceId: vi.fn(),
   serviceOptions: [] as Array<Record<string, unknown>>,
   serviceStops: [] as Array<ReturnType<typeof vi.fn>>,
   servedOptions: [] as Array<Record<string, unknown>>,
@@ -57,29 +57,33 @@ vi.mock("@synadia-ai/agent-service", () => ({
     async start(): Promise<void> {}
   },
 }));
+// The publisher is observed through its turns; the real one is covered by
+// served.test.ts.
 vi.mock("./served.js", () => ({
   ServedPublisher: class {
     constructor(options: Record<string, unknown>) {
       mocks.servedOptions.push(options);
     }
-    beginTurn(scope: unknown): FakeTurn {
+    beginTurn(scope: unknown): FakeTurn | undefined {
+      if (scope === undefined) return undefined;
       const turn = { scope, bind: vi.fn(), settle: vi.fn() };
       mocks.turns.push(turn);
       return turn;
     }
   },
 }));
+// The scope seeding is observed by the id it is asked to seed; the real
+// runner is covered by trace-scope.test.ts.
+vi.mock("./trace-scope.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./trace-scope.js")>()),
+  runWithTraceId: mocks.runWithTraceId,
+}));
 vi.mock("./nats/connection.js", () => ({
   connectToNats: mocks.connectToNats,
   drainConnection: mocks.drainConnection,
 }));
 vi.mock("./runtime.js", () => ({
-  // The 2026.8+ runtime shape: the session reader lives under
-  // `agent.session`; `channel.session` holds only route bookkeeping.
-  getNatsRuntime: () => ({
-    agent: { session: { getSessionEntry: mocks.getSessionEntry } },
-    channel: { session: {} },
-  }),
+  getNatsRuntime: () => ({ channel: {} }),
   setActiveConnection: mocks.setActiveConnection,
 }));
 vi.mock("./attachments.js", () => ({
@@ -120,6 +124,10 @@ function promptResponse(): { sender: undefined; send: ReturnType<typeof vi.fn> }
   return { sender: undefined, send: vi.fn().mockResolvedValue(undefined) };
 }
 
+function scope(): TraceScope {
+  return { threadId: "a".repeat(32), rootId: "b".repeat(32), turnCountHint: 0 };
+}
+
 type CapturedLog = { warn: ReturnType<typeof vi.fn> };
 
 function gatewayContext(
@@ -155,9 +163,9 @@ describe("OpenClaw AgentService wiring", () => {
     mocks.connectToNats.mockReset();
     mocks.drainConnection.mockReset().mockResolvedValue(undefined);
     mocks.dispatch.mockReset().mockResolvedValue(DISPATCHED);
-    mocks.getSessionEntry
+    mocks.runWithTraceId
       .mockReset()
-      .mockReturnValue({ sessionId: "oc-session-1" });
+      .mockImplementation((_id: unknown, fn: () => Promise<unknown>) => fn());
     mocks.setActiveConnection.mockReset();
     mocks.cleanupAgentStaging.mockReset();
     mocks.serviceOptions.length = 0;
@@ -186,20 +194,20 @@ describe("OpenClaw AgentService wiring", () => {
     const options = mocks.serviceOptions[0];
     expect(options).not.toHaveProperty("identity");
     expect(options.minSenderTrust).toBe("any");
-    // Tracing off: an untraced service, no served publisher, and a served
-    // prompt opens no turn — the session store is not even read.
+    // Tracing off: an untraced service, no served publisher, no turn, and
+    // the dispatch is not seeded with any trace id.
     expect(options).not.toHaveProperty("trace");
     expect(mocks.servedOptions).toHaveLength(0);
     await mocks.promptHandlers[0]!({ prompt: "hi" }, promptResponse());
     expect(mocks.dispatch).toHaveBeenCalledOnce();
     expect(mocks.turns).toHaveLength(0);
-    expect(mocks.getSessionEntry).not.toHaveBeenCalled();
+    expect(mocks.runWithTraceId).toHaveBeenCalledWith(undefined, expect.any(Function));
     controller.abort();
     await running;
     expect(wipe).toHaveBeenCalledOnce();
   });
 
-  it("with tracing on, binds each served prompt to the OpenClaw session it ran in", async () => {
+  it("with tracing on, binds a fresh trace id at arrival and seeds the dispatch with it", async () => {
     const signer = { publicKey: "U", sign: vi.fn() };
     mocks.connectToNats.mockResolvedValue({
       nc: { info: { max_payload: 1_048_576 } },
@@ -226,75 +234,58 @@ describe("OpenClaw AgentService wiring", () => {
       account: "A-connection",
     });
 
-    await mocks.promptHandlers[0]!({ prompt: "hi" }, promptResponse());
+    // The service binds the prompt's trace scope around the handler; the
+    // turn is opened on that scope.
+    const first = scope();
+    await bindActiveTrace(first, () =>
+      mocks.promptHandlers[0]!({ prompt: "hi" }, promptResponse()),
+    );
     expect(mocks.turns).toHaveLength(1);
     const turn = mocks.turns[0]!;
-    expect(mocks.getSessionEntry).toHaveBeenCalledWith({
-      agentId: "main",
-      sessionKey: "agent:main:nats:direct:remote",
-      storePath: "/tmp/openclaw/sessions.json",
-    });
-    expect(turn.bind).toHaveBeenCalledWith("oc-session-1");
-    expect(turn.settle).toHaveBeenCalledWith("ok");
-    // The binding happens after OpenClaw took the prompt, never before, and
-    // the turn settles after it was bound.
-    expect(mocks.dispatch.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.getSessionEntry.mock.invocationCallOrder[0]!,
-    );
+    expect(turn.scope).toBe(first);
+    // A fresh trace id — not the thread id — bound before dispatch, seeded
+    // into the dispatch, and the turn settled after it.
+    const bound = turn.bind.mock.calls[0]![0] as string;
+    expect(bound).toMatch(/^[0-9a-f]{32}$/);
+    expect(bound).not.toBe(first.threadId);
+    expect(mocks.runWithTraceId).toHaveBeenCalledWith(bound, expect.any(Function));
     expect(turn.bind.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.dispatch.mock.invocationCallOrder[0]!,
+    );
+    expect(turn.settle).toHaveBeenCalledWith("ok");
+    expect(mocks.dispatch.mock.invocationCallOrder[0]).toBeLessThan(
       turn.settle.mock.invocationCallOrder[0]!,
     );
 
-    // A session the store does not know binds nothing and serves the prompt.
-    mocks.getSessionEntry.mockReturnValue(undefined);
-    await mocks.promptHandlers[0]!({ prompt: "again" }, promptResponse());
-    expect(mocks.turns[1]!.bind).not.toHaveBeenCalled();
-    expect(mocks.turns[1]!.settle).toHaveBeenCalledWith("ok");
-    expect((context.log as CapturedLog).warn).toHaveBeenCalledWith(
-      expect.stringContaining("no OpenClaw session found"),
+    // Every prompt gets its own id.
+    await bindActiveTrace(scope(), () =>
+      mocks.promptHandlers[0]!({ prompt: "again" }, promptResponse()),
     );
-
-    // A store that cannot be read is logged, not thrown at the caller.
-    mocks.getSessionEntry.mockImplementation(() => {
-      throw new Error("store locked");
-    });
-    await expect(
-      mocks.promptHandlers[0]!({ prompt: "once more" }, promptResponse()),
-    ).resolves.toBeUndefined();
-    expect(mocks.turns[2]!.bind).not.toHaveBeenCalled();
-    expect((context.log as CapturedLog).warn).toHaveBeenCalledWith(
-      expect.stringContaining("could not read the OpenClaw session"),
-    );
+    expect(mocks.turns[1]!.bind.mock.calls[0]![0]).not.toBe(bound);
 
     // A failed dispatch settles the turn as an error and still fails the
-    // caller; nothing was bound, so nothing is published for it.
+    // caller; the pair was bound at arrival, so it records the failure.
     mocks.dispatch.mockRejectedValueOnce(new Error("dispatch failed"));
     await expect(
-      mocks.promptHandlers[0]!({ prompt: "broken" }, promptResponse()),
+      bindActiveTrace(scope(), () =>
+        mocks.promptHandlers[0]!({ prompt: "broken" }, promptResponse()),
+      ),
     ).rejects.toThrow("dispatch failed");
-    expect(mocks.turns[3]!.bind).not.toHaveBeenCalled();
-    expect(mocks.turns[3]!.settle).toHaveBeenCalledWith("error");
+    expect(mocks.turns[2]!.bind).toHaveBeenCalledOnce();
+    expect(mocks.turns[2]!.settle).toHaveBeenCalledWith("error");
 
     // A dispatch failure OpenClaw reports through onDispatchError while
-    // still resolving is recorded as an error too, on a bound turn.
-    mocks.getSessionEntry.mockReset().mockReturnValue({ sessionId: "oc-session-2" });
+    // still resolving is recorded as an error too.
     mocks.dispatch.mockImplementationOnce(
       async (params: { onDispatchError: (err: unknown, info: { kind: string }) => void }) => {
         params.onDispatchError(new Error("model unavailable"), { kind: "final" });
         return DISPATCHED;
       },
     );
-    await mocks.promptHandlers[0]!({ prompt: "reported" }, promptResponse());
-    expect(mocks.turns[4]!.bind).toHaveBeenCalledWith("oc-session-2");
-    expect(mocks.turns[4]!.settle).toHaveBeenCalledWith("error");
-
-    // The turn is opened on the prompt's own trace scope: the one the
-    // service binds as ambient around the handler.
-    const scope: TraceScope = { threadId: "a".repeat(32), rootId: "b".repeat(32), turnCountHint: 0 };
-    await bindActiveTrace(scope, () =>
-      mocks.promptHandlers[0]!({ prompt: "scoped" }, promptResponse()),
+    await bindActiveTrace(scope(), () =>
+      mocks.promptHandlers[0]!({ prompt: "reported" }, promptResponse()),
     );
-    expect(mocks.turns[5]!.scope).toBe(scope);
+    expect(mocks.turns[3]!.settle).toHaveBeenCalledWith("error");
     controller.abort();
     await running;
   });

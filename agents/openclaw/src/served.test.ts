@@ -16,10 +16,10 @@ import {
   buildServedRecord,
   HARNESS,
   SERVED_RECORD_VERSION,
-  SESSION_ID_MAX,
+  HARNESS_ID_MAX,
   ServedPublisher,
   unixSeconds,
-  validSessionId,
+  validHarnessId,
 } from "./served.js";
 
 interface KeysFile {
@@ -71,7 +71,7 @@ function fakeConnection(): { nc: NatsConnection; published: Published[] } {
 }
 
 describe("buildServedRecord", () => {
-  it("writes the start record: the thread, the prefixed session id, no status", () => {
+  it("writes the start record: the thread, the prefixed harness id, no status", () => {
     const before = unixSeconds();
     const { recordId, payload } = buildServedRecord(AGENT, THREAD, ROOT, "s-1", "start");
     const { ts, ...rest } = decode(payload);
@@ -104,12 +104,12 @@ describe("buildServedRecord", () => {
   });
 });
 
-describe("validSessionId", () => {
-  it("accepts an OpenClaw session id and refuses what one can never be", () => {
-    expect(validSessionId("6f1c2d3e-4b5a-4c6d-8e9f-0a1b2c3d4e5f")).toBe(true);
-    expect(validSessionId("a".repeat(SESSION_ID_MAX))).toBe(true);
-    for (const bad of [undefined, 42, "", "has space", "a\nb", "ab", "a".repeat(SESSION_ID_MAX + 1)]) {
-      expect(validSessionId(bad)).toBe(false);
+describe("validHarnessId", () => {
+  it("accepts a trace id and refuses what a header value can never hold", () => {
+    expect(validHarnessId("9f2c4b1e8a7d33051c6e0b42d78a91f0")).toBe(true);
+    expect(validHarnessId("a".repeat(HARNESS_ID_MAX))).toBe(true);
+    for (const bad of [undefined, 42, "", "has space", "a\nb", "ab", "a".repeat(HARNESS_ID_MAX + 1)]) {
+      expect(validHarnessId(bad)).toBe(false);
     }
   });
 });
@@ -166,7 +166,7 @@ describe("ServedPublisher", () => {
     expect(after.dropped).toBe(before.dropped);
   });
 
-  it("keeps the arrival time on start even when the session is bound late", async () => {
+  it("keeps the arrival time on start even when the id is bound late", async () => {
     const { p, published } = publisher();
     const arrived = unixSeconds();
     const turn = p.beginTurn(scope())!;

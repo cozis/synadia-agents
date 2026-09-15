@@ -28,12 +28,8 @@ import {
 import { connectToNats, drainConnection } from "./nats/connection.js";
 import type { ResolvedNatsAccount } from "./types.js";
 import { getNatsRuntime, setActiveConnection } from "./runtime.js";
-import { resolveOpenClawSessionId } from "./session-id.js";
-import {
-  ServedPublisher,
-  type ServedStatus,
-  type ServedTurn,
-} from "./served.js";
+import { newTraceId, runWithTraceId } from "./trace-scope.js";
+import { ServedPublisher, type ServedStatus } from "./served.js";
 import {
   cleanupAgentStaging,
   stageAttachmentsIntoPrompt,
@@ -49,7 +45,7 @@ const HEARTBEAT_INTERVAL_S = 5;
  * one for a prompt that carries none, and reports the trace record counts
  * on its heartbeat. The plugin exposes no tool that prompts other agents,
  * so it never writes an edge record; what it publishes is the served pair
- * that binds each prompt to the OpenClaw session it ran in (see
+ * that binds each prompt to the trace id its model calls carry (see
  * `ServedPublisher`), on the same default subject.
  */
 export function traceOptionsFor(
@@ -234,7 +230,14 @@ async function dispatchPromptToOpenClaw(
 
   // Tracing: this prompt's served pair, opened on arrival. The service
   // bound the prompt's trace scope as the ambient one for this handler.
-  const turn = served?.beginTurn(activeTrace());
+  // The harness id is minted here: a fresh trace id that the dispatch
+  // below seeds into OpenClaw's trace scope, so the turn's model calls
+  // carry it as their `traceparent` trace id; the pair names it as
+  // `openclaw:<trace id>`, and its `start` goes out now.
+  const scope = activeTrace();
+  const turn = served?.beginTurn(scope);
+  const traceId = turn ? newTraceId() : undefined;
+  turn?.bind(traceId!);
 
   const finalPrompt = stageAttachmentsIntoPrompt({
     baseDir: ATTACHMENT_BASE_DIR,
@@ -282,7 +285,11 @@ async function dispatchPromptToOpenClaw(
 
   let status: ServedStatus = "ok";
   try {
-    const dispatched = await dispatchInboundDirectDmWithRuntime({
+    // Tracing: dispatch inside OpenClaw's trace scope keyed by the minted
+    // id, so every model call of this turn carries it (see trace-scope.ts).
+    // A no-op without a scope store or with tracing off.
+    await runWithTraceId(traceId, () =>
+      dispatchInboundDirectDmWithRuntime({
       cfg,
       runtime: runtimeWithStreaming,
       channel: "nats",
@@ -313,51 +320,15 @@ async function dispatchPromptToOpenClaw(
         // the served pair records the turn as failed either way.
         status = "error";
       },
-    });
-
-    // Tracing: bind the prompt to the OpenClaw session it ran in. OpenClaw's
-    // own model calls carry no thread header — a channel plugin cannot add
-    // one — so the served pair, the prompt's window under
-    // `openclaw:<session id>`, is what joins them to the thread. Read after
-    // dispatch, when the session is settled.
-    if (turn) bindOpenClawSession(ctx, turn, dispatched);
+      }),
+    );
   } catch (err) {
     status = "error";
     throw err;
   } finally {
-    // The turn is over either way; a turn that never bound publishes
-    // nothing.
+    // The turn is over either way: `end` carries its outcome.
     turn?.settle(status);
   }
-}
-
-function bindOpenClawSession(
-  ctx: ChannelGatewayContext<ResolvedNatsAccount>,
-  turn: ServedTurn,
-  dispatched: Awaited<ReturnType<typeof dispatchInboundDirectDmWithRuntime>>,
-): void {
-  let sessionId: string | undefined;
-  try {
-    sessionId = resolveOpenClawSessionId(
-      getNatsRuntime() as unknown as Parameters<
-        typeof resolveOpenClawSessionId
-      >[0],
-      dispatched.route,
-      dispatched.storePath,
-    );
-  } catch (err) {
-    ctx.log?.warn?.(
-      `nats: could not read the OpenClaw session: ${String(err)}`,
-    );
-    return;
-  }
-  if (sessionId === undefined) {
-    ctx.log?.warn?.(
-      `nats: no OpenClaw session found for ${dispatched.route.sessionKey}; no served records for this prompt`,
-    );
-    return;
-  }
-  turn.bind(sessionId);
 }
 
 function gatewayLogger(

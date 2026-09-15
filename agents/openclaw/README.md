@@ -179,29 +179,29 @@ plugin takes part in the SDKs' observability tracing extension:
 - A traced caller's thread and root ids arrive on the envelope and are
   adopted; a prompt without them gets a freshly minted thread. A malformed id
   is rejected with `400`, as the SDK does.
-- **OpenClaw's own model calls carry no thread id.** A channel plugin cannot
-  add headers to the harness's provider requests (only OpenClaw provider
-  plugins can), and OpenClaw sends no session header of its own, so nothing
-  on those calls names the thread. The plugin publishes the binding instead:
-  for every prompt, two signed `served` records on `TRACE.edges` — one
-  stamped with the prompt's arrival and one when the turn ends with `status`
-  `ok` or `error` — naming the thread and, as the harness thread id,
-  `openclaw:<OpenClaw session id>`: the session OpenClaw filed the message
-  under (a new one after `/new`, `/reset`, or a daily or idle reset). The
-  pair bounds the window in which the agent's model calls belong to the
-  thread.
+- **OpenClaw's model calls carry a trace id the plugin chooses.** A channel
+  plugin cannot add headers to the harness's provider requests, but OpenClaw
+  puts a W3C `traceparent` header on every model call of a turn, with a trace
+  id inherited from the trace scope active when the turn was dispatched. For
+  each prompt the plugin mints a fresh trace id and dispatches the turn
+  inside that scope, so every model call of the turn carries it. The
+  caller's thread id never reaches a model provider.
+- The plugin publishes the binding: for every prompt, two signed `served`
+  records on `TRACE.edges` — one stamped with the prompt's arrival and one
+  when the turn ends with `status` `ok` or `error` — naming the thread and,
+  as the harness thread id, `openclaw:<trace id>`. The model calls carrying
+  that trace id between the two belong to the thread.
 - `status` is `error` when the dispatch threw or OpenClaw reported a
   dispatch or delivery failure for the turn. A model error that OpenClaw
   answers as reply text ends the turn normally, with `ok`.
-- OpenClaw runs every NATS prompt in that one session, one turn at a time.
-  A prompt that arrives while another turn is running waits inside
-  OpenClaw, but its `start` record is stamped with its arrival at the
-  plugin, so its window can open before the previous turn's `end`. Calls
-  made before that `end` belong to the earlier thread.
-- The session is read from OpenClaw's session store once the turn has been
-  dispatched, so both records go out when the turn ends; their timestamps
-  still bound the turn. A prompt whose session cannot be read publishes
-  nothing and is served normally, with a warning in the gateway log.
+- OpenClaw runs every NATS prompt in one session, one turn at a time. A
+  prompt that arrives while another turn is running waits inside OpenClaw,
+  but its `start` record is stamped with its arrival at the plugin, so its
+  window can open before the previous turn's `end`. The trace id, not the
+  window, tells the two turns' calls apart.
+- The trace scope is carried through OpenClaw's turn queue on 2026.8 and
+  later. On 2026.5.4 the model calls carry a trace id of OpenClaw's own
+  instead, and the served pair names an id no call carries.
 - Identity is required: records are signed with the host identity, so with
   `senderIdentity: "off"` nothing is published, the gateway logs a warning at
   startup, and every record owed counts as dropped on the heartbeat's
@@ -360,7 +360,6 @@ The agent subject layout has no per-tenant slot. For real isolation between tena
 - **Signed identity fails at startup** — the selected connection source must contain a user seed, and that credential identity must match the live connection. Do not configure a separate identity credentials file.
 - **A context error no longer falls back to another URL** — contexts are complete identity-bearing connection sources. Fix or unset the explicitly selected context instead of relying on an implicit downgrade.
 - **`tracing is on but senderIdentity is off`** — served records are signed with the host identity. Set `senderIdentity: "signed"` (with a credential source that carries a user seed) or turn tracing off.
-- **`no OpenClaw session found for …; no served records for this prompt`** — the plugin could not read the session OpenClaw filed the prompt under. The prompt was still served; check that the gateway's session store is readable and that the OpenClaw release is within the supported peer range.
 - **`nats req` returns only the initial ack and exits** — pass `--reply-timeout 30s` (default is 300 ms, shorter than the gap between the ack chunk and the LLM's first response). See the "Talk to your agent" section above for the full command. `--wait-for-empty` alone isn't enough.
 - **`nats req` hangs or returns nothing** — pass `--wait-for-empty`. The protocol ends streams with an empty-body message, not a single response.
 - **`400 attachment[N] has invalid base64 content`** — the caller emitted URL-safe base64 or unpadded output. `Buffer.from(bytes).toString("base64")` (Node) produces the right form.

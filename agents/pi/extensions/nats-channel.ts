@@ -816,7 +816,13 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("agent_end", async () => {
+  // `agent_end` marks the end of one pass through PI's loop; PI may still
+  // auto-retry a failed model call, compact and retry an overflowed turn,
+  // or continue with queued messages, all before `agent_settled`. The
+  // request stays active until then so the retry's text and the headers on
+  // its model calls land on the caller's request, and PI is idle here, so
+  // the next queued prompt can be injected.
+  pi.on("agent_settled", async () => {
     promptQueue.completeActive();
     // AgentService resumes from the deferred handler and emits the
     // terminator. Flush it before the next PI turn begins.

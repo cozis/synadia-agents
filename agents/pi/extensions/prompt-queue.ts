@@ -32,7 +32,7 @@ interface MutableQueuedPiPrompt extends QueuedPiPrompt {
 /**
  * Bridges AgentService's request-scoped async handler to PI's event-driven
  * lifecycle. A prompt handler returns `completion`; PI settles it on
- * `agent_end`, expiration, or shutdown. AgentService therefore keeps owning
+ * `agent_settled`, expiration, or shutdown. AgentService therefore keeps owning
  * admission, acknowledgements, keep-alives, errors, and the final terminator.
  */
 export class PiPromptQueue {

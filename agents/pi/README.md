@@ -143,9 +143,11 @@ SDK-built agent does:
   and keeps them with the queued request; PI fires `before_provider_headers`
   before every provider request, and while that request is PI's active turn
   the extension stamps the headers on it. A model proxy files those calls
-  under the caller's thread. Calls PI makes when no NATS prompt is active,
-  including the compaction it may run before starting one, are left
-  untouched.
+  under the caller's thread. The active turn spans everything PI does for
+  the prompt until it settles — retries, and the compaction PI runs for an
+  overflowed or oversized context after the answer — so those calls are
+  stamped too. Calls PI makes when no NATS prompt is active, including the
+  compaction it may run before starting one, are left untouched.
 - The prompt is handed to PI inside the request's trace scope, so an SDK
   client a PI tool might use during the turn inherits this prompt's thread.
 - With tracing off nothing is stamped, even for a caller that sent lineage:
@@ -286,7 +288,7 @@ Caller-side limits (rejected with `400` if violated):
 
 Each PI session processes one NATS request at a time. Additional requests queue until the session is idle. The local TUI input and inbound NATS prompts share the same agent — typing locally during a NATS-driven turn means that local output flows to the NATS reply alongside the remote prompt's response, and with tracing on its model calls carry the remote prompt's thread (see [Limitations](#limitations)).
 
-Queued prompts keep their AgentService response open until PI finishes the corresponding turn. The service owns admission, acknowledgement, keep-alive messages, errors, and the final stream terminator. Requests that expire in the local queue or remain during shutdown are explicitly settled instead of being silently dropped.
+Queued prompts keep their AgentService response open until PI settles the corresponding turn — after any automatic retry or compact-and-retry, so a retried answer still reaches the caller. Text streamed before a retry is not retracted, so a caller may see a truncated attempt followed by the full answer. The service owns admission, acknowledgement, keep-alive messages, errors, and the final stream terminator. Requests that expire in the local queue or remain during shutdown are explicitly settled instead of being silently dropped.
 
 Multiple PI sessions on the same host register as distinct service instances; `nats micro info agents` aggregates across all of them. If two sessions try to register on the same `owner + session`, the later one auto-suffixes `-2`, `-3`, … — pick a stable name with `/nats-configure session <name>` if you want addressability.
 

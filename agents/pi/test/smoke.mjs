@@ -486,14 +486,14 @@ await step(
       await delay(20);
     assert.equal(pendingSendUserMessage, env);
 
-    // Simulate PI producing text_delta events, then agent_end.
+    // Simulate PI producing text_delta events, then agent_settled.
     await emit("message_update", {
       assistantMessageEvent: { type: "text_delta", delta: "Hi " },
     });
     await emit("message_update", {
       assistantMessageEvent: { type: "text_delta", delta: "there!" },
     });
-    await emit("agent_end", {});
+    await emit("agent_settled", {});
 
     await Promise.race([done, delay(2000)]);
     sub.unsubscribe();
@@ -560,7 +560,7 @@ if (STRICT) {
             delta: "signed response",
           },
         });
-        await emit("agent_end", {});
+        await emit("agent_settled", {});
         const events = await collecting;
         assert.equal(
           events
@@ -653,7 +653,7 @@ if (!STRICT)
       await emit("message_update", {
         assistantMessageEvent: { type: "text_delta", delta: "ok" },
       });
-      await emit("agent_end", {});
+      await emit("agent_settled", {});
 
       await Promise.race([done, delay(2000)]);
       sub.unsubscribe();
@@ -709,7 +709,7 @@ if (STRICT) {
         await emit("message_update", {
           assistantMessageEvent: { type: "text_delta", delta: "ok" },
         });
-        await emit("agent_end", {});
+        await emit("agent_settled", {});
         await Promise.race([done, delay(2000)]);
         return headers;
       };
@@ -729,6 +729,36 @@ if (STRICT) {
       assert.match(minted["X-Synadia-Thread-ID"], /^[0-9a-f]{32}$/);
       assert.equal(minted["X-Synadia-Root-ID"], minted["X-Synadia-Thread-ID"]);
       assert.notEqual(minted["X-Synadia-Thread-ID"], thread);
+
+      // Overflow recovery: PI's loop ends (`agent_end`), then PI compacts and
+      // retries before settling. The request stays active across that gap,
+      // so the retry's model call is stamped and its text reaches the caller.
+      pendingSendUserMessage = null;
+      const stream = collectStream(expectedSubject, "Overflow me.");
+      for (let i = 0; i < 50 && pendingSendUserMessage === null; i++)
+        await delay(20);
+      assert.equal(pendingSendUserMessage, "Overflow me.");
+      await emit("agent_end", {});
+      const retry = {};
+      await emit("before_provider_headers", {
+        type: "before_provider_headers",
+        headers: retry,
+      });
+      assert.match(retry["X-Synadia-Thread-ID"], /^[0-9a-f]{32}$/);
+      await emit("message_update", {
+        assistantMessageEvent: { type: "text_delta", delta: "after retry" },
+      });
+      await emit("agent_settled", {});
+      const recovered = await stream;
+      assert.ok(recovered.terminator, "terminator not observed after settle");
+      assert.equal(
+        recovered.chunks
+          .map((c) => JSON.parse(c))
+          .filter((c) => c.type === "response")
+          .map((c) => c.data)
+          .join(""),
+        "after retry",
+      );
 
       // A model call PI makes with no NATS prompt active is left untouched.
       const idle = {};

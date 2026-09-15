@@ -21,11 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inside the request's trace scope, so an SDK client used by a PI tool
   during the turn inherits the right thread.
 
+### Fixed
+
+- A NATS prompt's turn now ends on PI's `agent_settled` rather than
+  `agent_end`. PI can auto-retry a failed model call, compact and retry an
+  overflowed turn, or continue with queued messages after `agent_end`; the
+  caller used to get its terminator before that answer, and the answer's
+  text and traced model calls were lost. The next queued prompt is also
+  injected as soon as PI settles instead of waiting for the next arrival.
+
 ### Changed
 
 - Migrated protocol hosting to `AgentService`. Sender admission now happens
   before the SDK-owned acknowledgement, while queued PI turns keep a deferred
-  `PromptResponse` open until `agent_end`, expiration, or shutdown. Expired and
+  `PromptResponse` open until `agent_settled`, expiration, or shutdown. Expired and
   shutdown requests receive an error and terminator instead of being dropped.
 - Added optional, connection-bound sender identity. `senderIdentity: "signed"`
   uses the shared SDK connection-bundle helper so the NATS authenticator and

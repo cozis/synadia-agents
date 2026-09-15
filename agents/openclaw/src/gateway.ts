@@ -309,6 +309,9 @@ async function dispatchPromptToOpenClaw(
       },
       onDispatchError: (err, info) => {
         ctx.log?.error?.(`nats: ${info.kind} dispatch error: ${String(err)}`);
+        // OpenClaw reports some dispatch failures here and still resolves;
+        // the served pair records the turn as failed either way.
+        status = "error";
       },
     });
 

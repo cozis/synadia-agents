@@ -11,10 +11,12 @@
  * is read then. Reading it any earlier could name a session the reset
  * policy is about to retire.
  *
- * The store is read through the plugin runtime, which every supported
- * OpenClaw release provides in one of two shapes: `getSessionEntry`
- * (2026.8 and later, also the SQLite-backed store) or `loadSessionStore`
- * (older releases, the JSON store).
+ * The store is read through the plugin runtime, which the supported
+ * OpenClaw releases expose in two shapes: `getSessionEntry` under the
+ * runtime's `agent.session` namespace (2026.8 and later, also the
+ * SQLite-backed store), or `loadSessionStore` under `channel.session`
+ * (2026.5.4, the JSON store). Both namespaces are consulted for either
+ * reader, so a release that moves one does not silently lose tracing.
  */
 
 export interface OpenClawDispatchRoute {
@@ -37,6 +39,7 @@ interface SessionRuntimeLike {
 
 /** The subset of the plugin runtime this lookup uses. */
 export interface SessionRuntimeSource {
+  readonly agent?: { readonly session?: SessionRuntimeLike };
   readonly channel?: { readonly session?: SessionRuntimeLike };
 }
 
@@ -52,20 +55,27 @@ export function resolveOpenClawSessionId(
   route: OpenClawDispatchRoute,
   storePath: string,
 ): string | undefined {
-  const session = runtime.channel?.session;
-  if (!session) return undefined;
-  let entry: SessionEntryLike | undefined | null;
-  if (typeof session.getSessionEntry === "function") {
-    entry = session.getSessionEntry({
-      agentId: route.agentId,
-      sessionKey: route.sessionKey,
-      storePath,
-    });
-  } else if (typeof session.loadSessionStore === "function") {
-    entry = session.loadSessionStore(storePath)?.[route.sessionKey];
-  } else {
-    return undefined;
+  const readers = [runtime.agent?.session, runtime.channel?.session];
+  for (const session of readers) {
+    if (typeof session?.getSessionEntry === "function") {
+      return sessionIdOf(
+        session.getSessionEntry({
+          agentId: route.agentId,
+          sessionKey: route.sessionKey,
+          storePath,
+        }),
+      );
+    }
   }
+  for (const session of readers) {
+    if (typeof session?.loadSessionStore === "function") {
+      return sessionIdOf(session.loadSessionStore(storePath)?.[route.sessionKey]);
+    }
+  }
+  return undefined;
+}
+
+function sessionIdOf(entry: SessionEntryLike | undefined | null): string | undefined {
   const id = entry?.sessionId;
   return typeof id === "string" && id.length > 0 ? id : undefined;
 }

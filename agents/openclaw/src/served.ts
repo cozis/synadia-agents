@@ -146,6 +146,10 @@ const NATS_MSG_ID_HEADER = "Nats-Msg-Id";
 export class ServedPublisher {
   readonly #options: ServedPublisherOptions;
   #unsignedWarned = false;
+  // Records are signed and handed to the connection one after another, in
+  // the order they were due, so a pair's `end` never overtakes its `start`
+  // on the wire. A failed record never rejects the chain.
+  #chain: Promise<void> = Promise.resolve();
 
   constructor(options: ServedPublisherOptions) {
     this.#options = options;
@@ -197,10 +201,11 @@ export class ServedPublisher {
   }
 
   /**
-   * Publish one signed record. Fail-open and asynchronous. Without a
-   * signer or a host identity nothing is published — an unsigned record
-   * cannot be attributed — the publisher warns once, and the record counts
-   * as dropped. Every record that goes out or fails to moves the
+   * Publish one signed record. Fail-open and asynchronous: the returned
+   * promise never rejects and nothing awaits it on the prompt path.
+   * Without a signer or a host identity nothing is published — an unsigned
+   * record cannot be attributed — the publisher warns once, and the record
+   * counts as dropped. Every record that goes out or fails to moves the
    * process-wide trace record counts.
    */
   publish(
@@ -209,8 +214,8 @@ export class ServedPublisher {
     phase: ServedPhase,
     status: ServedStatus | undefined,
     ts: number,
-  ): void {
-    const { nc, subject, signer, logger } = this.#options;
+  ): Promise<void> {
+    const { signer, logger } = this.#options;
     const id = this.#options.identity();
     if (signer === undefined || id === undefined) {
       countTraceRecordDropped();
@@ -221,39 +226,62 @@ export class ServedPublisher {
             "(an unsigned record cannot be attributed). Set senderIdentity to signed.",
         );
       }
-      return;
+      return Promise.resolve();
     }
-    void (async (): Promise<void> => {
-      try {
-        const record = buildServedRecord(
-          id,
-          scope.threadId,
-          scope.rootId,
-          sessionId,
-          phase,
-          status,
-          ts,
-        );
-        const header = await signSenderHeader({
-          signer,
-          id,
-          sub: subject,
-          payload: record.payload,
-          nonce: record.recordId,
-        });
-        const hdrs = createHeaders();
-        hdrs.set(AGENT_SENDER_HEADER, serializeSenderHeader(header));
-        hdrs.set(NATS_MSG_ID_HEADER, record.recordId);
-        nc.publish(subject, record.payload, { headers: hdrs });
-        countTraceRecordPublished();
-      } catch (err) {
-        countTraceRecordDropped();
-        logger.warn("served: failed to publish served record", {
-          subject,
-          phase,
-          reason: err instanceof Error ? err.message : String(err),
-        });
-      }
-    })();
+    const next = this.#chain.then(() =>
+      this.#send(id, signer, scope, sessionId, phase, status, ts),
+    );
+    this.#chain = next;
+    return next;
+  }
+
+  /**
+   * Resolves once every record handed to `publish` so far has been signed
+   * and handed to the connection, or dropped. For shutdown and tests.
+   */
+  flush(): Promise<void> {
+    return this.#chain;
+  }
+
+  async #send(
+    id: AgentId,
+    signer: SenderSigner,
+    scope: TraceScope,
+    sessionId: string,
+    phase: ServedPhase,
+    status: ServedStatus | undefined,
+    ts: number,
+  ): Promise<void> {
+    const { nc, subject, logger } = this.#options;
+    try {
+      const record = buildServedRecord(
+        id,
+        scope.threadId,
+        scope.rootId,
+        sessionId,
+        phase,
+        status,
+        ts,
+      );
+      const header = await signSenderHeader({
+        signer,
+        id,
+        sub: subject,
+        payload: record.payload,
+        nonce: record.recordId,
+      });
+      const hdrs = createHeaders();
+      hdrs.set(AGENT_SENDER_HEADER, serializeSenderHeader(header));
+      hdrs.set(NATS_MSG_ID_HEADER, record.recordId);
+      nc.publish(subject, record.payload, { headers: hdrs });
+      countTraceRecordPublished();
+    } catch (err) {
+      countTraceRecordDropped();
+      logger.warn("served: failed to publish served record", {
+        subject,
+        phase,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }

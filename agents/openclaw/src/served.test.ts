@@ -70,8 +70,6 @@ function fakeConnection(): { nc: NatsConnection; published: Published[] } {
   return { nc, published };
 }
 
-const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 20));
-
 describe("buildServedRecord", () => {
   it("writes the start record: the thread, the prefixed session id, no status", () => {
     const before = unixSeconds();
@@ -133,15 +131,17 @@ describe("ServedPublisher", () => {
     return { p, published, warnings };
   }
 
-  it("publishes a signed start/end pair: one id across body, header nonce and Nats-Msg-Id", async () => {
+  it("publishes a signed start/end pair in order: one id across body, header nonce and Nats-Msg-Id", async () => {
     const { p, published } = publisher();
     const before = traceRecordCounts();
     const arrived = unixSeconds();
     const turn = p.beginTurn(scope())!;
     turn.bind("sess-1");
     turn.settle("ok");
-    await settle();
+    await p.flush();
     expect(published.map((m) => m.subject)).toEqual([SUBJECT, SUBJECT]);
+    // Signed one after another, so end never overtakes start on the wire.
+    expect(published.map((m) => decode(m.payload)["phase"])).toEqual(["start", "end"]);
     const [start, end] = published.map((m) => decode(m.payload));
     expect(start).toMatchObject({
       kind: "served",
@@ -173,7 +173,7 @@ describe("ServedPublisher", () => {
     await new Promise((r) => setTimeout(r, 1_100));
     turn.bind("late");
     turn.settle("error");
-    await settle();
+    await p.flush();
     const [start, end] = published.map((m) => decode(m.payload));
     expect(start!["ts"]).toBeLessThanOrEqual(arrived + 1);
     expect((end!["ts"] as number) - (start!["ts"] as number)).toBeGreaterThanOrEqual(1);
@@ -190,7 +190,7 @@ describe("ServedPublisher", () => {
     turn.settle("ok");
     turn.settle("ok");
     turn.bind("third");
-    await settle();
+    await p.flush();
     expect(published.map((m) => decode(m.payload)["harness_thread_id"])).toEqual([
       "openclaw:first",
       "openclaw:first",
@@ -201,7 +201,7 @@ describe("ServedPublisher", () => {
 
     const unbound = p.beginTurn(scope())!;
     unbound.settle("ok");
-    await settle();
+    await p.flush();
     expect(published).toHaveLength(2);
     // An untraced service has no scope and gets no turn at all.
     expect(p.beginTurn(undefined)).toBeUndefined();
@@ -214,7 +214,7 @@ describe("ServedPublisher", () => {
       const turn = p.beginTurn(scope())!;
       turn.bind("sess");
       turn.settle("ok");
-      await settle();
+      await p.flush();
       expect(published).toHaveLength(0);
       expect(warnings.filter((w) => /served records are not published/.test(w))).toHaveLength(1);
       expect(traceRecordCounts().dropped - before.dropped).toBe(2);
@@ -239,7 +239,7 @@ describe("ServedPublisher", () => {
     const turn = p.beginTurn(scope())!;
     turn.bind("sess");
     turn.settle("ok");
-    await settle();
+    await p.flush();
     expect(traceRecordCounts().dropped - before.dropped).toBe(2);
     expect(warnings.filter((w) => /failed to publish/.test(w))).toHaveLength(2);
   });

@@ -190,6 +190,14 @@ plugin takes part in the SDKs' observability tracing extension:
   under (a new one after `/new`, `/reset`, or a daily or idle reset). The
   pair bounds the window in which the agent's model calls belong to the
   thread.
+- `status` is `error` when the dispatch threw or OpenClaw reported a
+  dispatch or delivery failure for the turn. A model error that OpenClaw
+  answers as reply text ends the turn normally, with `ok`.
+- OpenClaw runs every NATS prompt in that one session, one turn at a time.
+  A prompt that arrives while another turn is running waits inside
+  OpenClaw, but its `start` record is stamped with its arrival at the
+  plugin, so its window can open before the previous turn's `end`. Calls
+  made before that `end` belong to the earlier thread.
 - The session is read from OpenClaw's session store once the turn has been
   dispatched, so both records go out when the turn ends; their timestamps
   still bound the turn. A prompt whose session cannot be read publishes

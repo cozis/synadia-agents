@@ -59,6 +59,7 @@
     "prepublishOnly": "tsup"
   },
   "dependencies": {
+    "@nats-io/nats-core": "^3.4.0",
     "@nats-io/services": "^3.4.0",
     "@nats-io/transport-node": "^3.4.0",
     "@sinclair/typebox": "^0.34.0",

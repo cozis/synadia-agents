@@ -74,8 +74,11 @@ vi.mock("./nats/connection.js", () => ({
   drainConnection: mocks.drainConnection,
 }));
 vi.mock("./runtime.js", () => ({
+  // The 2026.8+ runtime shape: the session reader lives under
+  // `agent.session`; `channel.session` holds only route bookkeeping.
   getNatsRuntime: () => ({
-    channel: { session: { getSessionEntry: mocks.getSessionEntry } },
+    agent: { session: { getSessionEntry: mocks.getSessionEntry } },
+    channel: { session: {} },
   }),
   setActiveConnection: mocks.setActiveConnection,
 }));
@@ -84,6 +87,7 @@ vi.mock("./attachments.js", () => ({
   stageAttachmentsIntoPrompt: ({ prompt }: { prompt: string }) => prompt,
 }));
 
+import { bindActiveTrace, type TraceScope } from "@synadia-ai/agents";
 import { startNatsGateway, stopNatsGateway, traceOptionsFor } from "./gateway.js";
 import type { ResolvedNatsAccount } from "./types.js";
 
@@ -270,6 +274,27 @@ describe("OpenClaw AgentService wiring", () => {
     ).rejects.toThrow("dispatch failed");
     expect(mocks.turns[3]!.bind).not.toHaveBeenCalled();
     expect(mocks.turns[3]!.settle).toHaveBeenCalledWith("error");
+
+    // A dispatch failure OpenClaw reports through onDispatchError while
+    // still resolving is recorded as an error too, on a bound turn.
+    mocks.getSessionEntry.mockReset().mockReturnValue({ sessionId: "oc-session-2" });
+    mocks.dispatch.mockImplementationOnce(
+      async (params: { onDispatchError: (err: unknown, info: { kind: string }) => void }) => {
+        params.onDispatchError(new Error("model unavailable"), { kind: "final" });
+        return DISPATCHED;
+      },
+    );
+    await mocks.promptHandlers[0]!({ prompt: "reported" }, promptResponse());
+    expect(mocks.turns[4]!.bind).toHaveBeenCalledWith("oc-session-2");
+    expect(mocks.turns[4]!.settle).toHaveBeenCalledWith("error");
+
+    // The turn is opened on the prompt's own trace scope: the one the
+    // service binds as ambient around the handler.
+    const scope: TraceScope = { threadId: "a".repeat(32), rootId: "b".repeat(32), turnCountHint: 0 };
+    await bindActiveTrace(scope, () =>
+      mocks.promptHandlers[0]!({ prompt: "scoped" }, promptResponse()),
+    );
+    expect(mocks.turns[5]!.scope).toBe(scope);
     controller.abort();
     await running;
   });

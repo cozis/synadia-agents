@@ -153,6 +153,17 @@ subtree affects another. Before finishing a change, walk the list:
   - Update `client-sdk/typescript/README.md` if the change is part of
     the documented quickstart / API matrix.
   - If examples need the change, follow the **release ladder** below.
+- **Touched any TS SDK source** (`client-sdk/typescript/src/**` or
+  `agent-sdk/typescript/src/**`, public surface or not)?
+  - Rebuild and commit the Claude Code plugin's runtime bundle
+    (`agents/claude-code/runtime/server.js`): it is a committed
+    `Bun.build` of `server.ts` plus both `file:`-linked SDKs, and CI
+    rebuilds it from packed SDK artifacts and fails on any byte
+    difference. Run `bun run build` in both SDKs, refresh the plugin's
+    copied `node_modules/@synadia-ai/*/dist` (bun copies `file:` deps
+    there, it does not symlink), then `bun run build` and
+    `bun run verify:bundle` in `agents/claude-code/` and commit the
+    result in the same PR as the SDK change.
 - **Touched the Python SDK public surface**?
   - Update `client-sdk/python/CHANGELOG.md`.
   - Re-read `client-sdk/python/CLAUDE.md` — it has stricter rules

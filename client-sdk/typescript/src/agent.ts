@@ -24,6 +24,8 @@ import {
   activeTrace,
   assertValidTraceOptions,
   buildEdgeRecord,
+  countTraceRecordDropped,
+  countTraceRecordPublished,
   DEFAULT_EDGE_SUBJECT,
   inheritedTraceOptions,
   randomThreadId,
@@ -213,6 +215,14 @@ export class Agent {
       // agents that do have one keep tracing.
       if (edgeSubject !== null && !identity?.signer) {
         warnEdgesUnsigned(this.#nc);
+        // The record is due once the prompt goes out, and cannot go out:
+        // a drop, counted where the signed path would have published —
+        // immediately before the prompt — so a prompt that is never sent
+        // owes nothing and counts nothing.
+        edge = (): Promise<void> => {
+          countTraceRecordDropped();
+          return Promise.resolve();
+        };
       } else if (edgeSubject !== null) {
         // Lineage is captured here, where the ambient trace is still the
         // caller's. The record itself is built at publish time, so its
@@ -359,7 +369,10 @@ export class Agent {
    * one id, so a reader de-duplicating on `(user, record_id)` and a
    * stream de-duplicating on the message id see the same record once.
    *
-   * Fail-open — a failed publish never fails the prompt.
+   * Fail-open — a failed publish never fails the prompt. It is counted:
+   * every record that goes out or fails to moves the process-wide
+   * {@link traceRecordCounts}, which the agent service reports on its
+   * heartbeat.
    */
   async #publishEdge(subject: string, edge: EdgePlan): Promise<void> {
     try {
@@ -376,7 +389,9 @@ export class Agent {
       const hdrs = await this.#headersFor(plan, record.payload, record.recordId);
       hdrs.set(MSG_ID_HEADER, record.recordId);
       this.#nc.publish(subject, record.payload, { headers: hdrs });
+      countTraceRecordPublished();
     } catch (err) {
+      countTraceRecordDropped();
       console.warn(`@synadia-ai/agents: failed to publish edge record on ${subject}`, err);
     }
   }

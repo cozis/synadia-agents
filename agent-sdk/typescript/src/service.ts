@@ -82,11 +82,16 @@ import {
   type RequestEnvelope,
   type SenderInfo,
   type SenderSigner,
+  traceRecordCounts,
   type TraceOptions,
   type TraceScope,
 } from "@synadia-ai/agents";
 
-import { buildHeartbeatPayload, encodeHeartbeatPayload } from "./heartbeat/payload.js";
+import {
+  buildHeartbeatPayload,
+  encodeHeartbeatPayload,
+  type BuildHeartbeatPayloadOptions,
+} from "./heartbeat/payload.js";
 import {
   DEFAULT_MIN_SENDER_TRUST,
   DEFAULT_REPLAY_WINDOW_MS,
@@ -771,6 +776,33 @@ export class AgentService {
     }
   }
 
+  /**
+   * What goes on the heartbeat beyond the §8.3 required fields: the
+   * session label when the harness multiplexes, and — when the service
+   * opted in to tracing and publishes records — how many trace records
+   * this process has published and dropped since it started, as
+   * `records_published` and `records_dropped`. The counts are read when
+   * each heartbeat is built, so every beat carries the current totals. A
+   * rising dropped count tells whoever consumes the heartbeat that
+   * records this process owed were never sent. An untraced service
+   * reports nothing, so its heartbeat stays byte-identical to plain
+   * protocol 0.3; so does a propagate-only one (`edgeSubject: null`),
+   * which publishes no records and would otherwise report a constant 0/0
+   * that looks like a healthy zero.
+   */
+  #heartbeatOptions(): BuildHeartbeatPayloadOptions {
+    const options: { session?: string; extras?: Record<string, unknown> } = {};
+    if (this.#options.session !== undefined) options.session = this.#options.session;
+    if (this.#options.trace !== undefined && this.#options.trace.edgeSubject !== null) {
+      const counts = traceRecordCounts();
+      options.extras = {
+        records_published: counts.published,
+        records_dropped: counts.dropped,
+      };
+    }
+    return options;
+  }
+
   #startHeartbeats(): void {
     const publish = (): void => {
       const service = this.#service;
@@ -779,7 +811,7 @@ export class AgentService {
         this.#subject,
         this.#heartbeatIntervalS,
         service.info().id,
-        this.#options.session !== undefined ? { session: this.#options.session } : {},
+        this.#heartbeatOptions(),
       );
       this.#options.nc.publish(this.#subject.heartbeat, encodeHeartbeatPayload(payload));
     };
@@ -800,7 +832,7 @@ export class AgentService {
         this.#subject,
         this.#heartbeatIntervalS,
         service.info().id,
-        this.#options.session !== undefined ? { session: this.#options.session } : {},
+        this.#heartbeatOptions(),
       );
       msg.respond(encodeHeartbeatPayload(payload));
     } catch {

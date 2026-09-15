@@ -15,6 +15,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Trace record counts.** The SDK counts the trace records it handed to
+  the connection and the ones it could not — no identity to sign with, or
+  a publish that threw — process-wide, counted from process start. These
+  are the drops the SDK itself observed: a record lost after it left the
+  process is not counted, and a record is only due once its prompt goes
+  out, so a prompt never iterated or rejected by validation counts
+  nothing, and neither does propagate-only mode. `traceRecordCounts()`
+  returns the snapshot (`TraceRecordCounts`); `countTraceRecordPublished()`
+  / `countTraceRecordDropped()` are for other record writers in the same
+  process. The agent service reports both numbers on its heartbeat.
 - **Observability tracing (opt-in).** `new Agents({ nc, trace })` — or an
   `AgentService` handing its options down — makes every `prompt()` mint a
   thread id, carry `thread_id` / `root_id` in the envelope, and publish a

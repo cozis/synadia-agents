@@ -10,6 +10,20 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Added
 
+- **Heartbeat trace record counts.** A service that opted in to tracing
+  puts `records_published` and `records_dropped` — two counters since
+  process start, read fresh on every beat from `trace_record_counts()` —
+  on the heartbeat and on the `status` reply, so whoever consumes the
+  heartbeat knows how many records the process failed to publish. Only
+  drops the SDK itself observed are counted; a record lost after it left
+  the process is not. An untraced or propagate-only service reports
+  neither; its heartbeat is unchanged. A provider that raises, or an extra the payload cannot
+  carry (a §8.3 field name — a `ValueError` from `build_heartbeat_payload`
+  — or an unserialisable value), costs that beat its extras and never
+  the heartbeat itself.
+  `build_heartbeat_payload` / `publish_one` take an `extras` mapping and
+  `run_publisher` an `extras` provider, the Python encoder's counterpart
+  of the TypeScript `extras` slot.
 - **Observability tracing (opt-in).** `AgentService(trace=TraceOptions())`
   hands tracing down to every `synadia_ai.agents` client used inside a
   prompt handler. The service adopts the caller's `thread_id` / `root_id`

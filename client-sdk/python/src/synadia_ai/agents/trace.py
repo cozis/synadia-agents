@@ -62,6 +62,61 @@ class TraceOptions:
 
 
 THREAD_ID_HEX_LEN = 32
+
+
+@dataclass(frozen=True, slots=True)
+class TraceRecordCounts:
+    """How many trace records this process has published and dropped.
+
+    ``edge`` records today, counted from process start. Process-wide,
+    not per client: the records are written by whichever client handle a
+    prompt handler happens to use, while the ``AgentService`` that owns
+    the heartbeat is another object; one counter for the process is the
+    one they share. The service reports both numbers as
+    ``records_published`` and ``records_dropped`` in its heartbeat, so
+    whoever consumes the heartbeat knows how many records this process
+    failed to publish.
+
+    ``published`` counts records handed to the connection — handed, not
+    delivered: a record lost after that (a reconnect buffer that
+    overflowed, a process that exited before the flush) is not seen
+    here. The counts cover what this process could observe; nothing past
+    the connection is visible to them. ``dropped`` counts records that were
+    due but never went out: no identity to sign them with, or a publish
+    that raised. "Due" means the prompt the record describes actually
+    went out — a prompt never iterated or rejected by validation owes no
+    record and counts nothing. A record in propagate-only mode
+    (``edge_subject=None``) is never due either.
+    """
+
+    published: int
+    dropped: int
+
+
+@dataclass(slots=True)
+class _Counters:
+    published: int = 0
+    dropped: int = 0
+
+
+_counters = _Counters()
+
+
+def count_trace_record_published() -> None:
+    """Count one trace record published. Called by the SDK's publishers."""
+    _counters.published += 1
+
+
+def count_trace_record_dropped() -> None:
+    """Count one trace record dropped. Called by the SDK's publishers."""
+    _counters.dropped += 1
+
+
+def trace_record_counts() -> TraceRecordCounts:
+    """A snapshot of the process-wide :class:`TraceRecordCounts`."""
+    return TraceRecordCounts(published=_counters.published, dropped=_counters.dropped)
+
+
 #: Longest accepted tool call id, in Unicode code points.
 TOOL_CALL_ID_MAX = 256
 

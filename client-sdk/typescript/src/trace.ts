@@ -68,6 +68,69 @@ export function assertValidTraceOptions(options: TraceOptions | undefined): void
   }
 }
 
+/**
+ * How many trace records this process has published and dropped so far —
+ * `edge` records today, counted from process start. Process-wide, not per
+ * client: the records are written by whichever client handle a prompt
+ * handler happens to use, while the agent service that owns the heartbeat
+ * is another object; one counter for the process is the one they share.
+ * The service reports both numbers as `records_published` and
+ * `records_dropped` in its heartbeat's extras, so whoever consumes the
+ * heartbeat knows how many records this process failed to publish.
+ */
+export interface TraceRecordCounts {
+  /**
+   * Records handed to the connection for publishing. Handed, not
+   * delivered: a record lost after that — a reconnect buffer that
+   * overflowed, a process that exited before the flush — is not seen
+   * here. The counts cover what this process could observe; nothing past
+   * the connection is visible to them.
+   */
+  readonly published: number;
+  /**
+   * Records that were due but never went out: no identity to sign them
+   * with, or a publish that threw. "Due" means the prompt the record
+   * describes actually went out — a prompt never iterated or rejected by
+   * validation owes no record and counts nothing. A record in
+   * propagate-only mode (`edgeSubject: null`) is never due either.
+   */
+  readonly dropped: number;
+}
+
+interface MutableCounters {
+  published: number;
+  dropped: number;
+}
+
+// Kept on `globalThis` under a well-known symbol rather than in module
+// state: the counters are written by `@synadia-ai/agents` and read by
+// `@synadia-ai/agent-service`, and a deployment can end up with two
+// installed copies of this module (a harness pinning its own version, or
+// the ESM and CJS builds both loaded). Module state would split the
+// counter between the copies and the heartbeat would report 0/0 while
+// records were being dropped. One process, one counter, whichever copy
+// asks.
+const COUNTERS_KEY = Symbol.for("@synadia-ai/agents:trace-record-counts");
+const counters: MutableCounters = (() => {
+  const g = globalThis as unknown as Record<symbol, MutableCounters | undefined>;
+  return (g[COUNTERS_KEY] ??= { published: 0, dropped: 0 });
+})();
+
+/** Count one trace record published. Called by the SDK's publishers. */
+export function countTraceRecordPublished(): void {
+  counters.published += 1;
+}
+
+/** Count one trace record dropped. Called by the SDK's publishers. */
+export function countTraceRecordDropped(): void {
+  counters.dropped += 1;
+}
+
+/** A snapshot of the process-wide {@link TraceRecordCounts}. */
+export function traceRecordCounts(): TraceRecordCounts {
+  return Object.freeze({ published: counters.published, dropped: counters.dropped });
+}
+
 /** Identity of the prompt execution running in the current async context. */
 export interface TraceScope {
   /** This execution's own thread ID — the parent of any thread it spawns. */

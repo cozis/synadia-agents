@@ -10,6 +10,20 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Added
 
+- **Trace record counts.** The SDK counts the trace records it handed to
+  the connection and the ones it could not — no identity to sign with, or
+  a publish that raised — process-wide, counted from process start. These
+  are the drops the SDK itself observed: a record lost after it left the
+  process is not counted, and a record is only due once its prompt goes
+  out, so a prompt never iterated or rejected by validation counts
+  nothing, and neither does propagate-only mode. `trace_record_counts()`
+  returns the snapshot (`TraceRecordCounts`); `count_trace_record_published()`
+  / `count_trace_record_dropped()` are for other record writers in the same
+  process. The agent service reports both numbers on its heartbeat.
+- **`HeartbeatPayload.extras`.** Unknown heartbeat fields are now kept
+  (`extra="allow"`), readable on `extras` and preserved verbatim on
+  re-encode, as the TypeScript SDK does; they used to be dropped on
+  decode.
 - **Observability tracing (opt-in).** `Agents(nc=nc, trace=TraceOptions())`
   — or an `AgentService` handing its options down — makes every `prompt()`
   mint a thread id, carry `thread_id` / `root_id` in the envelope, and

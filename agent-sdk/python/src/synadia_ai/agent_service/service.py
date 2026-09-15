@@ -68,6 +68,7 @@ from synadia_ai.agents import (
     decode,
     format_sender,
     random_thread_id,
+    trace_record_counts,
 )
 from synadia_ai.agents.identity import (
     DEFAULT_RESOLVE_TTL_S,
@@ -588,6 +589,7 @@ class AgentService:
                 self._heartbeat_interval_s,
                 self._service.id,
                 self._heartbeat_stop,
+                extras=self._heartbeat_extras,
             ),
             name=f"heartbeat-{self.subject.inbox}",
         )
@@ -607,6 +609,25 @@ class AgentService:
             await self._service.stop()
             self._service = None
         log.info("agent stopped on %s", self.subject.inbox)
+
+    def _heartbeat_extras(self) -> dict[str, object]:
+        """What goes on the heartbeat beyond the §8.3 required fields.
+
+        When the service opted in to tracing and publishes records: how
+        many trace records this process has published and dropped since
+        it started, as ``records_published`` and ``records_dropped``.
+        Read when each beat is built, so every beat carries the current
+        totals. A rising dropped count tells whoever consumes the
+        heartbeat that records this process owed were never sent. An
+        untraced service reports nothing, so its heartbeat stays
+        byte-identical to plain protocol 0.3; so does a propagate-only
+        one (``edge_subject=None``), which publishes no records and would
+        otherwise report a constant 0/0 that looks like a healthy zero.
+        """
+        if self._trace is None or self._trace.edge_subject is None:
+            return {}
+        counts = trace_record_counts()
+        return {"records_published": counts.published, "records_dropped": counts.dropped}
 
     async def _on_status_request(self, request: Request) -> None:
         """Reply with a freshly-built §8.3 heartbeat payload (v0.3 §-TBD).
@@ -632,6 +653,7 @@ class AgentService:
                 self.subject,
                 self._heartbeat_interval_s,
                 self._service.id,
+                self._heartbeat_extras(),
             )
             data = payload.model_dump_json().encode("utf-8")
             await request.respond(data)

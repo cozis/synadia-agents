@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Heartbeat trace record counts.** A service that opted in to tracing
+  puts `records_published` and `records_dropped` — two counters since
+  process start, read fresh on every beat from `traceRecordCounts()` — in
+  the heartbeat's extras and on the `status` reply, so whoever consumes
+  the heartbeat knows how many records the process failed to publish.
+  Only drops the SDK itself observed are counted; a record lost after it
+  left the process is not. An untraced or propagate-only service reports
+  neither; its heartbeat is unchanged.
 - **Observability tracing (opt-in).** `AgentServiceOptions.trace` hands
   tracing down to every `@synadia-ai/agents` client used inside a prompt
   handler. The service adopts the caller's `thread_id` / `root_id` (or

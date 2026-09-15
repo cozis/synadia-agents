@@ -250,12 +250,16 @@ export {
   assertValidTraceOptions,
   bindActiveTrace,
   buildEdgeRecord,
+  countTraceRecordDropped,
+  countTraceRecordPublished,
   inheritedTraceOptions,
   isThreadId,
   randomThreadId,
+  traceRecordCounts,
   validToolCallId,
   type BuiltEdgeRecord,
   type TraceOptions,
+  type TraceRecordCounts,
   type TraceScope,
 } from "./trace.js";
 

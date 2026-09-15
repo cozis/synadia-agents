@@ -47,6 +47,8 @@ from .trace import (
     TraceOptions,
     active_trace,
     build_edge_record,
+    count_trace_record_dropped,
+    count_trace_record_published,
     inherited_trace_options,
     random_thread_id,
     valid_tool_call_id,
@@ -181,6 +183,9 @@ class _EdgePlan:
     root_id: str
     tool_call_id: str | None
     turn_count_hint: int
+    #: No identity signer: the record is due when the prompt goes out and
+    #: cannot be published, so it is counted as a drop at that moment.
+    unsigned: bool = False
 
 
 class Agent:
@@ -708,17 +713,22 @@ class Agent:
         # Minting and envelope lineage need no identity and still happen,
         # so downstream agents that do have one keep tracing.
         identity = self._sender_identity
-        if identity is None or identity.signer is None:
-            if self._nc not in _warned_unsigned:
-                _warned_unsigned.add(self._nc)
-                log.warning(
-                    "tracing is enabled but no identity signer is configured; edge "
-                    "records are not published (consumers ignore unsigned records). "
-                    "Pass identity=Identity(signer=...) to sign them."
-                )
-            return None
+        unsigned = identity is None or identity.signer is None
+        if unsigned and self._nc not in _warned_unsigned:
+            _warned_unsigned.add(self._nc)
+            log.warning(
+                "tracing is enabled but no identity signer is configured; edge "
+                "records are not published (consumers ignore unsigned records). "
+                "Pass identity=Identity(signer=...) to sign them."
+            )
         return _EdgePlan(
-            trace_options.edge_subject, thread_id, parent_id, root_id, tool_call_id, turn_count_hint
+            trace_options.edge_subject,
+            thread_id,
+            parent_id,
+            root_id,
+            tool_call_id,
+            turn_count_hint,
+            unsigned=unsigned,
         )
 
     async def _publish_edge(self, edge_publish: _EdgePlan) -> None:
@@ -734,9 +744,19 @@ class Agent:
         on ``(user, record_id)`` and a stream de-duplicating on the message
         id see the same record once.
 
-        Fail-open — tracing never fails a prompt.
+        Fail-open — tracing never fails a prompt. It is counted: every
+        record that goes out or fails to moves the process-wide
+        :func:`trace_record_counts`, which the ``AgentService`` reports on
+        its heartbeat.
         """
         subject = edge_publish.subject
+        if edge_publish.unsigned:
+            # Due now — the prompt is about to go out — and cannot go out:
+            # a drop, reported on the heartbeat as a record that was owed
+            # and never sent. Counted here rather than when the prompt was
+            # planned, so a prompt that is never sent counts nothing.
+            count_trace_record_dropped()
+            return
         try:
             plan = await plan_sender_header(
                 self._sender_identity, self._nc, subject, require_signed=True
@@ -754,7 +774,9 @@ class Agent:
             headers = await plan.build_headers(payload, nonce=record_id)
             headers[_MSG_ID_HEADER] = record_id
             await self._nc.publish(subject, payload, headers=headers)
+            count_trace_record_published()
         except Exception:
+            count_trace_record_dropped()
             log.exception("failed to publish edge record on %s", subject)
 
     async def _stream_prompt(

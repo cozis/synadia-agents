@@ -117,6 +117,7 @@ Restart with `openclaw gateway restart`.
 | `credentials`    | no       | —                            | Path to a `.creds` file (NGS, NKEY/JWT auth).                                                                                                 |
 | `senderIdentity` | no       | `off`                        | `signed` derives the agent signer from the same context/credentials snapshot used for the NATS connection; `off` performs no identity lookup. |
 | `minSenderTrust` | no       | `any`                        | `any` accepts headerless and valid signed prompts; `signed` requires a verified sender. This is independent of `senderIdentity`.              |
+| `tracing`        | no       | `off`                        | `on` adopts the caller's thread and publishes signed `served` records per prompt; needs `senderIdentity: "signed"`. See [Tracing](#tracing).  |
 | `description`    | no       | `OpenClaw agent <agentName>` | Shown in `$SRV.INFO` so callers know what they discovered.                                                                                    |
 | `enabled`        | no       | `true`                       | Set to `false` to keep the account block in config but skip connecting.                                                                       |
 
@@ -146,6 +147,7 @@ account config. The legacy vars keep working indefinitely.
 | `NATS_CREDS`             | `credentials`    | Alias — used only when `NATS_CREDENTIALS` is unset.     |
 | `NATS_SENDER_IDENTITY`   | `senderIdentity` | `off` or `signed`.                                      |
 | `NATS_MIN_SENDER_TRUST`  | `minSenderTrust` | `any` or `signed`; independent of sender identity.      |
+| `NATS_TRACING`           | `tracing`        | `off` or `on`.                                          |
 
 ### Resolution order
 
@@ -168,6 +170,37 @@ the plugin does not silently connect with a different credential source. NATS
 contexts support token, user/password, creds, nkey, JWT+seed, and TLS settings.
 Signed identity requires a user seed in that selected source (creds, nkey, or
 JWT+seed). It never accepts a second identity-only credentials path.
+
+### Tracing
+
+Tracing is off by default. With `tracing: "on"` (or `NATS_TRACING=on`) the
+plugin takes part in the SDKs' observability tracing extension:
+
+- A traced caller's thread and root ids arrive on the envelope and are
+  adopted; a prompt without them gets a freshly minted thread. A malformed id
+  is rejected with `400`, as the SDK does.
+- **OpenClaw's own model calls carry no thread id.** A channel plugin cannot
+  add headers to the harness's provider requests (only OpenClaw provider
+  plugins can), and OpenClaw sends no session header of its own, so nothing
+  on those calls names the thread. The plugin publishes the binding instead:
+  for every prompt, two signed `served` records on `TRACE.edges` — one
+  stamped with the prompt's arrival and one when the turn ends with `status`
+  `ok` or `error` — naming the thread and, as the harness thread id,
+  `openclaw:<OpenClaw session id>`: the session OpenClaw filed the message
+  under (a new one after `/new`, `/reset`, or a daily or idle reset). The
+  pair bounds the window in which the agent's model calls belong to the
+  thread.
+- The session is read from OpenClaw's session store once the turn has been
+  dispatched, so both records go out when the turn ends; their timestamps
+  still bound the turn. A prompt whose session cannot be read publishes
+  nothing and is served normally, with a warning in the gateway log.
+- Identity is required: records are signed with the host identity, so with
+  `senderIdentity: "off"` nothing is published, the gateway logs a warning at
+  startup, and every record owed counts as dropped on the heartbeat's
+  `records_dropped`.
+
+The plugin exposes no tool for prompting other agents, so it writes no `edge`
+records of its own.
 
 ## Verify
 
@@ -318,6 +351,8 @@ The agent subject layout has no per-tenant slot. For real isolation between tena
 - **`[nats] connection closed — agent is off-bus until restart`** — terminal. The client gave up reconnecting; the typical cause is repeated identical auth errors (the one path nats.js does not retry through, regardless of our defaults). Check `url` and (if using credentials) that the `.creds` file exists and is readable by the gateway process, then restart.
 - **Signed identity fails at startup** — the selected connection source must contain a user seed, and that credential identity must match the live connection. Do not configure a separate identity credentials file.
 - **A context error no longer falls back to another URL** — contexts are complete identity-bearing connection sources. Fix or unset the explicitly selected context instead of relying on an implicit downgrade.
+- **`tracing is on but senderIdentity is off`** — served records are signed with the host identity. Set `senderIdentity: "signed"` (with a credential source that carries a user seed) or turn tracing off.
+- **`no OpenClaw session found for …; no served records for this prompt`** — the plugin could not read the session OpenClaw filed the prompt under. The prompt was still served; check that the gateway's session store is readable and that the OpenClaw release is within the supported peer range.
 - **`nats req` returns only the initial ack and exits** — pass `--reply-timeout 30s` (default is 300 ms, shorter than the gap between the ack chunk and the LLM's first response). See the "Talk to your agent" section above for the full command. `--wait-for-empty` alone isn't enough.
 - **`nats req` hangs or returns nothing** — pass `--wait-for-empty`. The protocol ends streams with an empty-body message, not a single response.
 - **`400 attachment[N] has invalid base64 content`** — the caller emitted URL-safe base64 or unpadded output. `Buffer.from(bytes).toString("base64")` (Node) produces the right form.

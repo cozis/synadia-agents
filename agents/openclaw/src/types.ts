@@ -2,6 +2,7 @@ import type { NatsConnectionSource } from "@synadia-ai/agents";
 
 export type SenderIdentityMode = "off" | "signed";
 export type SenderTrustMode = "any" | "signed";
+export type TracingMode = "off" | "on";
 
 export interface NatsAccountConfig {
   url?: string;
@@ -28,6 +29,13 @@ export interface NatsAccountConfig {
   senderIdentity?: SenderIdentityMode;
   /** Minimum trust required for incoming prompts. Independent of senderIdentity. */
   minSenderTrust?: SenderTrustMode;
+  /**
+   * Observability tracing: adopt a traced caller's thread, or mint one for
+   * a prompt that carries none, and publish signed `served` records
+   * binding each prompt to the OpenClaw session it ran in. Needs
+   * `senderIdentity: "signed"` — the records are signed.
+   */
+  tracing?: TracingMode;
 }
 
 export interface ResolvedNatsAccount {
@@ -42,6 +50,7 @@ export interface ResolvedNatsAccount {
   connectionSource: NatsConnectionSource;
   senderIdentity: SenderIdentityMode;
   minSenderTrust: SenderTrustMode;
+  tracing: TracingMode;
   /** Resolved owner token (never empty; defaults to "default"). */
   owner: string;
   config: NatsAccountConfig;

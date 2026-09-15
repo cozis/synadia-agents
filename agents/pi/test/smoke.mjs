@@ -150,6 +150,10 @@ if (SIGNED) process.env.NATS_SENDER_IDENTITY = "signed";
 else delete process.env.NATS_SENDER_IDENTITY;
 if (STRICT) process.env.NATS_MIN_SENDER_TRUST = "signed";
 else delete process.env.NATS_MIN_SENDER_TRUST;
+// Tracing needs no identity: it only stamps headers on PI's model calls. The
+// strict run keeps it off to show the shipped default stamps nothing, even
+// for a caller that sends lineage.
+process.env.NATS_TRACING = STRICT ? "off" : "on";
 
 const { default: channelFactory, HEARTBEAT_INTERVAL_S } =
   await import("../extensions/nats-channel.ts");
@@ -542,6 +546,14 @@ if (STRICT) {
         for (let i = 0; i < 50 && pendingSendUserMessage === null; i++)
           await delay(20);
         assert.equal(pendingSendUserMessage, "signed hello");
+        // Tracing is off in this run: the SDK caller sent lineage, and the
+        // model call still carries none of it.
+        const headers = { "content-type": "application/json" };
+        await emit("before_provider_headers", {
+          type: "before_provider_headers",
+          headers,
+        });
+        assert.deepEqual(headers, { "content-type": "application/json" });
         await emit("message_update", {
           assistantMessageEvent: {
             type: "text_delta",
@@ -658,6 +670,85 @@ if (!STRICT)
 if (STRICT) {
   await emit("session_shutdown", {});
 } else {
+  await step(
+    "tracing: PI's model calls carry the caller's thread, a minted one otherwise, and nothing is published",
+    async () => {
+      const records = [];
+      const traceSub = obs.subscribe("TRACE.edges");
+      (async () => {
+        for await (const m of traceSub) {
+          records.push(JSON.parse(new TextDecoder().decode(m.data)));
+        }
+      })();
+      await obs.flush();
+
+      // One NATS prompt through PI: publish, wait for the injection, let
+      // PI assemble a model call's headers, finish the turn.
+      const serve = async (payload) => {
+        pendingSendUserMessage = null;
+        const inbox = createInbox();
+        const sub = obs.subscribe(inbox);
+        const done = (async () => {
+          for await (const msg of sub) {
+            const hasHeaders = msg.headers && [...msg.headers].length > 0;
+            if (msg.data.byteLength === 0 && !hasHeaders) {
+              sub.unsubscribe();
+              return;
+            }
+          }
+        })();
+        obs.publish(expectedSubject, payload, { reply: inbox });
+        for (let i = 0; i < 50 && pendingSendUserMessage === null; i++)
+          await delay(20);
+        assert.notEqual(pendingSendUserMessage, null, "prompt never reached PI");
+        const headers = { "content-type": "application/json" };
+        await emit("before_provider_headers", {
+          type: "before_provider_headers",
+          headers,
+        });
+        await emit("message_update", {
+          assistantMessageEvent: { type: "text_delta", delta: "ok" },
+        });
+        await emit("agent_end", {});
+        await Promise.race([done, delay(2000)]);
+        return headers;
+      };
+
+      // A traced caller: its thread and root are adopted verbatim.
+      const thread = "0123456789abcdef0123456789abcdef";
+      const root = "fedcba9876543210fedcba9876543210";
+      const adopted = await serve(
+        JSON.stringify({ prompt: "Trace me.", thread_id: thread, root_id: root }),
+      );
+      assert.equal(adopted["X-Synadia-Thread-ID"], thread);
+      assert.equal(adopted["X-Synadia-Root-ID"], root);
+      assert.equal(adopted["content-type"], "application/json");
+
+      // An untraced caller: the extension mints a thread that is its own root.
+      const minted = await serve("Trace me too.");
+      assert.match(minted["X-Synadia-Thread-ID"], /^[0-9a-f]{32}$/);
+      assert.equal(minted["X-Synadia-Root-ID"], minted["X-Synadia-Thread-ID"]);
+      assert.notEqual(minted["X-Synadia-Thread-ID"], thread);
+
+      // A model call PI makes with no NATS prompt active is left untouched.
+      const idle = {};
+      await emit("before_provider_headers", {
+        type: "before_provider_headers",
+        headers: idle,
+      });
+      assert.deepEqual(idle, {});
+
+      // PI behaves like an SDK agent: no served or edge record on the wire.
+      await delay(200);
+      traceSub.unsubscribe();
+      assert.deepEqual(
+        records.map((r) => r.kind),
+        [],
+        `expected nothing on TRACE.edges, got ${records.map((r) => r.kind).join(",")}`,
+      );
+    },
+  )();
+
   await step(
     "session_shutdown settles a queued AgentService response",
     async () => {

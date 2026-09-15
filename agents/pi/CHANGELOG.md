@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in tracing through `"tracing": "on"` / `NATS_TRACING=on` /
+  `/nats-configure tracing on`: the extension adopts or mints the prompt's
+  thread and, while a NATS prompt is PI's active turn, stamps
+  `X-Synadia-Thread-ID` and `X-Synadia-Root-ID` on PI's provider requests
+  through `before_provider_headers`, so a model proxy files them under the
+  caller's thread as for an SDK-built agent. Propagate-only: no record is
+  published and no sender identity is needed. With tracing off nothing is
+  stamped, even for a caller that sent lineage. The prompt is handed to PI
+  inside the request's trace scope, so an SDK client used by a PI tool
+  during the turn inherits the right thread.
+
 ### Changed
 
 - Migrated protocol hosting to `AgentService`. Sender admission now happens

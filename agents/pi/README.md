@@ -63,6 +63,7 @@ Config file lives at `~/.pi/agent/nats-channel.json`:
 | `owner`          | no       | `$USER`                   | The 4th subject token. Override to scope the session to a service account, deployment, or tenant instead of the OS user — sanitized to a legal subject token. The owner env vars (below) take precedence over this field. |
 | `senderIdentity` | no       | `"off"`                   | `"signed"` registers PI with the NATS user identity from the selected connection credentials.                                                                                                                             |
 | `minSenderTrust` | no       | `"any"`                   | `"signed"` accepts only prompts with a signature-valid sender. This is independent of `senderIdentity`.                                                                                                                   |
+| `tracing`        | no       | `"off"`                   | `"on"` adopts or mints the prompt's thread and stamps it on PI's model calls. See [Tracing](#tracing).                                                                                                                     |
 
 The `owner` token (4th) defaults to `$USER` but is overridable via the `SYNADIA_PI_OWNER` / `SYNADIA_OWNER` env vars (or the legacy `NATS_PI_OWNER`), or the `owner` config field — env wins over config. Useful for service-account or deployment-scoped sessions. For multi-tenant isolation, see [Multi-tenancy](#multi-tenancy) below.
 
@@ -79,6 +80,7 @@ identity and trust use the NATS-wide variables shown below.
 | `NATS_URL`              | raw URL (no auth context) | Used only when `NATS_CONTEXT` and `config.context` are both unset.                                                                                                          |
 | `NATS_SENDER_IDENTITY`  | `senderIdentity`          | `off` or `signed`; overrides the config file.                                                                                                                               |
 | `NATS_MIN_SENDER_TRUST` | `minSenderTrust`          | `any` or `signed`; overrides the config file.                                                                                                                               |
+| `NATS_TRACING`          | `tracing`                 | `off` or `on`; overrides the config file.                                                                                                                                   |
 | `SYNADIA_PI_OWNER`      | `owner`                   | Per-agent override — highest owner precedence.                                                                                                                              |
 | `SYNADIA_OWNER`         | `owner`                   | Fleet-wide override — below the per-agent var.                                                                                                                              |
 | `NATS_PI_OWNER`         | `owner`                   | Legacy alias, still honored below the `SYNADIA_*` vars. **Now wins over the `owner` config field** — this precedence flipped with the `SYNADIA_*` adoption (see CHANGELOG). |
@@ -98,6 +100,8 @@ For `sessionName`: `$SYNADIA_PI_NAME` > `$SYNADIA_NAME` > `$NATS_SESSION_NAME` (
 For `owner`: `$SYNADIA_PI_OWNER` > `$SYNADIA_OWNER` > `$NATS_PI_OWNER` (legacy) > `config.owner` > `$USER` > `unknown`.
 
 For sender identity and trust: `$NATS_SENDER_IDENTITY` > `config.senderIdentity` > `off`, and `$NATS_MIN_SENDER_TRUST` > `config.minSenderTrust` > `any`.
+
+For tracing: `$NATS_TRACING` > `config.tracing` > `off`.
 
 ### Optional sender identity
 
@@ -125,6 +129,37 @@ Incoming policy is a separate choice. To require every caller to use a signature
 
 Either option can be enabled without the other. Invalid signatures are rejected before PI receives the prompt and before an acknowledgement is sent. For accepted requests, `/nats-status` can show the active sender with its trust class; sender metadata is never added to the model prompt. Prompt responses and mid-stream query replies are not independently signed.
 
+### Tracing
+
+Tracing is off by default. With `"tracing": "on"` (or `NATS_TRACING=on`) the
+extension takes part in the SDKs' observability tracing extension the way an
+SDK-built agent does:
+
+- A traced caller's thread and root ids arrive on the envelope and are
+  adopted; a prompt without them gets a freshly minted thread. A malformed id
+  is rejected with `400`, as the SDK does.
+- **PI's own model calls carry the thread.** The prompt handler computes the
+  SDK's `X-Synadia-Thread-ID` and `X-Synadia-Root-ID` headers for the prompt
+  and keeps them with the queued request; PI fires `before_provider_headers`
+  before every provider request, and while that request is PI's active turn
+  the extension stamps the headers on it. A model proxy files those calls
+  under the caller's thread. Calls PI makes when no NATS prompt is active,
+  including the compaction it may run before starting one, are left
+  untouched.
+- The prompt is handed to PI inside the request's trace scope, so an SDK
+  client a PI tool might use during the turn inherits this prompt's thread.
+- With tracing off nothing is stamped, even for a caller that sent lineage:
+  the service still adopts the ids for the envelope, the model never sees
+  them.
+- Nothing is published on NATS for it, and no sender identity is needed. The
+  extension exposes no tool for prompting other agents, so it writes no
+  `edge` records; the SDK's propagate-only mode is what tracing turns on.
+  `/nats-status` reports the setting.
+
+What counts as the active turn is the extension's own bookkeeping — PI gives
+an extension no run identity — so see [Limitations](#limitations) for the
+cases where a local action shares the turn with a remote prompt.
+
 ### In-PI commands
 
 Available inside a running PI session:
@@ -140,6 +175,7 @@ Available inside a running PI session:
 | `/nats-configure owner clear`            | Revert to `$USER`                                                                   |
 | `/nats-configure identity <off\|signed>` | Disable or enable connection-bound registration identity                            |
 | `/nats-configure trust <any\|signed>`    | Accept any sender or require a signature-valid sender                               |
+| `/nats-configure tracing <off\|on>`      | Disable or enable observability tracing (see [Tracing](#tracing))                   |
 
 `/nats-configure` writes the config file; restart PI to apply. (Live reconnect on context switch is a deferral — see [Limitations](#limitations).)
 
@@ -248,7 +284,7 @@ Caller-side limits (rejected with `400` if violated):
 
 ## Concurrency
 
-Each PI session processes one NATS request at a time. Additional requests queue until the session is idle. The local TUI input and inbound NATS prompts share the same agent — typing locally during a NATS-driven turn means that local output flows to the NATS reply alongside the remote prompt's response.
+Each PI session processes one NATS request at a time. Additional requests queue until the session is idle. The local TUI input and inbound NATS prompts share the same agent — typing locally during a NATS-driven turn means that local output flows to the NATS reply alongside the remote prompt's response, and with tracing on its model calls carry the remote prompt's thread (see [Limitations](#limitations)).
 
 Queued prompts keep their AgentService response open until PI finishes the corresponding turn. The service owns admission, acknowledgement, keep-alive messages, errors, and the final stream terminator. Requests that expire in the local queue or remain during shutdown are explicitly settled instead of being silently dropped.
 
@@ -264,7 +300,8 @@ Deliberate deferrals:
 
 - **No mid-stream queries.** PI doesn't initiate permission prompts or clarifications over this channel; the protocol's `query` chunk type is supported by callers but never emitted by the PI side.
 - **No live reconfigure.** `/nats-configure` writes the config file; PI must be restarted for the new context or session name to apply.
-- **TUI bleed.** Local typing during a NATS-driven turn flows to the NATS reply subject as part of the response.
+- **TUI bleed.** Local typing during a NATS-driven turn is steered into that turn: its output flows to the NATS reply subject as part of the response and, with tracing on, its model calls are filed under the remote prompt's thread. PI gives an extension no way to tell the two apart inside one run.
+- **Refused injections.** PI accepts an injected prompt asynchronously and reports a refusal (compaction in progress, no model configured) only to its own log. Such a request stays active until PI's next own turn settles it or it expires; later prompts queue behind it.
 
 ## Troubleshooting
 

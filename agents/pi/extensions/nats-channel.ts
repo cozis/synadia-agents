@@ -24,6 +24,7 @@
  * small-file story for v0.3.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -36,6 +37,8 @@ import {
   AgentSubject,
   SDK_PROTOCOL_VERSION,
   SERVICE_NAME,
+  activeTrace,
+  bindActiveTrace,
   formatSender,
   parseHumanBytes,
   resolveNatsConnectionBundle,
@@ -43,6 +46,8 @@ import {
   type MinSenderTrust,
   type NatsConnectionBundle,
   type NatsConnectionSource,
+  type TraceOptions,
+  type TraceScope,
 } from "@synadia-ai/agents";
 import {
   AgentService,
@@ -103,6 +108,7 @@ const DEFAULT_NATS_URL = "demo.nats.io";
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type SenderIdentityMode = "off" | "signed";
+export type TracingMode = "off" | "on";
 
 export type PiNatsConfig = {
   context?: string;
@@ -110,6 +116,7 @@ export type PiNatsConfig = {
   owner?: string;
   senderIdentity?: SenderIdentityMode;
   minSenderTrust?: MinSenderTrust;
+  tracing?: TracingMode;
 };
 
 export type PiConnectionSettings = {
@@ -117,7 +124,40 @@ export type PiConnectionSettings = {
   readonly contextLabel: string;
   readonly senderIdentity: SenderIdentityMode;
   readonly minSenderTrust: MinSenderTrust;
+  readonly tracing: TracingMode;
 };
+
+/**
+ * The SDK trace options for the resolved settings; `undefined` when off.
+ * Propagate-only: PI adopts or mints the thread and stamps it on its model
+ * calls, but publishes no edge records — the extension exposes no tool
+ * that prompts other agents, so there is nothing to record.
+ */
+export function traceOptionsFor(
+  settings: Pick<PiConnectionSettings, "tracing">,
+): TraceOptions | undefined {
+  return settings.tracing === "on" ? { edgeSubject: null } : undefined;
+}
+
+// A run function bound to the async context the extension loaded in — one
+// with no trace scope. Prompts are handed to PI from inside another
+// prompt's handler or settle hook, and PI's loop would otherwise inherit
+// that prompt's scope. Absent on runtimes without the snapshot API; then
+// the injection runs in whatever context called it.
+const neutralContext: (<T>(fn: () => T) => T) | undefined =
+  typeof AsyncLocalStorage.snapshot === "function"
+    ? AsyncLocalStorage.snapshot()
+    : undefined;
+
+/**
+ * Hand a prompt to PI in the request's own trace scope, so PI's loop — and
+ * any SDK client a PI tool might use inside it — sees this request's
+ * thread and nothing else's. Exported for tests.
+ */
+export function injectInScope<T>(scope: TraceScope | undefined, fn: () => T): T {
+  const run = scope === undefined ? fn : () => bindActiveTrace(scope, fn);
+  return neutralContext === undefined ? run() : neutralContext(run);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure helpers
@@ -160,6 +200,12 @@ export function resolveConnectionSettings(
       env.NATS_MIN_SENDER_TRUST ?? config.minSenderTrust,
       "any",
       ["any", "signed"],
+    ),
+    tracing: parseChoice<TracingMode>(
+      "NATS_TRACING/tracing",
+      env.NATS_TRACING ?? config.tracing,
+      "off",
+      ["off", "on"],
     ),
   };
 }
@@ -233,6 +279,7 @@ export default function (pi: ExtensionAPI) {
   let contextLabel: string | undefined;
   let senderIdentity: SenderIdentityMode = "off";
   let minSenderTrust: MinSenderTrust = "any";
+  let tracing: TracingMode = "off";
   // Filled in after connect from `nc.info?.max_payload`; falls back to the
   // SDK's `DEFAULT_MAX_PAYLOAD` if the server INFO block is unavailable.
   let maxPayloadBytes = DEFAULT_MAX_PAYLOAD_BYTES_FALLBACK;
@@ -298,7 +345,7 @@ export default function (pi: ExtensionAPI) {
       try {
         // Sender metadata deliberately stays on PromptResponse and the safe
         // `/nats-status` diagnostic. It is never inserted into model input.
-        pi.sendUserMessage(finalPrompt);
+        injectInScope(pending.trace, () => pi.sendUserMessage(finalPrompt));
         return;
       } catch (e) {
         promptQueue.requeueActive();
@@ -602,6 +649,7 @@ export default function (pi: ExtensionAPI) {
     let startingService: AgentService | undefined;
     try {
       const signer = connectionBundle?.signer;
+      const traceOptions = traceOptionsFor(settings);
       if (settings.senderIdentity === "signed" && !signer) {
         throw new Error(
           "signed sender identity resolved without a connection-bound signer",
@@ -620,13 +668,30 @@ export default function (pi: ExtensionAPI) {
         keepaliveIntervalS: KEEPALIVE_INTERVAL_S,
         minSenderTrust: settings.minSenderTrust,
         ...(signer ? { identity: { signer } } : {}),
+        // Tracing: adopt the caller's thread and root, or mint them for an
+        // envelope that carries none, exactly as an SDK-built agent does.
+        ...(traceOptions ? { trace: traceOptions } : {}),
         extraMetadata: {
           cwd: ctx.cwd,
         },
       });
       startingService = agentService;
       agentService.onPrompt((envelope, response) => {
-        const request = promptQueue.enqueue(envelope, response);
+        // The handler runs inside the trace scope AgentService bound for
+        // this prompt, so the headers for its model calls are known now.
+        // They ride on the queued request: PI assembles its provider
+        // requests on its own event loop, outside that scope. The scope
+        // itself rides along too, to hand PI the prompt inside it. With
+        // tracing off nothing is stamped, even for a caller that sent
+        // lineage: the service still adopts it for the envelope, the model
+        // never sees it.
+        const request = promptQueue.enqueue(
+          envelope,
+          response,
+          Date.now(),
+          traceOptions ? response.traceHeaders() : {},
+          traceOptions ? activeTrace() : undefined,
+        );
         drainQueue();
         return request.completion;
       });
@@ -654,7 +719,7 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setStatus("nats", `NATS: ${promptSubject}`);
     ctx.ui.notify(
       `Connected to NATS (${contextLabel}) as ${promptSubject} ` +
-        `(sender_identity=${settings.senderIdentity}, min_sender_trust=${settings.minSenderTrust})`,
+        `(sender_identity=${settings.senderIdentity}, min_sender_trust=${settings.minSenderTrust}, tracing=${settings.tracing})`,
       "info",
     );
 
@@ -679,6 +744,7 @@ export default function (pi: ExtensionAPI) {
     contextLabel = settings.contextLabel;
     senderIdentity = settings.senderIdentity;
     minSenderTrust = settings.minSenderTrust;
+    tracing = settings.tracing;
 
     // 2. Resolve owner + session base name via the SYNADIA_* identity
     //    convention shared across agents/*: per-agent env var >
@@ -720,6 +786,18 @@ export default function (pi: ExtensionAPI) {
       if (connectTask === task) connectTask = undefined;
     };
     void task.then(clearTask, clearTask);
+  });
+
+  // PI assembles the headers of every provider request on its own event
+  // loop, outside the trace scope AgentService bound for the prompt. The
+  // headers were computed inside that scope when the request was queued,
+  // and the request PI is serving is the active one: PI runs one agent
+  // loop, and the queue only hands it a prompt when it is idle. A model
+  // call with no NATS prompt active is left untouched.
+  pi.on("before_provider_headers", async (event) => {
+    const active = promptQueue.active;
+    if (!active) return;
+    Object.assign(event.headers, active.traceHeaders);
   });
 
   pi.on("message_update", async (event) => {
@@ -777,6 +855,7 @@ export default function (pi: ExtensionAPI) {
         `Owner: ${owner}`,
         `Sender identity: ${senderIdentity}${service?.identity ? ` (${service.identity})` : ""}`,
         `Minimum sender trust: ${minSenderTrust}`,
+        `Tracing: ${tracing}`,
         `Pending: ${promptQueue.size}`,
         `Queued: ${promptQueue.queuedCount}`,
         `Active: ${active?.id ?? "none"}`,
@@ -790,7 +869,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("nats-configure", {
     description:
-      "Show or update NATS channel configuration (usage: /nats-configure [ <context> | session <name|clear> | owner <name|clear> | identity <off|signed> | trust <any|signed> ])",
+      "Show or update NATS channel configuration (usage: /nats-configure [ <context> | session <name|clear> | owner <name|clear> | identity <off|signed> | trust <any|signed> | tracing <off|on> ])",
     handler: async (args, ctx) => {
       const current = loadConfig();
       const tokens = args.trim().split(/\s+/).filter(Boolean);
@@ -802,6 +881,7 @@ export default function (pi: ExtensionAPI) {
           `Session: ${current.sessionName ?? "(auto from cwd)"}`,
           `Sender identity: ${current.senderIdentity ?? "off"}`,
           `Minimum sender trust: ${current.minSenderTrust ?? "any"}`,
+          `Tracing: ${current.tracing ?? "off"}`,
         ];
         ctx.ui.notify(`NATS config — ${lines.join(" • ")}`, "info");
         return;
@@ -869,6 +949,21 @@ export default function (pi: ExtensionAPI) {
             "any",
             ["any", "signed"],
           );
+          changed = true;
+        } catch (e) {
+          ctx.ui.notify(`NATS: ${(e as Error).message}`, "warning");
+          return;
+        }
+      } else if (tokens[0] === "tracing") {
+        if (!tokens[1]) {
+          ctx.ui.notify("Usage: /nats-configure tracing <off|on>", "warning");
+          return;
+        }
+        try {
+          next.tracing = parseChoice<TracingMode>("tracing", tokens[1], "off", [
+            "off",
+            "on",
+          ]);
           changed = true;
         } catch (e) {
           ctx.ui.notify(`NATS: ${(e as Error).message}`, "warning");

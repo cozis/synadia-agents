@@ -52,7 +52,7 @@ and registers a micro service on `agents.prompt.cc.<owner>.<name>`, where
 **4. (Optional) Configure the channel.**
 
 The `/nats-channel:configure` skill manages connection, session naming,
-sender identity, inbound trust, and permissions. All state lives in
+sender identity, inbound trust, tracing, and permissions. All state lives in
 `~/.claude/channels/nats/config.json`.
 
 | Command | Description |
@@ -68,6 +68,8 @@ sender identity, inbound trust, and permissions. All state lives in
 | `/nats-channel:configure identity signed` | Register a signed identity derived from the selected connection credentials |
 | `/nats-channel:configure trust any` | Accept headerless, claimed, and verified senders (default) |
 | `/nats-channel:configure trust signed` | Require a verified signed sender before Claude sees a prompt |
+| `/nats-channel:configure tracing off` | Publish no trace records (default) |
+| `/nats-channel:configure tracing on` | Adopt each prompt's thread and publish signed `served` records binding it to the Claude Code session (needs `identity signed`) |
 | `/nats-channel:configure permissions terminal` | Prompt for permissions in the terminal (default) |
 | `/nats-channel:configure permissions query` | Relay permission prompts as protocol query chunks |
 | `/nats-channel:configure permissions clear` | Reset permissions to default |
@@ -279,6 +281,68 @@ signed callers, and an identified channel remains permissive unless
 `minSenderTrust` is explicitly set to `"signed"`. Responses and permission
 query replies are not independently signed.
 
+## Tracing
+
+Tracing is off by default. With `"tracing": "on"` (or `NATS_TRACING=on`) the
+channel takes part in the SDKs' observability tracing extension:
+
+- A traced caller's `thread_id` and `root_id` arrive on the envelope and are
+  adopted; a prompt without them gets a freshly minted thread. A malformed id
+  is rejected with `400`, as the SDK does. Trace ids never enter the
+  model-visible prompt or channel metadata.
+- **The session's model calls are bound to the thread by `served` records.**
+  An SDK-built agent stamps the thread on its own model requests
+  (`PromptResponse.traceHeaders()`); an MCP server cannot do that for Claude
+  Code, whose requests carry its own session id (`x-claude-code-session-id`,
+  set per session, not per prompt). So for every prompt the channel
+  publishes two signed `served` records on `TRACE.edges`: one when the
+  prompt arrives, one when the turn ends, with `status` `ok`, `error` (the
+  turn failed, or the channel shut down before Claude answered), or
+  `timeout` (the 30-minute request TTL). Both name the caller's thread and
+  `harness_thread_id: claude:<session id>`; the model calls the session made
+  between the two timestamps are the thread's. Claude Code subagents send
+  the same session id plus their own agent id (`x-claude-code-agent-id`), so
+  their calls can be told apart from the session's own.
+- **The turn ends at Claude Code's `Stop`, not at the reply.** After the
+  `reply` tool completes a request, Claude Code goes on to write its closing
+  text, one more model call. The channel's `Stop` hook records when the turn
+  is over, and the `end` record waits for it (at most two minutes) and
+  carries that time. Without the hooks, when no `Stop` comes within the
+  limit (Claude Code fires none when the turn is interrupted), or when the
+  channel shuts down while waiting, the reply is the end. A failed or
+  expired request ends at once.
+- **Identity is required.** The records are signed with the host identity,
+  so with `senderIdentity: "off"` nothing is published, the channel logs
+  `tracing is on but senderIdentity is off; trace records are signed, so
+  none will be published` at startup, and every record owed counts as
+  dropped. With tracing on, the heartbeat and `status` reply carry the
+  process-wide `records_published` and `records_dropped` counts.
+- The channel exposes no tool for prompting other agents, so it writes no
+  `edge` records of its own. An SDK client Claude Code runs from a shell
+  starts a new tree.
+
+**How the channel follows the session.** Claude Code (2.1 as of this
+writing) sets `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID` in the environment
+of the MCP server it spawns, and the session id is the baseline. `/clear`
+starts a new session with a new id but keeps the server, so the plugin
+ships hooks (`hooks/hooks.json`, running `hooks/session-event.ts` with
+bun): `SessionStart` records the current session id under
+`<state dir>/sessions/<Claude Code pid>`, and `Stop` records the turn end
+next to it. The hooks run on every session start and turn end but write
+nothing while tracing is off. The server reads the session file when a
+prompt arrives and falls back to its environment. The files outlive the
+server, so a restarted MCP server still follows the session; a server
+starting with tracing on removes the files of Claude Code processes that
+no longer exist. The session is bound when the prompt arrives, so a
+`/clear` during a turn does not move its binding. Without the
+hooks (`disableAllHooks` in the Claude Code settings) a prompt after
+`/clear` is filed under the session the server started with, and the reply
+is the turn end.
+
+**Limits of the window.** Everything the session does between the two
+records is filed under the prompt: local typing during a NATS-driven turn,
+and a second NATS prompt answered in the same turn, share the window.
+
 ## Anthropic auth
 
 Set `ANTHROPIC_API_KEY` in your environment before launching `claude`.
@@ -295,8 +359,10 @@ State lives in `~/.claude/channels/nats/`:
 
 | File | Purpose |
 | --- | --- |
-| `config.json` | Selected NATS context, session name override, and permission settings |
+| `config.json` | Selected NATS context, owner and session name overrides, identity, trust, tracing, and permission settings |
 | `attachments/<request_id>/` | Per-request staged attachments; auto-cleaned on reply completion |
+| `sessions/<Claude Code pid>` | Current Claude Code session id, written by the `SessionStart` hook; swept once its Claude Code process is gone |
+| `sessions/<Claude Code pid>.stop` | Time of the last turn end, written by the `Stop` hook; swept with it |
 
 NATS CLI contexts live in `~/.config/nats/context/<name>.json`.
 
@@ -309,6 +375,7 @@ NATS CLI contexts live in `~/.config/nats/context/<name>.json`.
   "sessionName": "my-session",
   "senderIdentity": "signed",
   "minSenderTrust": "any",
+  "tracing": "on",
   "permissions": {
     "mode": "query"
   }
@@ -322,13 +389,15 @@ NATS CLI contexts live in `~/.config/nats/context/<name>.json`.
 | `sessionName` | CWD basename | Override the session name |
 | `senderIdentity` | `off` | `off` or `signed`; signed mode uses the selected connection credentials |
 | `minSenderTrust` | `any` | `any` or `signed`; controls inbound prompt admission independently |
+| `tracing` | `off` | `off` or `on`; publishes signed `served` records per prompt (needs `senderIdentity: "signed"`). See [Tracing](#tracing) |
 | `permissions.mode` | `terminal` | `terminal` or `query` (`nats` accepted as legacy alias for `query`) |
 
 ### Environment variables
 
 Owner and session vars follow the `SYNADIA_*` convention shared across the
-agent plugins. Connection, identity, and trust use the `NATS_*` variables
-shown below; environment settings override the corresponding config fields.
+agent plugins. Connection, identity, trust, and tracing use the `NATS_*`
+variables shown below; environment settings override the corresponding config
+fields.
 
 | Variable | Overrides | Default |
 | --- | --- | --- |
@@ -339,5 +408,7 @@ shown below; environment settings override the corresponding config fields.
 | `NATS_URL` | Raw NATS URL; used when no context is set via env or config | `demo.nats.io` |
 | `NATS_SENDER_IDENTITY` | Host identity mode: `off` or `signed` | config `senderIdentity`, then `off` |
 | `NATS_MIN_SENDER_TRUST` | Inbound sender policy: `any` or `signed` | config `minSenderTrust`, then `any` |
+| `NATS_TRACING` | Tracing: `off` or `on` | config `tracing`, then `off` |
+| `CLAUDE_CODE_SESSION_ID` | Set by Claude Code, not by you: the session id the channel starts from; the `SessionStart` hook's file overrides it after `/clear` | — |
 | `NATS_STATE_DIR` | State directory location | `~/.claude/channels/nats` |
 | `CLAUDE_CWD` | Working directory whose basename seeds the default session name | — |

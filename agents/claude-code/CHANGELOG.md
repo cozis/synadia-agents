@@ -15,9 +15,14 @@ All notable changes to the Claude Code NATS channel are documented here.
   `TRACE.edges`, binding the thread to `claude:<session id>` with the outcome (`ok`, `error`,
   `timeout`). Requires `senderIdentity: "signed"`; without it nothing is published, startup
   warns, and the records owed count as dropped on the heartbeat.
-- A `SessionStart` hook (`hooks/hooks.json` → `hooks/session-start.ts`) records the current
-  Claude Code session id under `<state dir>/sessions/<Claude Code pid>` so the binding follows
-  `/clear`; the server falls back to `CLAUDE_CODE_SESSION_ID` and removes the file on shutdown.
+- Plugin hooks (`hooks/hooks.json` → `hooks/session-event.ts`): `SessionStart` records the
+  current Claude Code session id under `<state dir>/sessions/<Claude Code pid>` so the binding
+  follows `/clear` (the server falls back to `CLAUDE_CODE_SESSION_ID`), and `Stop` records the
+  turn end, which the served `end` record waits for (at most two minutes) and carries, so the
+  closing model call Claude Code makes after the reply falls inside the window. Both files are
+  removed on shutdown.
+- The server's instructions now say the `reply` tool may be listed as deferred and must be
+  loaded before answering; Claude answered its first channel message in the terminal only.
 
 ### Changed
 

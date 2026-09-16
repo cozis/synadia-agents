@@ -5,15 +5,18 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  hooksActive,
   isClaudeSessionId,
+  readTurnStop,
   resolveClaudeSessionId,
   sessionFilePath,
   sessionsDir,
+  stopFilePath,
 } from '../src/session-id.js'
 
 const SESSION = '317f624b-c7c6-4b27-936b-c0de80892e6d'
 const NEWER = '9d0b2c4e-1111-4222-8333-444455556666'
-const HOOK = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'session-start.ts')
+const HOOK = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'session-event.ts')
 
 function withStateDir(run: (stateDir: string) => void): void {
   const stateDir = mkdtempSync(join(tmpdir(), 'claude-channel-session-'))
@@ -80,7 +83,35 @@ describe('resolveClaudeSessionId', () => {
   })
 })
 
-describe('the SessionStart hook', () => {
+describe('readTurnStop and hooksActive', () => {
+  test('hooks are active once the SessionStart file exists', () => {
+    withStateDir(stateDir => {
+      const source = { env: {}, stateDir, parentPid: 4242 }
+      expect(hooksActive(source)).toBe(false)
+      mkdirSync(sessionsDir(stateDir), { recursive: true })
+      writeFileSync(sessionFilePath(stateDir, 4242), `${SESSION}\n`)
+      expect(hooksActive(source)).toBe(true)
+    })
+  })
+
+  test('reads the Stop file as unix seconds with its mtime, ignores garbage', () => {
+    withStateDir(stateDir => {
+      const source = { env: {}, stateDir, parentPid: 4242 }
+      expect(readTurnStop(source)).toBeUndefined()
+      mkdirSync(sessionsDir(stateDir), { recursive: true })
+      writeFileSync(stopFilePath(stateDir, 4242), '1700000000\n')
+      const stop = readTurnStop(source)
+      expect(stop?.ts).toBe(1_700_000_000)
+      expect(stop?.atMs).toBeGreaterThan(Date.now() - 10_000)
+      writeFileSync(stopFilePath(stateDir, 4242), '-5\n')
+      expect(readTurnStop(source)).toBeUndefined()
+      writeFileSync(stopFilePath(stateDir, 4242), 'later\n')
+      expect(readTurnStop(source)).toBeUndefined()
+    })
+  })
+})
+
+describe('the hook script', () => {
   function runHook(input: string, env: Record<string, string>) {
     return spawnSync('bun', [HOOK], {
       input,
@@ -100,6 +131,22 @@ describe('the SessionStart hook', () => {
       expect(result.stdout).toBe('')
       expect(readFileSync(sessionFilePath(stateDir, 4242), 'utf8')).toBe(`${NEWER}\n`)
       expect(resolveClaudeSessionId({ env: {}, stateDir, parentPid: 4242 })).toBe(NEWER)
+    })
+  })
+
+  test('records a turn end on Stop, keyed by the Claude Code process', () => {
+    withStateDir(stateDir => {
+      const before = Math.floor(Date.now() / 1000)
+      const result = runHook(
+        JSON.stringify({ session_id: NEWER, hook_event_name: 'Stop', stop_hook_active: false }),
+        { CLAUDE_PID: '4242', NATS_STATE_DIR: stateDir },
+      )
+      expect(result.status).toBe(0)
+      expect(result.stdout).toBe('')
+      const stop = readTurnStop({ env: {}, stateDir, parentPid: 4242 })
+      expect(stop?.ts).toBeGreaterThanOrEqual(before)
+      // A Stop names no session: the session file is the SessionStart hook's.
+      expect(existsSync(sessionFilePath(stateDir, 4242))).toBe(false)
     })
   })
 

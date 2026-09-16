@@ -144,6 +144,23 @@ describe('ServedPublisher', () => {
     expect(warnings).toEqual([])
   })
 
+  test('end takes the turn end it is given, else now', async () => {
+    const { served, published } = publisher()
+    const turn = served.beginTurn(scope())!
+    turn.bind(SESSION)
+    turn.settle('ok', 1_700_000_500)
+    await served.flush()
+    expect(decode(published[1]!.payload)).toMatchObject({ phase: 'end', ts: 1_700_000_500 })
+
+    const later = publisher()
+    const now = unixSeconds()
+    const t2 = later.served.beginTurn(scope())!
+    t2.bind(SESSION)
+    t2.settle('ok')
+    await later.served.flush()
+    expect(decode(later.published[1]!.payload).ts as number).toBeGreaterThanOrEqual(now)
+  })
+
   test('stamps start with the arrival, not the moment the session is bound', async () => {
     const { served, published } = publisher()
     const arrived = unixSeconds()

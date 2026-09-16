@@ -46,8 +46,10 @@ import {
 import {
   resolveClaudeSessionId,
   sessionFilePath,
+  stopFilePath,
   type SessionIdSource,
 } from "./src/session-id.js";
+import { turnStopWaiter, type TurnStopWaiter } from "./src/turn-stop.js";
 
 const AGENT_ID = "claude-code";
 const AGENT_SUBJECT_TOKEN = "cc";
@@ -337,6 +339,9 @@ async function run(): Promise<void> {
     );
     const maxPayloadBytes = nc.info?.max_payload ?? DEFAULT_MAX_PAYLOAD_BYTES;
     const pendingRequests = new Map<string, PendingRequest>();
+    // Tracing: served pairs of answered prompts waiting for the turn's Stop,
+    // each with the promise that settles its pair.
+    const stopWaiters = new Map<TurnStopWaiter, Promise<void>>();
     let requestCounter = 0;
     let lastActiveRequestId: string | undefined;
     let shuttingDown = false;
@@ -371,6 +376,8 @@ async function run(): Promise<void> {
           "Use request_info only when sender identity is relevant; identity is never inserted into the incoming message automatically.",
           "",
           "Use reply with the request_id. done=false streams an intermediate response; done=true completes the request.",
+          "",
+          "The reply tool may be listed as a deferred tool. Load it (ToolSearch) and call it; never answer a channel message only in this session's own output, which the sender cannot see.",
         ].join("\n"),
       },
     );
@@ -479,9 +486,26 @@ async function run(): Promise<void> {
         throw error;
       } finally {
         removePending(requestId);
-        // The turn is over either way: `end` carries its outcome.
-        pending.served?.settle(pending.outcome);
         handlerClosed.resolve();
+        // Tracing: `end` carries the outcome. An answered prompt's turn
+        // goes on past the reply — Claude Code still writes its closing
+        // text — so `end` waits for the Stop hook (bounded) and takes its
+        // time; a failed or expired turn ends now.
+        if (pending.served !== undefined) {
+          if (pending.outcome === "ok" && !shuttingDown) {
+            const waiter = turnStopWaiter(sessionSource, Date.now());
+            const served = pending.served;
+            stopWaiters.set(
+              waiter,
+              waiter.wait().then((stoppedAt) => {
+                stopWaiters.delete(waiter);
+                served.settle("ok", stoppedAt);
+              }),
+            );
+          } else {
+            pending.served.settle(pending.outcome);
+          }
+        }
       }
     });
 
@@ -663,14 +687,21 @@ async function run(): Promise<void> {
         // Let AgentService turn rejected handlers into their error frame + terminator.
         await Promise.resolve();
         await Promise.resolve();
-        // The served `end` records of the requests just failed are signed
-        // asynchronously; let them reach the connection before it flushes.
+        // Prompts answered but still waiting for their turn's Stop end now;
+        // their `end` records, and those of the requests just failed, are
+        // signed asynchronously, so let them reach the connection before
+        // it flushes.
+        for (const waiter of stopWaiters.keys()) waiter.cancel();
+        await Promise.allSettled(stopWaiters.values());
         await served?.flush();
         await nc!.flush().catch(() => undefined);
         await mcp!.close().catch(() => undefined);
         // The SessionStart hook's file for this Claude Code process; a
         // restarted server reads the session id from its environment.
         rmSync(sessionFilePath(stateDir, sessionSource.parentPid), {
+          force: true,
+        });
+        rmSync(stopFilePath(stateDir, sessionSource.parentPid), {
           force: true,
         });
         if (!(await closeConnectionBeforeWipe(nc, bundle!, true))) {

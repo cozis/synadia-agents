@@ -120,13 +120,14 @@ export interface ServedPublisherOptions {
 /**
  * One prompt's served pair. `bind` names the session once and publishes
  * `start` stamped with the prompt's arrival; `settle` records the outcome
- * when the turn ends and publishes `end` if the session is known. A
- * session bound after settling is refused: the pair is the turn's window,
- * not something to backfill.
+ * when the turn ends, stamped with that moment, and publishes `end` if
+ * the session is known. A session bound after settling is refused: the
+ * pair is the turn's window, not something to backfill.
  */
 export interface ServedTurn {
   bind(sessionId: string | undefined): void
-  settle(status: ServedStatus): void
+  /** End the turn; `ts` is the turn's end in unix seconds, now by default. */
+  settle(status: ServedStatus, ts?: number): void
 }
 
 const NATS_MSG_ID_HEADER = 'Nats-Msg-Id'
@@ -174,11 +175,11 @@ export class ServedPublisher {
         sessionId = id
         this.publish(scope, id, 'start', undefined, arrivedAt)
       },
-      settle: (status: ServedStatus): void => {
+      settle: (status: ServedStatus, ts: number = unixSeconds()): void => {
         if (settled) return
         settled = true
         if (sessionId !== undefined) {
-          this.publish(scope, sessionId, 'end', status, unixSeconds())
+          this.publish(scope, sessionId, 'end', status, ts)
         }
       },
     }

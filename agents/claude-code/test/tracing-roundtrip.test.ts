@@ -55,13 +55,29 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
   let tracedCaller: Agents
   let untracedCaller: Agents
 
-  // What the fake Claude Code does with a delivered prompt: reply, or leave it open.
+  // The plugin's hook, run as Claude Code would run it for this test process.
+  function runHook(payload: Record<string, unknown>) {
+    return spawnSync('bun', [join(sourceRoot, 'hooks', 'session-event.ts')], {
+      input: JSON.stringify(payload),
+      env: { ...process.env, CLAUDE_PID: String(process.pid), NATS_STATE_DIR: stateDir },
+      encoding: 'utf8',
+    })
+  }
+
+  // What the fake Claude Code does with a delivered prompt: reply, then end
+  // its turn through the Stop hook, as the real one would; or leave it open.
+  let hooksInstalled = false
   let onPrompt: (mcp: Client, requestId: string, content: string) => Promise<void> = async (
     mcp,
     requestId,
     content,
   ) => {
     await mcp.callTool({ name: 'reply', arguments: { request_id: requestId, text: `echo: ${content}` } })
+    if (hooksInstalled) {
+      // The closing model call comes after the reply; the Stop follows it.
+      await Bun.sleep(1_100)
+      runHook({ session_id: SESSION_B, hook_event_name: 'Stop', stop_hook_active: false })
+    }
   }
 
   async function startPlugin(name: string, env: Record<string, string>): Promise<Client> {
@@ -125,7 +141,7 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
     await nc.flush()
     try {
       await run()
-      await Bun.sleep(300)
+      await Bun.sleep(hooksInstalled ? 1_800 : 300)
     } finally {
       sub.unsubscribe()
       await collecting.catch(() => undefined)
@@ -231,19 +247,23 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
   }, 30_000)
 
   test('the SessionStart hook moves the binding to the new session id', async () => {
-    const hook = spawnSync('bun', [join(sourceRoot, 'hooks', 'session-start.ts')], {
-      input: JSON.stringify({ session_id: SESSION_B, hook_event_name: 'SessionStart', source: 'clear' }),
-      env: { ...process.env, CLAUDE_PID: String(process.pid), NATS_STATE_DIR: stateDir },
-      encoding: 'utf8',
-    })
+    const hook = runHook({ session_id: SESSION_B, hook_event_name: 'SessionStart', source: 'clear' })
     expect(hook.status).toBe(0)
     expect(hook.stdout).toBe('')
     expect(existsSync(sessionFilePath(stateDir, process.pid))).toBe(true)
+    hooksInstalled = true
 
+    // With hooks active, `end` waits for the Stop the fake Claude fires after
+    // its reply, so the window covers the turn's closing call.
+    const repliedAt = Math.floor(Date.now() / 1000)
     const records = await promptAndCollect(tracedCaller, 'traced', 'hello again')
     const served = records.map(decode).filter(r => r.kind === 'served')
     expect(served).toHaveLength(2)
     for (const record of served) expect(record.harness_thread_id).toBe(`claude:${SESSION_B}`)
+    const [start, end] = served as [Record_, Record_]
+    expect(end.phase).toBe('end')
+    expect((end.ts as number) - (start.ts as number)).toBeGreaterThanOrEqual(1)
+    expect(end.ts as number).toBeGreaterThanOrEqual(repliedAt + 1)
   }, 30_000)
 
   test('an untraced caller gets a minted thread: a served pair and no edge', async () => {

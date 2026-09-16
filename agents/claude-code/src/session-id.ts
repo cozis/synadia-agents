@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
@@ -16,7 +16,7 @@ import { join } from 'node:path'
  * the hook sees as `CLAUDE_PID` and the server as its parent pid.
  */
 
-// Header-safe by construction: the id ends up in a JSON field a reader
+// Header-safe by construction: the id ends up in a JSON field a consumer
 // matches against a request header the harness sent, so anything a header
 // value could never hold — empty, whitespace, control characters — is
 // refused rather than recorded. Claude Code's ids are UUIDs.
@@ -35,6 +35,11 @@ export function sessionsDir(stateDir: string): string {
 /** The session file the hook writes for Claude Code process `pid`. */
 export function sessionFilePath(stateDir: string, pid: number | string): string {
   return join(sessionsDir(stateDir), String(pid))
+}
+
+/** The file the Stop hook touches for Claude Code process `pid` when a turn ends. */
+export function stopFilePath(stateDir: string, pid: number | string): string {
+  return join(sessionsDir(stateDir), `${pid}.stop`)
 }
 
 export type SessionIdSource = {
@@ -57,6 +62,36 @@ export function resolveClaudeSessionId(source: SessionIdSource): string | undefi
   if (fromHook !== undefined) return fromHook
   const fromEnv = source.env.CLAUDE_CODE_SESSION_ID
   return isClaudeSessionId(fromEnv) ? fromEnv : undefined
+}
+
+/**
+ * The last turn end the Stop hook recorded for the Claude Code process:
+ * when the hook wrote the file (`atMs`, the file's mtime, for ordering
+ * against the reply that preceded it) and the unix seconds it wrote
+ * (`ts`, the record's timestamp). `undefined` without a readable,
+ * well-formed file.
+ */
+export function readTurnStop(source: SessionIdSource): { atMs: number; ts: number } | undefined {
+  const path = stopFilePath(source.stateDir, source.parentPid)
+  let text: string
+  let atMs: number
+  try {
+    text = readFileSync(path, 'utf8')
+    atMs = statSync(path).mtimeMs
+  } catch {
+    return undefined
+  }
+  const ts = Number(text.trim())
+  return Number.isInteger(ts) && ts >= 0 ? { atMs, ts } : undefined
+}
+
+/**
+ * `true` iff the plugin's hooks are active for this Claude Code process —
+ * the SessionStart hook has written its file — so a Stop hook can be
+ * expected at the end of a turn.
+ */
+export function hooksActive(source: SessionIdSource): boolean {
+  return existsSync(sessionFilePath(source.stateDir, source.parentPid))
 }
 
 function readSessionFile(path: string): string | undefined {

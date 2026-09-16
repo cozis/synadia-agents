@@ -290,17 +290,24 @@ channel takes part in the SDKs' observability tracing extension:
   adopted; a prompt without them gets a freshly minted thread. A malformed id
   is rejected with `400`, as the SDK does. Trace ids never enter the
   model-visible prompt or channel metadata.
-- **The session's model calls are joined through `served` records.** An MCP
-  server cannot put the caller's thread on Claude Code's model requests: those
-  carry Claude Code's own session id (`x-claude-code-session-id`, set per
-  process), and a model proxy files them under `claude:<session id>`. So for
-  every prompt the channel publishes two signed `served` records on
-  `TRACE.edges` — one stamped with the prompt's arrival, one when the turn
-  ends with `status` `ok`, `error`, or `timeout` (the 30-minute request TTL) —
-  naming the caller's thread and `harness_thread_id: claude:<session id>`. A
-  reader attaches the model calls the session made between the two to the
-  thread. Claude Code subagents send the same session id plus their own agent
-  id (`x-claude-code-agent-id`), so a reader files them under the session.
+- **The session's model calls are bound to the thread by `served` records.**
+  An SDK-built agent stamps the thread on its own model requests
+  (`PromptResponse.traceHeaders()`); an MCP server cannot do that for Claude
+  Code, whose requests carry its own session id (`x-claude-code-session-id`,
+  set per process). So for every prompt the channel publishes two signed
+  `served` records on `TRACE.edges`: one when the prompt arrives, one when
+  the turn ends, with `status` `ok`, `error` (the turn failed or the channel
+  shut down), or `timeout` (the 30-minute request TTL). Both name the
+  caller's thread and `harness_thread_id: claude:<session id>`; the model
+  calls the session made between the two timestamps are the thread's.
+  Claude Code subagents send the same session id plus their own agent id
+  (`x-claude-code-agent-id`).
+- **The turn ends at Claude Code's `Stop`, not at the reply.** After the
+  `reply` tool completes a request, Claude Code makes at least one more
+  model call to write its closing text. The channel's `Stop` hook records
+  when the turn is over, and the `end` record waits for it (at most two
+  minutes) and carries that time. Without the hooks, or when no `Stop`
+  comes, the reply is the end. A failed or expired request ends at once.
 - **Identity is required.** The records are signed with the host identity,
   so with `senderIdentity: "off"` nothing is published, the channel logs a
   warning at startup, and every record owed counts as dropped. With tracing
@@ -310,17 +317,23 @@ channel takes part in the SDKs' observability tracing extension:
   `edge` records of its own. An SDK client Claude Code runs from a shell
   starts a new tree.
 
-**How the channel knows the session.** Claude Code sets
+**How the channel follows the session.** Claude Code sets
 `CLAUDE_CODE_SESSION_ID` when it spawns the MCP server, and that is the
-baseline. `/clear` starts a new session with a new id but keeps the server, so
-the plugin ships a `SessionStart` hook (`hooks/hooks.json`, running
-`hooks/session-start.ts` with bun) that records the current session id under
-`<state dir>/sessions/<Claude Code pid>`. The server reads that file when a
-prompt arrives and falls back to its environment; the file is removed when the
-server shuts down. The session is bound when the prompt arrives, so a `/clear`
-during a turn does not move its binding. Without the hook (a Claude Code with
-plugin hooks disabled) a prompt after `/clear` is filed under the session the
-server started with.
+baseline. `/clear` starts a new session with a new id but keeps the server,
+so the plugin ships hooks (`hooks/hooks.json`, running
+`hooks/session-event.ts` with bun): `SessionStart` records the current
+session id under `<state dir>/sessions/<Claude Code pid>`, and `Stop`
+records the turn end next to it. The server reads the session file when a
+prompt arrives and falls back to its environment; both files are removed
+when the server shuts down. The session is bound when the prompt arrives,
+so a `/clear` during a turn does not move its binding. Without the hooks
+(a Claude Code with plugin hooks disabled) a prompt after `/clear` is filed
+under the session the server started with.
+
+**Model calls the window cannot tell apart.** Everything the session does
+between the two records is filed under the prompt: local typing during a
+NATS-driven turn, and a second NATS prompt answered in the same turn, share
+the window.
 
 ## Anthropic auth
 
@@ -341,6 +354,7 @@ State lives in `~/.claude/channels/nats/`:
 | `config.json` | Selected NATS context, session name override, and permission settings |
 | `attachments/<request_id>/` | Per-request staged attachments; auto-cleaned on reply completion |
 | `sessions/<Claude Code pid>` | Current Claude Code session id, written by the `SessionStart` hook; removed on shutdown |
+| `sessions/<Claude Code pid>.stop` | Time of the last turn end, written by the `Stop` hook; removed on shutdown |
 
 NATS CLI contexts live in `~/.config/nats/context/<name>.json`.
 

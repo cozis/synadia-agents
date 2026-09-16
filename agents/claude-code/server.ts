@@ -10,8 +10,10 @@ import {
 import { connect, type NatsConnection } from "@nats-io/transport-node";
 import {
   Agents,
+  DEFAULT_EDGE_SUBJECT,
   IdentityError,
   NatsContextError,
+  activeTrace,
   formatSender,
   parseHumanBytes,
   resolveNatsConnectionBundle,
@@ -36,6 +38,16 @@ import {
   type NatsChannelConfig,
 } from "./src/config.js";
 import { loadPluginVersion } from "./src/plugin-version.js";
+import {
+  ServedPublisher,
+  type ServedStatus,
+  type ServedTurn,
+} from "./src/served.js";
+import {
+  resolveClaudeSessionId,
+  sessionFilePath,
+  type SessionIdSource,
+} from "./src/session-id.js";
 
 const AGENT_ID = "claude-code";
 const AGENT_SUBJECT_TOKEN = "cc";
@@ -62,6 +74,10 @@ type PendingRequest = {
   readonly completion: Deferred;
   readonly handlerClosed: Deferred;
   readonly attachmentDir?: string;
+  /** This prompt's served pair when tracing is on; `end` carries `outcome`. */
+  readonly served?: ServedTurn;
+  /** How the turn ended, for the served pair; `ok` until something else happens. */
+  outcome: ServedStatus;
 };
 
 type StagedAttachment = { readonly filename: string; readonly path: string };
@@ -282,6 +298,14 @@ async function run(): Promise<void> {
 
   const config = loadConfig(join(stateDir, "config.json"));
   const settings = resolveRuntimeSettings(config, process.env);
+  // Tracing: where the Claude Code session id comes from — the SessionStart
+  // hook's file for the Claude Code process that spawned this server, then
+  // the environment that process handed down.
+  const sessionSource: SessionIdSource = {
+    env: process.env,
+    stateDir,
+    parentPid: process.ppid,
+  };
   let bundle: NatsConnectionBundle | undefined;
   let nc: NatsConnection | undefined;
   let service: AgentService | undefined;
@@ -296,7 +320,13 @@ async function run(): Promise<void> {
       source: settings.connectionLabel,
       senderIdentity: settings.senderIdentity,
       minSenderTrust: settings.minSenderTrust,
+      tracing: settings.tracing,
     });
+    if (settings.tracing === "on" && settings.senderIdentity !== "signed") {
+      logEvent(
+        "warning: tracing is on but senderIdentity is off; served records are signed, so none will be published",
+      );
+    }
     nc = await connect(withAgentReconnectDefaults(bundle.connectionOptions));
 
     const owner = resolveOwner(config);
@@ -362,10 +392,37 @@ async function run(): Promise<void> {
       ...(settings.senderIdentity === "signed"
         ? { identity: { signer: bundle.signer! } }
         : {}),
+      // Tracing: adopt the caller's thread and root, or mint them for an
+      // envelope that carries none, exactly as an SDK-built agent does. The
+      // channel exposes no tool that prompts other agents, so it writes no
+      // edge record; the served pair below is its own record, and the
+      // service reports the process-wide record counts on its heartbeat.
+      ...(settings.tracing === "on" ? { trace: {} } : {}),
     });
+
+    // Tracing: the served pair per prompt binds the caller's thread to the
+    // Claude Code session whose model calls answer it. It is signed with
+    // the host identity, which the service only knows once it has started,
+    // hence the getter.
+    const served =
+      settings.tracing === "on"
+        ? new ServedPublisher({
+            nc,
+            subject: DEFAULT_EDGE_SUBJECT,
+            signer: bundle.signer,
+            identity: () => service?.identity,
+            logger: protocolLogger,
+          })
+        : undefined;
 
     service.onPrompt(async (envelope, response) => {
       if (shuttingDown) throw new Error("channel shutting down");
+      // Tracing: open this prompt's served pair on arrival. The service
+      // bound the prompt's trace scope as the ambient one for this handler;
+      // the session id is read now, so a `/clear` during the turn does not
+      // move the binding, and `start` goes out at once.
+      const servedTurn = served?.beginTurn(activeTrace());
+      servedTurn?.bind(resolveClaudeSessionId(sessionSource));
       const requestId = String(++requestCounter);
       const staged = stageAttachments(
         attachmentRoot,
@@ -383,6 +440,8 @@ async function run(): Promise<void> {
         ...(staged.length > 0
           ? { attachmentDir: join(attachmentRoot, requestId) }
           : {}),
+        ...(servedTurn ? { served: servedTurn } : {}),
+        outcome: "ok",
       };
       pendingRequests.set(requestId, pending);
       lastActiveRequestId = requestId;
@@ -413,8 +472,15 @@ async function run(): Promise<void> {
           throw new Error("channel delivery failed");
         }
         await completion.promise;
+      } catch (error) {
+        // Expiry marks the outcome itself; anything else that ends the turn
+        // without an answer is an error.
+        if (pending.outcome === "ok") pending.outcome = "error";
+        throw error;
       } finally {
         removePending(requestId);
+        // The turn is over either way: `end` carries its outcome.
+        pending.served?.settle(pending.outcome);
         handlerClosed.resolve();
       }
     });
@@ -556,6 +622,7 @@ async function run(): Promise<void> {
         if (pending.createdAt >= cutoff || pending.completion.settled())
           continue;
         logEvent("request expired", { requestId, sender: pending.sender });
+        pending.outcome = "timeout";
         pending.completion.reject(new Error("request expired"));
       }
     }, 60_000);
@@ -570,6 +637,10 @@ async function run(): Promise<void> {
       subject: service.subject.prompt,
       identity: service.identity ?? "off",
       minSenderTrust: service.minSenderTrust,
+      tracing: settings.tracing,
+      ...(settings.tracing === "on"
+        ? { claudeSession: resolveClaudeSessionId(sessionSource) ?? "unknown" }
+        : {}),
     });
 
     let shutdownPromise: Promise<void> | undefined;
@@ -592,8 +663,16 @@ async function run(): Promise<void> {
         // Let AgentService turn rejected handlers into their error frame + terminator.
         await Promise.resolve();
         await Promise.resolve();
+        // The served `end` records of the requests just failed are signed
+        // asynchronously; let them reach the connection before it flushes.
+        await served?.flush();
         await nc!.flush().catch(() => undefined);
         await mcp!.close().catch(() => undefined);
+        // The SessionStart hook's file for this Claude Code process; a
+        // restarted server reads the session id from its environment.
+        rmSync(sessionFilePath(stateDir, sessionSource.parentPid), {
+          force: true,
+        });
         if (!(await closeConnectionBeforeWipe(nc, bundle!, true))) {
           throw new Error(
             "NATS connection did not close; retained credentials were not wiped",

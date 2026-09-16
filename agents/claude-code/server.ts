@@ -44,9 +44,9 @@ import {
   type ServedTurn,
 } from "./src/served.js";
 import {
+  claudePid,
   resolveClaudeSessionId,
-  sessionFilePath,
-  stopFilePath,
+  sweepDeadSessions,
   type SessionIdSource,
 } from "./src/session-id.js";
 import { turnStopWaiter, type TurnStopWaiter } from "./src/turn-stop.js";
@@ -302,12 +302,15 @@ async function run(): Promise<void> {
   const settings = resolveRuntimeSettings(config, process.env);
   // Tracing: where the Claude Code session id comes from — the SessionStart
   // hook's file for the Claude Code process that spawned this server, then
-  // the environment that process handed down.
+  // the environment that process handed down. Files of Claude Code
+  // processes that are gone are swept now; a live one keeps its files
+  // across a restart of this server.
   const sessionSource: SessionIdSource = {
     env: process.env,
     stateDir,
-    parentPid: process.ppid,
+    parentPid: claudePid(process.env, process.ppid),
   };
+  if (settings.tracing === "on") sweepDeadSessions(stateDir);
   let bundle: NatsConnectionBundle | undefined;
   let nc: NatsConnection | undefined;
   let service: AgentService | undefined;
@@ -326,7 +329,7 @@ async function run(): Promise<void> {
     });
     if (settings.tracing === "on" && settings.senderIdentity !== "signed") {
       logEvent(
-        "warning: tracing is on but senderIdentity is off; served records are signed, so none will be published",
+        "warning: tracing is on but senderIdentity is off; trace records are signed, so none will be published",
       );
     }
     nc = await connect(withAgentReconnectDefaults(bundle.connectionOptions));
@@ -431,11 +434,14 @@ async function run(): Promise<void> {
       const servedTurn = served?.beginTurn(activeTrace());
       servedTurn?.bind(resolveClaudeSessionId(sessionSource));
       const requestId = String(++requestCounter);
-      const staged = stageAttachments(
-        attachmentRoot,
-        requestId,
-        envelope.attachments,
-      );
+      let staged: StagedAttachment[];
+      try {
+        staged = stageAttachments(attachmentRoot, requestId, envelope.attachments);
+      } catch (error) {
+        // The prompt fails before it is pending: close its window here.
+        servedTurn?.settle("error");
+        throw error;
+      }
       const completion = deferred();
       const handlerClosed = deferred();
       const pending: PendingRequest = {
@@ -493,13 +499,16 @@ async function run(): Promise<void> {
         // time; a failed or expired turn ends now.
         if (pending.served !== undefined) {
           if (pending.outcome === "ok" && !shuttingDown) {
-            const waiter = turnStopWaiter(sessionSource, Date.now());
-            const served = pending.served;
+            const repliedAtMs = Date.now();
+            const waiter = turnStopWaiter(sessionSource, repliedAtMs);
+            const turn = pending.served;
             stopWaiters.set(
               waiter,
               waiter.wait().then((stoppedAt) => {
                 stopWaiters.delete(waiter);
-                served.settle("ok", stoppedAt);
+                // No Stop (hooks off, none within the limit, shutdown): the
+                // reply is the turn end, not the moment the wait gave up.
+                turn.settle("ok", stoppedAt ?? Math.floor(repliedAtMs / 1000));
               }),
             );
           } else {
@@ -696,14 +705,6 @@ async function run(): Promise<void> {
         await served?.flush();
         await nc!.flush().catch(() => undefined);
         await mcp!.close().catch(() => undefined);
-        // The SessionStart hook's file for this Claude Code process; a
-        // restarted server reads the session id from its environment.
-        rmSync(sessionFilePath(stateDir, sessionSource.parentPid), {
-          force: true,
-        });
-        rmSync(stopFilePath(stateDir, sessionSource.parentPid), {
-          force: true,
-        });
         if (!(await closeConnectionBeforeWipe(nc, bundle!, true))) {
           throw new Error(
             "NATS connection did not close; retained credentials were not wiped",

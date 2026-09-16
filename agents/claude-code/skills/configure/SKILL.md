@@ -143,11 +143,20 @@ publishes nothing on `TRACE.edges`. This is the default.
 Set `tracing` to `"on"`. The channel adopts a traced caller's thread (or mints
 one for a prompt without lineage) and publishes two signed `served` records per
 prompt on `TRACE.edges`, binding the thread to the Claude Code session id
-(`claude:<session id>`) with the turn's outcome, so a model proxy's records
-for this session join the caller's thread. The records are signed with the
-host identity: if `senderIdentity` is not `"signed"`, say so and offer to set
-it, because with identity off nothing is published. `NATS_TRACING` overrides
-this config field.
+(`claude:<session id>`) with the turn's outcome, so the session's model calls
+between the two records can be attributed to the caller's thread. The records
+are signed with the host identity: if `senderIdentity` is not `"signed"`, say
+so and offer to set it, because with identity off nothing is published.
+`NATS_TRACING` overrides this config field.
+
+1. Read existing `config.json` (or start fresh). Set `tracing` to `"on"`.
+2. Write back and confirm; a plugin reload or Claude Code restart is required.
+
+### `tracing off` steps
+
+1. Read existing `config.json` (or start fresh). Set `tracing` to `"off"`, or
+   remove the field.
+2. Write back and confirm.
 
 ### `permissions terminal` - use terminal for permission prompts
 

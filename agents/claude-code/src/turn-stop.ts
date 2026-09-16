@@ -35,7 +35,8 @@ export interface TurnStopWaiter {
 /**
  * A waiter for the first Stop the hook records after `afterMs` (epoch
  * milliseconds — when the reply completed the request). A Stop from an
- * earlier turn is older than that and ignored.
+ * earlier turn is older than that and ignored. Both times come from the
+ * same clock: the hook writes `Date.now()`, the server compares with it.
  */
 export function turnStopWaiter(
   source: SessionIdSource,
@@ -55,8 +56,8 @@ export function turnStopWaiter(
     if (!hooksActive(source)) return undefined
     const deadline = afterMs + limitMs
     while (!cancelled) {
-      const stop = readTurnStop(source)
-      if (stop !== undefined && stop.atMs > afterMs) return stop.ts
+      const stoppedAtMs = readTurnStop(source)
+      if (stoppedAtMs !== undefined && stoppedAtMs > afterMs) return Math.floor(stoppedAtMs / 1000)
       if (Date.now() >= deadline) return undefined
       await new Promise<void>(resolve => {
         finish = resolve

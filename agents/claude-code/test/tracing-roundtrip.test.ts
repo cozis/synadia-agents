@@ -24,7 +24,7 @@ import {
   verifySender,
 } from '@synadia-ai/agents'
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -59,7 +59,7 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
   function runHook(payload: Record<string, unknown>) {
     return spawnSync('bun', [join(sourceRoot, 'hooks', 'session-event.ts')], {
       input: JSON.stringify(payload),
-      env: { ...process.env, CLAUDE_PID: String(process.pid), NATS_STATE_DIR: stateDir },
+      env: { ...process.env, CLAUDE_PID: String(process.pid), NATS_STATE_DIR: stateDir, NATS_TRACING: 'on' },
       encoding: 'utf8',
     })
   }
@@ -90,6 +90,8 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
     Object.assign(
       childEnv,
       {
+        // This test process stands in for Claude Code: its pid keys the hook files.
+        CLAUDE_PID: String(process.pid),
         HOME: testHome,
         CLAUDE_CWD: '/tmp/tracing-host',
         NATS_CONFIG_HOME: join(testHome, '.config', 'nats'),
@@ -275,13 +277,46 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
     expect(end.thread_id).toBe(start.thread_id)
   }, 30_000)
 
-  test('tracing on without identity publishes no records and still serves', async () => {
+  test('tracing on without identity publishes no records, counts them dropped, still serves', async () => {
     await startPlugin('unsigned', { NATS_SENDER_IDENTITY: 'off', CLAUDE_CODE_SESSION_ID: SESSION_A })
     const records = await promptAndCollect(tracedCaller, 'unsigned', 'hello unsigned')
     expect(records.map(m => decode(m).kind)).toEqual(['edge'])
+    const status = await nc.request(`agents.status.cc.${OWNER}.unsigned`, '', { timeout: 2000 })
+    expect(decodeHeartbeatPayload(status.json())?.extras).toMatchObject({
+      records_published: 0,
+      records_dropped: 2,
+    })
   }, 30_000)
 
-  test('a turn cut short by shutdown ends with error, and shutdown removes the session file', async () => {
+  test('a prompt that fails before Claude sees it closes its window with error', async () => {
+    // Staging an attachment needs a writable attachments dir; take it away.
+    const attachments = join(stateDir, 'attachments')
+    chmodSync(attachments, 0o500)
+    try {
+      const records = await collectRecords(async () => {
+        const host = await discoverHost(tracedCaller, 'traced')
+        let failed = false
+        try {
+          const stream = await host.prompt('with a file', {
+            attachments: [{ filename: 'a.txt', content: new TextEncoder().encode('x') }],
+          })
+          for await (const _ of stream) {
+            // the 500 ends the stream
+          }
+        } catch {
+          failed = true
+        }
+        expect(failed).toBe(true)
+      })
+      const served = records.map(decode).filter(r => r.kind === 'served')
+      expect(served.map(r => r.phase)).toEqual(['start', 'end'])
+      expect(served[1]!.status).toBe('error')
+    } finally {
+      chmodSync(attachments, 0o700)
+    }
+  }, 30_000)
+
+  test('a turn cut short by shutdown ends with error; a live Claude Code keeps its files', async () => {
     const mcp = await startPlugin('cut', { NATS_SENDER_IDENTITY: 'signed', CLAUDE_CODE_SESSION_ID: SESSION_A })
     // Hold the prompt open; the shutdown below ends it without an answer.
     let delivered!: () => void
@@ -310,8 +345,8 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
     const served = records.map(decode).filter(r => r.kind === 'served')
     expect(served.map(r => r.phase)).toEqual(['start', 'end'])
     expect(served[1]!.status).toBe('error')
-    // The other plugins are still running, so only the shut-down server's file is gone —
-    // and every plugin here shares this test's pid as its parent.
-    expect(existsSync(sessionFilePath(stateDir, process.pid))).toBe(false)
+    // The files belong to the Claude Code process (this test), which is
+    // alive: a restarted server must still find them.
+    expect(existsSync(sessionFilePath(stateDir, process.pid))).toBe(true)
   }, 30_000)
 })

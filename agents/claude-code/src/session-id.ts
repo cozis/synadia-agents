@@ -1,10 +1,10 @@
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
  * How the channel learns the Claude Code session id — the value Claude
- * Code sends to the model API on every request, which a model proxy files
- * the session's calls under as `claude:<session id>`.
+ * Code sends on every model request, which a served record names as
+ * `claude:<session id>`.
  *
  * Claude Code puts the id in `CLAUDE_CODE_SESSION_ID` when it spawns the
  * MCP server, so the environment is the baseline. A session can change
@@ -13,7 +13,7 @@ import { join } from 'node:path'
  * records the current id in the state directory, keyed by the Claude Code
  * process id, and the server reads that file before falling back to its
  * environment. Both are children of the same Claude Code process, which
- * the hook sees as `CLAUDE_PID` and the server as its parent pid.
+ * hands both `CLAUDE_PID`; the server falls back to its parent pid.
  */
 
 // Header-safe by construction: the id ends up in a JSON field a consumer
@@ -47,8 +47,18 @@ export type SessionIdSource = {
   env: NodeJS.ProcessEnv
   /** The channel's state directory (`NATS_STATE_DIR`). */
   stateDir: string
-  /** The Claude Code process that launched the server (`process.ppid`). */
+  /** The Claude Code process that launched the server; see {@link claudePid}. */
   parentPid: number
+}
+
+/**
+ * The Claude Code process the hooks key their files by: `CLAUDE_PID` from
+ * the environment, which Claude Code hands to its hooks and MCP servers
+ * alike, or the parent pid when it is absent.
+ */
+export function claudePid(env: NodeJS.ProcessEnv, parentPid: number): number {
+  const fromEnv = env.CLAUDE_PID
+  return fromEnv !== undefined && /^\d+$/.test(fromEnv) ? Number(fromEnv) : parentPid
 }
 
 /**
@@ -65,24 +75,56 @@ export function resolveClaudeSessionId(source: SessionIdSource): string | undefi
 }
 
 /**
- * The last turn end the Stop hook recorded for the Claude Code process:
- * when the hook wrote the file (`atMs`, the file's mtime, for ordering
- * against the reply that preceded it) and the unix seconds it wrote
- * (`ts`, the record's timestamp). `undefined` without a readable,
- * well-formed file.
+ * The last turn end the Stop hook recorded for the Claude Code process, in
+ * epoch milliseconds as the hook wrote them — one value for ordering
+ * against the reply that preceded it and for the record's timestamp, so
+ * no file time is involved. `undefined` without a readable, well-formed
+ * file.
  */
-export function readTurnStop(source: SessionIdSource): { atMs: number; ts: number } | undefined {
-  const path = stopFilePath(source.stateDir, source.parentPid)
+export function readTurnStop(source: SessionIdSource): number | undefined {
   let text: string
-  let atMs: number
   try {
-    text = readFileSync(path, 'utf8')
-    atMs = statSync(path).mtimeMs
+    text = readFileSync(stopFilePath(source.stateDir, source.parentPid), 'utf8')
   } catch {
     return undefined
   }
-  const ts = Number(text.trim())
-  return Number.isInteger(ts) && ts >= 0 ? { atMs, ts } : undefined
+  const value = text.trim()
+  return /^\d{1,16}$/.test(value) ? Number(value) : undefined
+}
+
+/**
+ * Remove the session and Stop files of Claude Code processes that no
+ * longer exist. Run when a server starts: a live Claude Code keeps its
+ * files across a restart of its MCP server, so the restarted server still
+ * follows `/clear`; a Claude Code that died without a clean shutdown
+ * leaves files a reused pid must not inherit. Best effort.
+ */
+export function sweepDeadSessions(stateDir: string): void {
+  let names: string[]
+  try {
+    names = readdirSync(sessionsDir(stateDir))
+  } catch {
+    return
+  }
+  for (const name of names) {
+    const match = /^(\d+)(\.stop)?$/.exec(name)
+    if (!match || processAlive(Number(match[1]))) continue
+    try {
+      rmSync(join(sessionsDir(stateDir), name), { force: true })
+    } catch {
+      // Left for the next sweep.
+    }
+  }
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // EPERM: alive, someone else's. Anything else: gone.
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
 }
 
 /**

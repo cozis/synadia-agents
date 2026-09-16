@@ -19,10 +19,13 @@ All notable changes to the Claude Code NATS channel are documented here.
   current Claude Code session id under `<state dir>/sessions/<Claude Code pid>` so the binding
   follows `/clear` (the server falls back to `CLAUDE_CODE_SESSION_ID`), and `Stop` records the
   turn end, which the served `end` record waits for (at most two minutes) and carries, so the
-  closing model call Claude Code makes after the reply falls inside the window. Both files are
-  removed on shutdown.
+  closing model call Claude Code makes after the reply falls inside the window; without a
+  `Stop` the reply is the turn end. The hooks write nothing while tracing is off. The files
+  outlive the server; a server starting with tracing on sweeps those of Claude Code processes
+  that no longer exist.
 - The server's instructions now say the `reply` tool may be listed as deferred and must be
-  loaded before answering; Claude answered its first channel message in the terminal only.
+  loaded before answering, otherwise the model may reply only in its own output, which the
+  sender never sees.
 
 ### Changed
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { sessionFilePath, sessionsDir, stopFilePath, type SessionIdSource } from '../src/session-id.js'
@@ -20,10 +20,8 @@ function activateHooks(source: SessionIdSource): void {
   writeFileSync(sessionFilePath(source.stateDir, PID), `${SESSION}\n`)
 }
 
-function recordStop(source: SessionIdSource, ts: number, atMs: number = Date.now()): void {
-  const path = stopFilePath(source.stateDir, PID)
-  writeFileSync(path, `${ts}\n`)
-  utimesSync(path, atMs / 1000, atMs / 1000)
+function recordStop(source: SessionIdSource, atMs: number = Date.now()): void {
+  writeFileSync(stopFilePath(source.stateDir, PID), `${atMs}\n`)
 }
 
 describe('turnStopWaiter', () => {
@@ -40,14 +38,15 @@ describe('turnStopWaiter', () => {
       const waiter = turnStopWaiter(source, Date.now(), 5_000, 10)
       const waiting = waiter.wait()
       await Bun.sleep(50)
-      recordStop(source, 1_700_000_123, Date.now() + 5)
-      expect(await waiting).toBe(1_700_000_123)
+      const stoppedAt = Date.now() + 5
+      recordStop(source, stoppedAt)
+      expect(await waiting).toBe(Math.floor(stoppedAt / 1000))
     }))
 
   test('a Stop older than the reply belongs to an earlier turn and is ignored', () =>
     withSource(async source => {
       activateHooks(source)
-      recordStop(source, 1_700_000_000, Date.now() - 10_000)
+      recordStop(source, Date.now() - 10_000)
       const waiter = turnStopWaiter(source, Date.now(), 200, 10)
       expect(await waiter.wait()).toBeUndefined()
     }))
@@ -72,10 +71,12 @@ describe('turnStopWaiter', () => {
       expect(await waiting).toBeUndefined()
     }))
 
-  test('a malformed Stop file is ignored', () =>
+  test('a malformed or empty Stop file is ignored', () =>
     withSource(async source => {
       activateHooks(source)
-      writeFileSync(stopFilePath(source.stateDir, PID), 'soon\n')
-      expect(await turnStopWaiter(source, Date.now() - 1_000, 100, 10).wait()).toBeUndefined()
+      for (const content of ['soon\n', '', '\n', '-5\n', '1.5\n']) {
+        writeFileSync(stopFilePath(source.stateDir, PID), content)
+        expect(await turnStopWaiter(source, Date.now() - 1_000, 100, 10).wait()).toBeUndefined()
+      }
     }))
 })

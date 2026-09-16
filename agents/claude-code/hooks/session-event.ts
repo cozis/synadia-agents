@@ -12,13 +12,15 @@
  * Reads the hook payload from stdin, writes under `<state dir>/sessions/`
  * keyed by `CLAUDE_PID` (atomically, through a rename), and exits 0
  * whatever happens — a hook must never interrupt a session, and anything
- * printed to stdout would land in the model's context. It depends on
- * nothing outside the plugin directory, so it runs from source.
+ * printed to stdout would land in the model's context. With tracing off
+ * it writes nothing. It depends on nothing outside the plugin directory,
+ * so it runs from source.
  */
 
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { loadConfig, resolveRuntimeSettings } from '../src/config.js'
 import {
   isClaudeSessionId,
   sessionFilePath,
@@ -46,9 +48,13 @@ try {
       session_id?: unknown
     }
     const stateDir = process.env.NATS_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'nats')
+    // Inert unless tracing is on, resolved as the server resolves it: the
+    // files exist for the served records and for nothing else.
+    const settings = resolveRuntimeSettings(loadConfig(join(stateDir, 'config.json')), process.env)
+    if (settings.tracing !== 'on') process.exit(0)
     if (payload.hook_event_name === 'Stop') {
       mkdirSync(sessionsDir(stateDir), { recursive: true })
-      writeAtomically(stopFilePath(stateDir, pid), `${Math.floor(Date.now() / 1000)}\n`)
+      writeAtomically(stopFilePath(stateDir, pid), `${Date.now()}\n`)
     } else if (isClaudeSessionId(payload.session_id)) {
       mkdirSync(sessionsDir(stateDir), { recursive: true })
       writeAtomically(sessionFilePath(stateDir, pid), `${payload.session_id}\n`)

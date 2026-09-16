@@ -3,14 +3,13 @@
  * the Claude Code session whose model calls answered it.
  *
  * An SDK-built agent stamps the caller's thread on every model request it
- * makes, so a model proxy files those requests under that thread. An MCP
- * server inside a Claude Code session cannot: the session's requests carry
- * Claude Code's own session id, set per process, not per prompt, and the
- * proxy files them under `claude:<session id>`. The channel publishes the
+ * makes (`PromptResponse.traceHeaders()`). An MCP server inside a Claude
+ * Code session cannot: the session's requests carry Claude Code's own
+ * session id, set per session, not per prompt. The channel publishes the
  * binding instead: one record at `start`, stamped with the prompt's
- * arrival and naming the caller's thread and the session, and one at `end`
- * with the outcome. The model calls the session made between the two
- * belong to the thread.
+ * arrival and naming the caller's thread and `claude:<session id>`, and
+ * one at `end` with the outcome. The model calls the session made between
+ * the two belong to the thread.
  *
  * Both records are signed with `Agent-Sender` by the host identity and
  * carry one id as body `record_id`, header nonce and `Nats-Msg-Id`, like

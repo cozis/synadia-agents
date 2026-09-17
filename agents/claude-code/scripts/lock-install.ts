@@ -51,20 +51,45 @@ function splitNames(key: string): string[] {
   return names
 }
 
-/** Locked externals keyed by their position (`parent/child`), SDK links excluded. */
+/** bun.lock is JSON plus trailing commas; drop only commas outside strings. */
+function stripTrailingCommas(text: string): string {
+  let out = ''
+  let inString = false
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]!
+    if (inString) {
+      out += char
+      if (char === '\\') out += text[++i] ?? ''
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"') inString = true
+    if (char === ',') {
+      let next = i + 1
+      while (next < text.length && /\s/.test(text[next]!)) next++
+      if (text[next] === '}' || text[next] === ']') continue
+    }
+    out += char
+  }
+  return out
+}
+
+/**
+ * Locked externals keyed by their position (`parent/child`). Only the `file:`
+ * SDK links are left out; positions nested under an SDK stay, so `verify`
+ * checks anything npm ever installs there.
+ */
 function readLock(): Map<string, LockedPackage> {
-  // bun.lock is JSON with trailing commas.
-  const text = readFileSync(join(root, 'bun.lock'), 'utf8').replace(/,(\s*[}\]])/g, '$1')
+  const text = stripTrailingCommas(readFileSync(join(root, 'bun.lock'), 'utf8'))
   const lock = JSON.parse(text) as { packages: Record<string, unknown[]> }
   const locked = new Map<string, LockedPackage>()
   for (const [key, entry] of Object.entries(lock.packages)) {
-    const path = splitNames(key)
-    if (path.some((name) => name.startsWith(INTERNAL_SCOPE))) continue
     const [ident, , , integrity] = entry
     if (typeof ident !== 'string') fail(`unexpected bun.lock entry for ${key}`)
     const version = ident.slice(ident.lastIndexOf('@') + 1)
+    if (version.startsWith('file:')) continue
     if (typeof integrity !== 'string') fail(`bun.lock entry ${key} has no integrity`)
-    locked.set(key, { path, version, integrity })
+    locked.set(key, { path: splitNames(key), version, integrity })
   }
   return locked
 }
@@ -95,8 +120,13 @@ function pin(): void {
 
   // One override per locked position: a nested version is scoped by its full
   // ancestor chain, so it never leaks onto a same-named package elsewhere.
+  const locked = readLock()
   const tree = new Map<string, OverrideNode>()
-  for (const pkg of readLock().values()) {
+  let pinned = 0
+  for (const pkg of locked.values()) {
+    // Positions under a packed SDK are its devDependencies, which npm never
+    // installs; an override there would have to reference the tarball edge.
+    if (pkg.path.slice(0, -1).some((name) => name.startsWith(INTERNAL_SCOPE))) continue
     let level = tree
     let node: OverrideNode | undefined
     for (const name of pkg.path) {
@@ -105,6 +135,7 @@ function pin(): void {
       level = node.children
     }
     node!.version = pkg.version
+    pinned++
   }
 
   const overrides: { [key: string]: Override } = {}
@@ -120,7 +151,7 @@ function pin(): void {
   }
   manifest.overrides = overrides
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
-  console.log(`pinned ${readLock().size} locked positions`)
+  console.log(`pinned ${pinned} locked positions`)
 }
 
 function verify(): void {

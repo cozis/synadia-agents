@@ -63,6 +63,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- `extraMetadata` can no longer override the required registration keys.
+  `AgentService` and `ReferenceAgent` now write `agent`, `owner` and
+  `protocol_version` over `extraMetadata` (previously an extra entry
+  replaced them), matching `session` and the identity keys, which already
+  won. A harness can no longer advertise an agent or owner other than the
+  subject it serves.
 - `PromptResponse` takes an optional third constructor argument (the
   classified sender) and exposes it as `sender`.
 - `ReferenceAgentPromptHandler` is now `(msg, sender) => …`; handlers

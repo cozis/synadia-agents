@@ -65,6 +65,39 @@ describe.skipIf(!natsUrl)("AgentService — round-trip via real broker", () => {
     expect(service.subject.status).toMatch(/^agents\.status\.svc-test\.testers\./);
   });
 
+  it("registers extraMetadata but the required keys win over it", async () => {
+    const service = startService({
+      session: "real-session",
+      extraMetadata: {
+        agent: "forged-agent",
+        owner: "forged-owner",
+        session: "forged-session",
+        protocol_version: "9.9",
+        role: "controller",
+      },
+    });
+    service.onPrompt(async (_envelope, response) => {
+      await response.send("ok");
+    });
+    await service.start();
+
+    const found = await client.discover({
+      timeoutMs: 1000,
+      filter: { agent: "svc-test", name: service.subject.name },
+    });
+    expect(found).toHaveLength(1);
+    expect(found[0]!.metadata).toEqual({
+      agent: "svc-test",
+      owner: "testers",
+      session: "real-session",
+      protocol_version: "0.3",
+      role: "controller",
+    });
+    expect(await client.discover({ timeoutMs: 1000, filter: { agent: "forged-agent" } })).toEqual(
+      [],
+    );
+  });
+
   it("streams response chunks and emits the §6.5 terminator", async () => {
     const service = startService();
     service.onPrompt(async (_envelope, response) => {

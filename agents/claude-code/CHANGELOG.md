@@ -12,7 +12,7 @@ All notable changes to the Claude Code NATS channel are documented here.
 - Opt-in tracing through `tracing: "on"` / `NATS_TRACING=on` /
   `/nats-channel:configure tracing on`: the channel adopts a traced caller's thread, or mints
   one for a prompt that carries none, and publishes two signed `served` records per prompt on
-  `TRACE.edges`, binding the thread to `claude:<session id>` with the outcome (`ok`, `error`,
+  `TRACE.edges`, binding the thread to the session id, bare, under `harness: claude` with the outcome (`ok`, `error`,
   `timeout`). Requires `senderIdentity: "signed"`; without it nothing is published, startup
   warns, and the records owed count as dropped on the heartbeat.
 - Plugin hooks (`hooks/hooks.json` → `hooks/session-event.ts`): `SessionStart` records the

@@ -7,7 +7,7 @@
  * operation, the run and each model call all keep the parent's trace id.
  * So dispatching a prompt inside a scope whose trace id the plugin minted
  * puts that id on every model call the turn makes: the harness thread id
- * the plugin's `served` records name as `openclaw:<trace id>`. A fresh id
+ * the plugin's `served` records name as `harness_thread_id`, bare. A fresh id
  * per prompt, never the caller's thread id, so nothing of the NATS side
  * reaches a model provider.
  *

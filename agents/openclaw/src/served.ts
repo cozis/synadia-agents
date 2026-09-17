@@ -8,7 +8,9 @@
  * of a turn carries OpenClaw's own `traceparent`, and the plugin decides
  * its trace id by seeding OpenClaw's trace scope (see trace-scope.ts).
  * The plugin publishes the binding: one record at `start`, stamped with
- * the prompt's arrival and naming the thread and `openclaw:<trace id>`,
+ * the prompt's arrival and naming the thread and the trace id, bare, under
+ * `harness: openclaw` — exactly the string the proxy files the turn's calls
+ * under (afo-design.md §6.1, §8.3, 2026-09-17) —
  * and one at `end` with the outcome. Between the two, the model calls
  * carrying that id belong to the thread.
  *
@@ -75,8 +77,8 @@ export interface BuiltServedRecord {
  * the payload so the publisher can stamp it as `Nats-Msg-Id` and sign
  * with it as the `Agent-Sender` nonce. `agent` is the host identity, in
  * canonical `{account}.{user}` form — the identity that signs the record.
- * `harnessId` is the bare trace id; the record carries it prefixed with
- * the harness kind. `status` is required on `end` and must be absent on
+ * `harnessId` is the bare trace id; the record carries it as is, next to
+ * the harness kind, never prefixed. `status` is required on `end` and must be absent on
  * `start`. `ts` is unix seconds — when the prompt arrived for `start`,
  * when the turn ended for `end`.
  */
@@ -110,7 +112,7 @@ export function buildServedRecord(
     thread_id: threadId,
     root_id: rootId,
     harness: HARNESS,
-    harness_thread_id: `${HARNESS}:${harnessId}`,
+    harness_thread_id: harnessId,
     phase,
     ...(status !== undefined ? { status } : {}),
   };

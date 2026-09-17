@@ -3,7 +3,10 @@
 ``AgentService.start()`` registers ``user_nkey`` / ``account`` whenever
 the connection has an NKEY identity, ``id_sig`` (``AGENT-ID-V1`` over the
 prompt subject) only with a signer, and **always** ``min_sender_trust``
-on the prompt endpoint — never on ``status``. The evidence of each test
+on the prompt endpoint — never on ``status``. The identity keys win over
+``extra_metadata``: a forged entry is overwritten when the service
+registers that key and removed when it does not (mirrors the TypeScript
+host's ``identity-service.test.ts``). The evidence of each test
 is the raw ``$SRV.INFO`` reply (``srv-info.json``); the assertions run
 the shared verifier (``verify_agent_id``) and the client-side discovery
 over it.
@@ -27,7 +30,13 @@ from synadia_ai.agents import (
     signer_from_seed,
     verify_agent_id,
 )
-from synadia_ai.agents.identity import IDENTITY_METADATA_KEYS, base64url_encode
+from synadia_ai.agents.identity import (
+    IDENTITY_METADATA_KEYS,
+    METADATA_ACCOUNT,
+    METADATA_ID_SIG,
+    METADATA_USER_NKEY,
+    base64url_encode,
+)
 
 from synadia_ai.agent_service import AgentService, PromptStream, ServiceIdentity
 
@@ -86,6 +95,7 @@ async def test_signer_registers_user_nkey_account_and_a_verifying_id_sig(
     evidence_for: EvidenceFor,
 ) -> None:
     alice = identity_keys["alice"]
+    bob = identity_keys["bob"]
     host = await connect_nkey_user(nats_server_nkey, "alice")
     caller = await connect_nkey_user(nats_server_nkey, "alice")
     recorder = await evidence_for(caller)
@@ -97,6 +107,8 @@ async def test_signer_registers_user_nkey_account_and_a_verifying_id_sig(
         heartbeat_interval_s=1,
         identity=ServiceIdentity(signer=signer_from_seed(alice.seed)),
         min_sender_trust="signed",
+        # Identity keys win over extra_metadata; other extra keys are kept.
+        extra_metadata={METADATA_USER_NKEY: bob.public, "custom": "kept"},
     )
     service.on_prompt(_echo)
     assert service.identity is None  # not known before start()
@@ -117,8 +129,9 @@ async def test_signer_registers_user_nkey_account_and_a_verifying_id_sig(
             "session",
             "protocol_version",
         }
-        assert metadata["user_nkey"] == alice.public
+        assert metadata["user_nkey"] == alice.public  # not the extra_metadata forgery
         assert metadata["account"] == "$G"
+        assert metadata["custom"] == "kept"
         assert metadata["protocol_version"] == "0.3"  # no protocol bump: feature detection
         # `id_sig` is AGENT-ID-V1 over the prompt endpoint subject — the shared
         # verifier accepts it, and a different subject does not.
@@ -141,6 +154,7 @@ async def test_signer_registers_user_nkey_account_and_a_verifying_id_sig(
             assert len(found) == 1
             info = found[0]
             assert info.identity == alice_id
+            assert info.metadata["custom"] == "kept"
             assert info.id_sig_verified is True
             assert info.supports_sender_identity is True
             assert info.min_sender_trust == "signed"
@@ -166,6 +180,8 @@ async def test_without_a_signer_the_keys_are_registered_unsigned(
         nc=host,
         heartbeat_interval_s=1,
         identity=ServiceIdentity(),
+        # Without a signer the service registers no id_sig, so a forged one is removed.
+        extra_metadata={METADATA_ID_SIG: "FORGED"},
     )
     service.on_prompt(_echo)
     await service.start()
@@ -254,7 +270,9 @@ async def test_same_user_credentials_from_a_different_account_are_rejected(
 
 
 async def test_t0_omitted_identity_starts_without_lookup_or_identity_metadata(
-    nats_server: RunningServer, caplog: pytest.LogCaptureFixture
+    nats_server: RunningServer,
+    identity_keys: dict[str, NkeyUser],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     host = await nats.connect(nats_server.url)
     caller = await nats.connect(nats_server.url)
@@ -265,7 +283,17 @@ async def test_t0_omitted_identity_starts_without_lookup_or_identity_metadata(
         await stream.send("ok")
 
     service = AgentService(
-        agent=AGENT, owner=OWNER, session_name="t0", nc=host, heartbeat_interval_s=1
+        agent=AGENT,
+        owner=OWNER,
+        session_name="t0",
+        nc=host,
+        heartbeat_interval_s=1,
+        # Omitted identity registers no identity keys, so every forged one is removed.
+        extra_metadata={
+            METADATA_USER_NKEY: identity_keys["bob"].public,
+            METADATA_ACCOUNT: "FORGED",
+            METADATA_ID_SIG: "FORGED",
+        },
     )
     service.on_prompt(handler)
     try:

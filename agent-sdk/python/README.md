@@ -54,6 +54,12 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+Harness-specific registration keys (a model name, a role, …) go in
+`extra_metadata={"role": "controller"}`. Keys and values must be `str`
+(`TypeError` otherwise). The protocol's required keys (`agent`, `owner`,
+`session`, `protocol_version`) and the identity keys (`user_nkey`,
+`account`, `id_sig`) always win over an extra entry with the same name.
+
 A spec-compliant runnable echo agent ships at
 [`examples/_reference_agent.py`](examples/_reference_agent.py) — used
 both as the test harness for the client-side numbered demos in

@@ -72,6 +72,7 @@ from synadia_ai.agents import (
 )
 from synadia_ai.agents.identity import (
     DEFAULT_RESOLVE_TTL_S,
+    IDENTITY_METADATA_KEYS,
     METADATA_ACCOUNT,
     METADATA_ID_SIG,
     METADATA_USER_NKEY,
@@ -326,6 +327,16 @@ class AgentService:
     honored (use case: shed expensive prompts before they reach the
     handler).
 
+    ``extra_metadata`` adds harness-specific keys to the service
+    registration metadata (``$SRV.INFO.metadata``). Keys and values must
+    be ``str`` — the wire shape is ``Record<string, string>`` — or the
+    constructor raises :class:`TypeError`. The required keys (``agent``,
+    ``owner``, ``session``, ``protocol_version``) and the identity keys
+    (``user_nkey``, ``account``, ``id_sig``) always win: an extra entry
+    under one of them is overwritten, or dropped when the service
+    registers no such key, so a harness can neither advertise a subject
+    it does not serve nor register a forged identity.
+
     Sender identity (extension) — all optional, all additive:
 
     - omitted ``identity``: no own-identity lookup and no ``user_nkey`` /
@@ -363,6 +374,7 @@ class AgentService:
         max_payload: str = DEFAULT_MAX_PAYLOAD,
         attachments_ok: bool = DEFAULT_ATTACHMENTS_OK,
         keepalive_interval_s: float | None = DEFAULT_KEEPALIVE_INTERVAL_S,
+        extra_metadata: dict[str, str] | None = None,
         identity: ServiceIdentity | None = None,
         min_sender_trust: MinSenderTrust = DEFAULT_MIN_SENDER_TRUST,
         replay_window_s: float = DEFAULT_REPLAY_WINDOW_S,
@@ -382,6 +394,9 @@ class AgentService:
             )
         if resolve_ttl_s < 0:
             raise ValueError(f"resolve_ttl_s must be >= 0 (got {resolve_ttl_s!r})")
+        # Validated into a private copy: mutating the caller's dict afterwards
+        # can neither bypass the check nor change what start() registers.
+        self._extra_metadata = _validate_extra_metadata(extra_metadata)
         # Validate max_payload eagerly so misconfiguration fails at construction
         # rather than surfacing later via caller-side validation (§5.4).
         parse_human_bytes(max_payload)
@@ -512,7 +527,12 @@ class AgentService:
         # `session_name` (defaulting callers pass "default"), so we always
         # advertise it. Callers that filter on metadata.session see a
         # consistent shape across session-aware and session-less agents.
+        #
+        # `extra_metadata` goes in first so the required keys below overwrite
+        # it: a harness cannot advertise an agent/owner/session other than
+        # the subject it serves.
         metadata: dict[str, str] = {
+            **self._extra_metadata,
             "agent": self.subject.agent,
             "owner": self.subject.owner,
             "session": self.subject.session_name,
@@ -521,7 +541,9 @@ class AgentService:
         # Identity keys (spec "Registration"): `user_nkey` / `account`
         # whenever the identity is known; `id_sig` (`AGENT-ID-V1` over the
         # prompt subject) only with a signer — a registration without it is
-        # the spec's display-grade claim.
+        # the spec's display-grade claim. They also win over `extra_metadata`:
+        # a key the service does not register itself is removed, so a
+        # harness cannot register a forged identity.
         if agent_id is not None:
             metadata[METADATA_USER_NKEY] = agent_id.user
             metadata[METADATA_ACCOUNT] = agent_id.account
@@ -533,6 +555,11 @@ class AgentService:
                     owner=self.subject.owner,
                     prompt_subject=self.subject.prompt,
                 )
+            else:
+                metadata.pop(METADATA_ID_SIG, None)
+        else:
+            for key in IDENTITY_METADATA_KEYS:
+                metadata.pop(key, None)
         config = ServiceConfig(
             name=SERVICE_NAME,
             version=_SDK_VERSION,
@@ -866,6 +893,37 @@ def _sanitize_error_desc(desc: str) -> str:
         # byte UTF-8 in header values.
         flat = flat[: _MAX_ERROR_DESC_LEN - 3] + "..."
     return flat
+
+
+def _validate_extra_metadata(extra_metadata: dict[str, str] | None) -> dict[str, str]:
+    """Return a copy of ``extra_metadata`` after checking every key and value is a ``str``.
+
+    Registration metadata is ``Record<string, string>`` on the wire (the
+    TypeScript host enforces that with its option type). nats-py would
+    serialize an ``int`` or ``bool`` as a JSON number or boolean, which
+    breaks that shape — a TypeScript caller would see a non-string, and
+    the Python caller's ``str()`` coercion turns ``True`` into ``"True"``
+    rather than the wire's ``"true"`` — so fail at construction, naming
+    the offending key. Values are never echoed: a harness may put
+    something it would rather not see in an exception message.
+    """
+    if extra_metadata is None:
+        return {}
+    if not isinstance(extra_metadata, dict):
+        raise TypeError(
+            f"extra_metadata must be a dict[str, str] or None; got {type(extra_metadata).__name__}"
+        )
+    validated: dict[str, str] = {}
+    for key, value in extra_metadata.items():
+        if not isinstance(key, str):
+            raise TypeError(f"extra_metadata key {key!r} must be a str; got {type(key).__name__}")
+        if not isinstance(value, str):
+            raise TypeError(
+                f"extra_metadata[{key!r}] must be a str; got {type(value).__name__} "
+                '(registration metadata is string-valued: encode it, e.g. "true" or "42")'
+            )
+        validated[key] = value
+    return validated
 
 
 __all__ = [

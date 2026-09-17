@@ -175,7 +175,9 @@ deferred to a follow-up. All shapes are imported from
   per §3.2 — session-less harnesses MAY omit it or set it to
   `"default"`; this SDK takes a required `session_name` constructor
   arg and always advertises the value, defaulting callers pass
-  `"default"`. The `prompt` endpoint MUST be registered with queue
+  `"default"`. `extra_metadata` (`str` → `str`, checked at construction)
+  adds harness keys underneath: the required and identity keys always
+  win over it. The `prompt` endpoint MUST be registered with queue
   group `"agents"` (§3.3); ditto the `status` endpoint. The framework
   default differs between SDKs, so we pin the spec value explicitly.
 - **Request envelope** (§5.1): `{prompt: str, attachments?:

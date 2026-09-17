@@ -225,7 +225,7 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
       kind: 'served',
       phase: 'start',
       harness: 'claude',
-      harness_thread_id: `claude:${SESSION_A}`,
+      harness_thread_id: SESSION_A,
       thread_id: edge.thread_id,
       root_id: edge.root_id,
     })
@@ -233,7 +233,7 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
     expect(end).toMatchObject({
       phase: 'end',
       status: 'ok',
-      harness_thread_id: `claude:${SESSION_A}`,
+      harness_thread_id: SESSION_A,
       thread_id: edge.thread_id,
       root_id: edge.root_id,
     })
@@ -261,7 +261,7 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
     const records = await promptAndCollect(tracedCaller, 'traced', 'hello again')
     const served = records.map(decode).filter(r => r.kind === 'served')
     expect(served).toHaveLength(2)
-    for (const record of served) expect(record.harness_thread_id).toBe(`claude:${SESSION_B}`)
+    for (const record of served) expect(record.harness_thread_id).toBe(SESSION_B)
     const [start, end] = served as [Record_, Record_]
     expect(end.phase).toBe('end')
     expect((end.ts as number) - (start.ts as number)).toBeGreaterThanOrEqual(1)

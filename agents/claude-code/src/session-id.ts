@@ -4,7 +4,7 @@ import { join } from 'node:path'
 /**
  * How the channel learns the Claude Code session id — the value Claude
  * Code sends on every model request, which a served record names as
- * `claude:<session id>`.
+ * `harness_thread_id`, bare, next to `harness: claude`.
  *
  * Claude Code puts the id in `CLAUDE_CODE_SESSION_ID` when it spawns the
  * MCP server, so the environment is the baseline. A session can change

@@ -7,7 +7,9 @@
  * Code session cannot: the session's requests carry Claude Code's own
  * session id, set per session, not per prompt. The channel publishes the
  * binding instead: one record at `start`, stamped with the prompt's
- * arrival and naming the caller's thread and `claude:<session id>`, and
+ * arrival and naming the caller's thread and the session id, bare, under
+ * `harness: claude` — exactly the string the proxy files the session's
+ * calls under (afo-design.md §6.1, §8.3, 2026-09-17) — and
  * one at `end` with the outcome. The model calls the session made between
  * the two belong to the thread.
  *
@@ -60,7 +62,7 @@ export interface BuiltServedRecord {
  * with it as the `Agent-Sender` nonce. `agent` is the host identity, in
  * canonical `{account}.{user}` form — the identity that signs the record.
  * `sessionId` is the bare Claude Code session id; the record carries it
- * prefixed with the harness kind. `status` is required on `end` and must
+ * as is, next to the harness kind, never prefixed. `status` is required on `end` and must
  * be absent on `start`. `ts` is unix seconds — when the prompt arrived
  * for `start`, when the turn ended for `end`.
  */
@@ -95,7 +97,7 @@ export function buildServedRecord(
     thread_id: threadId,
     root_id: rootId,
     harness: HARNESS,
-    harness_thread_id: `${HARNESS}:${sessionId}`,
+    harness_thread_id: sessionId,
     phase,
     ...(status !== undefined ? { status } : {}),
   }

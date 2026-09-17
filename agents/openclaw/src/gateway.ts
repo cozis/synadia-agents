@@ -233,7 +233,7 @@ async function dispatchPromptToOpenClaw(
   // The harness id is minted here: a fresh trace id that the dispatch
   // below seeds into OpenClaw's trace scope, so the turn's model calls
   // carry it as their `traceparent` trace id; the pair names it as
-  // `openclaw:<trace id>`, and its `start` goes out now.
+  // the trace id as `harness_thread_id`, and its `start` goes out now.
   const scope = activeTrace();
   const turn = served?.beginTurn(scope);
   const traceId = turn ? newTraceId() : undefined;

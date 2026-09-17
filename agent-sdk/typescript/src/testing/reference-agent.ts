@@ -104,7 +104,12 @@ export interface ReferenceAgentOptions {
   readonly heartbeatIntervalS?: number;
   /** Custom prompt handler. Defaults to emitting only the empty terminator. */
   readonly promptHandler?: ReferenceAgentPromptHandler;
-  /** Extra metadata keys merged into the service metadata (forward-compat). */
+  /**
+   * Extra metadata keys merged into the service metadata (forward-compat).
+   * The required keys (`agent`, `owner`, `protocol_version`, and `session`
+   * when set) and the identity keys (`user_nkey`, `account`, `id_sig`)
+   * always win over an entry with the same name.
+   */
   readonly extraMetadata?: Readonly<Record<string, string>>;
   /** Sender identity registration; omission performs no self lookup or identity registration. */
   readonly identity?: { readonly signer?: SenderSigner };
@@ -216,11 +221,13 @@ export class ReferenceAgent {
 
     const svcm = new Svcm(this.#options.nc);
 
+    // Same precedence as `AgentService`: the required keys overwrite
+    // `extraMetadata`.
     const metadata: Record<string, string> = {
+      ...this.#options.extraMetadata,
       agent: this.#subject.agent,
       owner: this.#subject.owner,
       protocol_version: `${SDK_PROTOCOL_VERSION.major}.${SDK_PROTOCOL_VERSION.minor}`,
-      ...this.#options.extraMetadata,
     };
     if (this.#options.session !== undefined) {
       metadata["session"] = this.#options.session;

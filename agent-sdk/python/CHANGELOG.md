@@ -34,6 +34,16 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
   record. A malformed lineage id on the envelope is a `400`; a
   `TraceOptions` whose `edge_subject` can never be published to raises
   `ValueError`.
+- `AgentService(extra_metadata=…)` merges harness-specific keys into the
+  service registration metadata (`$SRV.INFO.metadata`), matching the
+  TypeScript host's `extraMetadata`. The required keys (`agent`, `owner`,
+  `session`, `protocol_version`) and the identity keys (`user_nkey`,
+  `account`, `id_sig`) always win: an extra entry under one of them is
+  overwritten, or removed when the service registers no such key, so a
+  harness can neither advertise a subject it does not serve nor register a
+  forged identity. Keys and values must be `str`; anything else raises
+  `TypeError` at construction, naming the key. The mapping is copied, so
+  mutating it after construction has no effect.
 
 ### Changed
 

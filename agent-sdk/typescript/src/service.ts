@@ -197,7 +197,12 @@ export interface AgentServiceOptions {
    * with no configuration of its own trace the calls it spawns.
    */
   readonly trace?: TraceOptions;
-  /** Extra metadata keys merged into the service metadata (forward-compat). */
+  /**
+   * Extra metadata keys merged into the service metadata (forward-compat).
+   * The required keys (`agent`, `owner`, `protocol_version`, and `session`
+   * when set) and the identity keys (`user_nkey`, `account`, `id_sig`)
+   * always win over an entry with the same name.
+   */
   readonly extraMetadata?: Readonly<Record<string, string>>;
   /**
    * Custom endpoints registered on the same `agents` micro service
@@ -674,11 +679,14 @@ export class AgentService {
     this.#identity = identity;
 
     const svcm = new Svcm(this.#options.nc);
+    // `extraMetadata` goes first so the required keys overwrite it: a harness
+    // cannot advertise an agent / owner / protocol version other than the
+    // subject it serves.
     const metadata: Record<string, string> = {
+      ...this.#options.extraMetadata,
       agent: this.#subject.agent,
       owner: this.#subject.owner,
       protocol_version: PROTOCOL_VERSION_STRING,
-      ...this.#options.extraMetadata,
     };
     if (this.#options.session !== undefined) {
       metadata["session"] = this.#options.session;

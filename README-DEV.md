@@ -96,13 +96,8 @@ their branch-local SDK links, so both SDKs need a current `dist/` when
 the extension is installed. Claude Code is different: the marketplace
 runs the committed self-contained `runtime/server.js`; it does not run
 `bun install` at startup. To exercise branch SDK changes there, install
-the packed branch SDK artifacts, rebuild the runtime (`bun run build`),
-and run `bun run verify:bundle`, following the `claude-code` job in
-`.github/workflows/agents-typescript.yml` with Bun 1.3.14. Hold the npm
-install to `agents/claude-code/bun.lock` with
-`bun ./scripts/lock-install.ts pin` before it and
-`bun ./scripts/lock-install.ts verify` after it: an unpinned install
-picks up newer external releases and rebuilds a different bundle.
+the packed branch SDK artifacts, rebuild the runtime, and run the
+bundle verification described in `agents/claude-code/README.md`.
 
 Other agent packages in `agents/`, including `agents/flue/`,
 `agents/eve/`, `agents/opencode/`, and `agents/codex/`, run as

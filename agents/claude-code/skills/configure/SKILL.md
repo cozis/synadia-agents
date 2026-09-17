@@ -143,7 +143,7 @@ publishes nothing on `TRACE.edges`. This is the default.
 Set `tracing` to `"on"`. The channel adopts a traced caller's thread (or mints
 one for a prompt without lineage) and publishes two signed `served` records per
 prompt on `TRACE.edges`, binding the thread to the Claude Code session id
-(`claude:<session id>`) with the turn's outcome, so the session's model calls
+(`harness: claude`, `harness_thread_id: <session id>`) with the turn's outcome, so the session's model calls
 between the two records can be attributed to the caller's thread. The records
 are signed with the host identity: if `senderIdentity` is not `"signed"`, say
 so and offer to set it, because with identity off nothing is published.

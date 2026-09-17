@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dispatches the turn inside OpenClaw's trace scope keyed by it, so every
   model call of the turn carries that id as its `traceparent` trace id
   (OpenClaw 2026.8 and later); and publishes two signed `served` records per
-  prompt on `TRACE.edges`, bound to `openclaw:<trace id>`, with the outcome.
+  prompt on `TRACE.edges`, bound to the trace id, bare, under `harness: openclaw`, with the outcome.
   Requires `senderIdentity: "signed"`; without it nothing is published, the
   gateway warns at startup and the records owed count as dropped on the
   heartbeat.

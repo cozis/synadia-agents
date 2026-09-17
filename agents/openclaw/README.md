@@ -189,7 +189,7 @@ plugin takes part in the SDKs' observability tracing extension:
 - The plugin publishes the binding: for every prompt, two signed `served`
   records on `TRACE.edges` — one stamped with the prompt's arrival and one
   when the turn ends with `status` `ok` or `error` — naming the thread and,
-  as the harness thread id, `openclaw:<trace id>`. The model calls carrying
+  as the harness thread id, bare, next to `harness: openclaw`. The model calls carrying
   that trace id between the two belong to the thread.
 - `status` is `error` when the dispatch threw or OpenClaw reported a
   dispatch or delivery failure for the turn. A model error that OpenClaw

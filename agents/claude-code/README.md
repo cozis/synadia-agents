@@ -299,7 +299,7 @@ channel takes part in the SDKs' observability tracing extension:
   prompt arrives, one when the turn ends, with `status` `ok`, `error` (the
   turn failed, or the channel shut down before Claude answered), or
   `timeout` (the 30-minute request TTL). Both name the caller's thread and
-  `harness_thread_id: claude:<session id>`; the model calls the session made
+  `harness: claude`, `harness_thread_id: <session id>`; the model calls the session made
   between the two timestamps are the thread's. Claude Code subagents send
   the same session id plus their own agent id (`x-claude-code-agent-id`), so
   their calls can be told apart from the session's own.

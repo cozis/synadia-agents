@@ -83,7 +83,7 @@ describe("buildServedRecord", () => {
       thread_id: THREAD,
       root_id: ROOT,
       harness: HARNESS,
-      harness_thread_id: "openclaw:s-1",
+      harness_thread_id: "s-1",
       phase: "start",
     });
     expect(ts).toBeGreaterThanOrEqual(before);
@@ -145,13 +145,13 @@ describe("ServedPublisher", () => {
     const [start, end] = published.map((m) => decode(m.payload));
     expect(start).toMatchObject({
       kind: "served",
-      harness_thread_id: "openclaw:sess-1",
+      harness_thread_id: "sess-1",
       phase: "start",
       thread_id: THREAD,
       root_id: ROOT,
     });
     expect(start!["ts"]).toBeGreaterThanOrEqual(arrived);
-    expect(end).toMatchObject({ phase: "end", status: "ok", harness_thread_id: "openclaw:sess-1" });
+    expect(end).toMatchObject({ phase: "end", status: "ok", harness_thread_id: "sess-1" });
     for (const m of published) {
       const record = decode(m.payload);
       const header = parseSenderHeader(readSenderHeaderValue(m.headers) ?? "");
@@ -192,8 +192,8 @@ describe("ServedPublisher", () => {
     turn.bind("third");
     await p.flush();
     expect(published.map((m) => decode(m.payload)["harness_thread_id"])).toEqual([
-      "openclaw:first",
-      "openclaw:first",
+      "first",
+      "first",
     ]);
     expect(warnings.filter((w) => /unusable/.test(w))).toHaveLength(1);
     expect(warnings.filter((w) => /already bound/.test(w))).toHaveLength(1);

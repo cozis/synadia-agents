@@ -79,7 +79,7 @@ describe('buildServedRecord', () => {
       thread_id: THREAD,
       root_id: ROOT,
       harness: HARNESS,
-      harness_thread_id: `claude:${SESSION}`,
+      harness_thread_id: SESSION,
       phase: 'start',
     })
     expect(ts).toBeGreaterThanOrEqual(before)
@@ -126,7 +126,7 @@ describe('ServedPublisher', () => {
 
     expect(published.map(m => m.subject)).toEqual([SUBJECT, SUBJECT])
     const [start, end] = published.map(m => decode(m.payload))
-    expect(start).toMatchObject({ kind: 'served', phase: 'start', harness_thread_id: `claude:${SESSION}` })
+    expect(start).toMatchObject({ kind: 'served', phase: 'start', harness_thread_id: SESSION })
     expect(end).toMatchObject({ kind: 'served', phase: 'end', status: 'ok', thread_id: THREAD, root_id: ROOT })
     expect(start!.record_id).not.toBe(end!.record_id)
     for (const m of published) {

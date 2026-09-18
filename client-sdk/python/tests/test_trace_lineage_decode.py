@@ -91,6 +91,33 @@ def test_rejects_a_malformed_id(value: str) -> None:
         decode(_wire(root_id=value))
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        _wire(thread_id=THREAD),
+        _wire(root_id=ROOT),
+        _wire(thread_id=THREAD, root_id=""),
+        _wire(thread_id=None, root_id=ROOT),
+    ],
+    ids=["thread-alone", "root-alone", "thread-with-empty-root", "root-with-null-thread"],
+)
+def test_rejects_a_half_pair(body: bytes) -> None:
+    """The pair travels together: a caller that traces sends both, one that
+    does not sends neither. Exactly one names a broken or hand-written
+    caller, and adopting the lone field would file the execution under a
+    tree the caller never named — so it is rejected like a wrongly shaped
+    id, in both SDKs."""
+    with pytest.raises(ProtocolError, match="given together"):
+        decode(body)
+
+
+def test_an_explicit_envelope_may_name_one_field() -> None:
+    """The rule is the wire's. A caller overriding one field on an explicit
+    envelope is completed by ``prompt()`` before it is sent, never
+    rejected at construction."""
+    assert Envelope(prompt="x", thread_id=THREAD).root_id is None
+
+
 def test_an_explicit_envelope_is_held_to_the_same_shape() -> None:
     """A caller overriding lineage gets the error at construction, not on
     the wire — the receiver would refuse it anyway."""

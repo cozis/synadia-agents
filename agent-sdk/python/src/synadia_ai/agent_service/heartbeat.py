@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 from synadia_ai.agents import HeartbeatPayload
@@ -27,11 +28,21 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
+#: Reads the extra heartbeat fields when a beat is built, so a value that
+#: moves between beats — a counter — is current on every one.
+ExtrasProvider = Callable[[], Mapping[str, object]]
+
+# The §8.3 field names. An extra under one of these would either shadow
+# the real field or, as a duplicate keyword, blow up construction with a
+# TypeError; refused up front with a message that names the key instead.
+_RESERVED_KEYS = frozenset(HeartbeatPayload.model_fields)
+
 
 def build_heartbeat_payload(
     subject: AgentSubject,
     interval_s: int,
     instance_id: str,
+    extras: Mapping[str, object] | None = None,
 ) -> HeartbeatPayload:
     """Construct a §8.3 heartbeat payload for ``subject``.
 
@@ -39,7 +50,18 @@ def build_heartbeat_payload(
     ``status`` request/response endpoint — both emit the same payload
     shape, and richer agent metadata added in future PRs lands here in
     one place.
+
+    ``extras`` are forward-compat fields merged into the wire payload
+    alongside the §8.3 ones (the TypeScript encoder's ``extras`` slot).
+    A key that reuses a §8.3 field name raises ``ValueError``.
     """
+    if extras:
+        clash = sorted(_RESERVED_KEYS.intersection(extras))
+        if clash:
+            raise ValueError(
+                f"heartbeat extras must not reuse the §8.3 field names {clash}; "
+                "those are set from the subject and the service"
+            )
     return HeartbeatPayload(
         agent=subject.agent,
         owner=subject.owner,
@@ -47,6 +69,7 @@ def build_heartbeat_payload(
         instance_id=instance_id,
         ts=now_iso(),
         interval_s=interval_s,
+        **(extras or {}),
     )
 
 
@@ -55,9 +78,10 @@ async def publish_one(
     subject: AgentSubject,
     interval_s: int,
     instance_id: str,
+    extras: Mapping[str, object] | None = None,
 ) -> None:
     """Publish a single heartbeat frame to the agent's heartbeat subject."""
-    payload = build_heartbeat_payload(subject, interval_s, instance_id)
+    payload = build_heartbeat_payload(subject, interval_s, instance_id, extras)
     data = payload.model_dump_json().encode("utf-8")
     await nc.publish(subject.heartbeat, data)
 
@@ -68,8 +92,17 @@ async def run_publisher(
     interval_s: int,
     instance_id: str,
     stop: asyncio.Event,
+    extras: ExtrasProvider | None = None,
 ) -> None:
     """Periodically publish heartbeats until `stop` is set.
+
+    ``extras``, when given, is called before each beat for the extra
+    fields to carry on it (see :func:`build_heartbeat_payload`). A
+    provider that raises, or extras the payload cannot carry (a reserved
+    key, a value that does not serialise), cost that beat its extras and
+    nothing more: the beat still goes out, the failure is logged, and the
+    publisher keeps running — a bad extra must never take the agent's
+    liveness down with it.
 
     A failed publish (e.g. ``ConnectionClosedError`` after a broker
     restart) MUST NOT crash the publisher task with a non-cancellation
@@ -80,16 +113,35 @@ async def run_publisher(
     whether to recover.
     """
     log.debug("heartbeat publisher starting for %s (interval=%ss)", subject.inbox, interval_s)
+
+    async def beat() -> None:
+        fields: Mapping[str, object] | None = None
+        if extras is not None:
+            try:
+                fields = extras()
+            except Exception:
+                log.exception("heartbeat extras provider failed; publishing without extras")
+        try:
+            await publish_one(nc, subject, interval_s, instance_id, fields)
+        except (TypeError, ValueError) as exc:
+            # A reserved key or an unserialisable value — a fault in the
+            # extras, not in the transport (pydantic's serialisation error
+            # is a ValueError). Transport errors propagate to the caller.
+            if fields is None:
+                raise
+            log.error("heartbeat extras rejected (%s); publishing without extras", exc)
+            await publish_one(nc, subject, interval_s, instance_id)
+
     try:
         # Emit one heartbeat immediately so callers that subscribe-then-discover
         # observe liveness without waiting a full interval (§8.5).
-        await publish_one(nc, subject, interval_s, instance_id)
+        await beat()
         while not stop.is_set():
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=interval_s)
             if stop.is_set():
                 break
-            await publish_one(nc, subject, interval_s, instance_id)
+            await beat()
     except Exception:
         log.exception("heartbeat publisher failed for %s; exiting", subject.inbox)
         return
@@ -97,6 +149,7 @@ async def run_publisher(
 
 
 __all__ = [
+    "ExtrasProvider",
     "build_heartbeat_payload",
     "publish_one",
     "run_publisher",

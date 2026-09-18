@@ -8,6 +8,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Heartbeat trace record counts.** A service that opted in to tracing
+  puts `records_published` and `records_dropped` — two counters since
+  process start, read fresh on every beat from `traceRecordCounts()` — in
+  the heartbeat's extras and on the `status` reply, so whoever consumes
+  the heartbeat knows how many records the process failed to publish.
+  Only drops the SDK itself observed are counted; a record lost after it
+  left the process is not. An untraced or propagate-only service reports
+  neither; its heartbeat is unchanged.
+- **Observability tracing (opt-in).** `AgentServiceOptions.trace` hands
+  tracing down to every `@synadia-ai/agents` client used inside a prompt
+  handler. The service adopts the caller's `thread_id` / `root_id` (or
+  mints a root when it opted in) and binds them as the ambient trace for
+  the handler; `PromptResponse.traceHeaders()` returns the
+  `X-Synadia-Thread-ID` / `X-Synadia-Root-ID` headers to stamp on each
+  model request (`{}` when untraced). The service itself writes no trace
+  record. A malformed lineage id on the envelope is a `400`; a `trace`
+  whose `edgeSubject` can never be published to is rejected at
+  construction.
 - **Sender identity (the sender-identity extension).** `AgentService`
   classifies every `prompt` request before the §6.4 ack: a malformed
   `Agent-Sender` header → `400`; a failing signature, replayed nonce,
@@ -63,6 +81,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **A half lineage pair is rejected, not completed.** An envelope
+  carrying exactly one of `thread_id` and `root_id` is a malformed
+  envelope: the `400` frame and the terminator, no ack, and the handler
+  never runs — where the service used to fill in `root_id = thread_id`
+  or mint a thread under the given root. Both present are adopted
+  verbatim; neither makes a service that opted in mint a root; unchanged.
+  The Python host behaves the same.
 - `extraMetadata` can no longer override the required registration keys.
   `AgentService` and `ReferenceAgent` now write `agent`, `owner` and
   `protocol_version` over `extraMetadata` (previously an extra entry

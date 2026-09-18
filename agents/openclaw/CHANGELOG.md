@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in tracing through `tracing: "on"` / `NATS_TRACING=on` (also in the
+  setup wizard): the channel adopts a traced caller's thread, or mints one
+  for a prompt that carries none; mints a fresh trace id per prompt and
+  dispatches the turn inside OpenClaw's trace scope keyed by it, so every
+  model call of the turn carries that id as its `traceparent` trace id
+  (OpenClaw 2026.8 and later); and publishes two signed `served` records per
+  prompt on `TRACE.edges`, bound to the trace id, bare, under `harness: openclaw`, with the outcome.
+  Requires `senderIdentity: "signed"`; without it nothing is published, the
+  gateway warns at startup and the records owed count as dropped on the
+  heartbeat.
 - Optional `senderIdentity: "signed"` mode derives registration identity from
   the same immutable NATS credential snapshot used to connect. The default is
   `off`, so existing identity-free setups do no identity lookup.

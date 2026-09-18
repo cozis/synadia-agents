@@ -69,6 +69,7 @@ Every SDK call mapped to its Synadia Agent Protocol for NATS section, for implem
 | Subject                  | `agents.*.*.*.heartbeat` (fixed wildcard). Callers filter via `discover({ filter })`. | §8.1, §8.5 |
 | Payload required fields  | `agent`, `owner`, `instance_id`, `ts`, `interval_s`. `session` when present.          | §8.3       |
 | Unknown heartbeat fields | Preserved on `HeartbeatPayload.extras`.                                               | §8.3, §12  |
+| Trace record counts      | Traced services add `records_published` / `records_dropped` (local drops only).       | extension  |
 | Tracker keying           | `instance_id` (from the payload), NOT the subject. Multi-instance safe.               | §3.3, §8.3 |
 | Liveness                 | `isOnline === (age < 3 × interval_s)`.                                                | §8.2       |
 | Start timing             | Tracker SUB established + flushed before first `$SRV.PING`.                           | §8.5       |

@@ -99,7 +99,8 @@ spec to catch up.
 | Subject                      | `agents.hb.{agent}.{owner}.{session_name}` (v0.3 verb-first; `hb` abbreviates `heartbeat`).      | §8.1       |
 | Default interval             | `AgentService(heartbeat_interval_s=30)` (spec recommendation).                                   | §8.2       |
 | Payload fields               | `{agent, owner, session, instance_id, ts, interval_s}` — `session` mirrors `metadata.session` (== subject token 5); decoder tolerates absence to interop with spec-compliant session-less peers that omit the field. | §8.3 |
-| `HeartbeatPayload` tolerance | `extra="ignore"` - unknown fields silently accepted per §8.3.                                    | §8.3       |
+| `HeartbeatPayload` tolerance | `extra="allow"` - unknown fields accepted per §8.3, readable on `HeartbeatPayload.extras`, preserved on re-encode. | §8.3       |
+| Trace record counts          | A service that opted in to tracing (and publishes records) puts `records_published` / `records_dropped` (two counters since process start; `trace_record_counts()`) on every heartbeat and `status` reply — only drops the SDK itself observed, not records lost after they left the process. Absent when untraced or propagate-only. | extension  |
 | `instance_id` source         | `service.id` assigned by nats-py's micro framework (matches `$SRV.INFO` `id`).                   | §3.4, §8.3 |
 | First heartbeat              | Published immediately after service registration so subscribe-then-discover sees liveness.       | §8.5       |
 | Tracker API                  | `Agents.liveness(instance_id)` → `Liveness \| None` (keyed on `payload.instance_id`).            | §8.2       |

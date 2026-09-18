@@ -10,6 +10,45 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Added
 
+- **Trace record counts.** The SDK counts the trace records it handed to
+  the connection and the ones it could not — no identity to sign with, or
+  a publish that raised — process-wide, counted from process start. These
+  are the drops the SDK itself observed: a record lost after it left the
+  process is not counted, and a record is only due once its prompt goes
+  out, so a prompt never iterated or rejected by validation counts
+  nothing, and neither does propagate-only mode. `trace_record_counts()`
+  returns the snapshot (`TraceRecordCounts`); `count_trace_record_published()`
+  / `count_trace_record_dropped()` are for other record writers in the same
+  process. The agent service reports both numbers on its heartbeat.
+- **`HeartbeatPayload.extras`.** Unknown heartbeat fields are now kept
+  (`extra="allow"`), readable on `extras` and preserved verbatim on
+  re-encode, as the TypeScript SDK does; they used to be dropped on
+  decode.
+- **Observability tracing (opt-in).** `Agents(nc=nc, trace=TraceOptions())`
+  — or an `AgentService` handing its options down — makes every `prompt()`
+  mint a thread id, carry `thread_id` / `root_id` in the envelope, and
+  publish a signed edge record (`build_edge_record`, `EDGE_RECORD_VERSION`)
+  to `TraceOptions.edge_subject` (default `DEFAULT_EDGE_SUBJECT`, `None`
+  for propagate-only) immediately before the prompt goes out — and only
+  then: a prompt that is never iterated, fails validation, or whose header
+  cannot be built publishes no edge. The record names its writer in
+  `agent` (`{account}.{user}`, the identity that signs it); its
+  `record_id` is also the header's nonce and the `Nats-Msg-Id`, so body,
+  signature and stream de-duplication share one id.
+  `prompt(..., tool_call_id=...)` labels the edge. Omitted, prompts stay byte-identical to protocol 0.3 — an
+  untraced client drops the `thread_id` / `root_id` of any `Envelope` handed
+  to it, so an untraced relay forwarding what it received sends a plain
+  envelope. With tracing on, an explicit `Envelope` may override the minted
+  lineage, except that forwarding the envelope a handler received spawns a
+  new thread rather than reusing its parent's. Exports: `TraceOptions`, `TraceScope`,
+  `active_trace`, `bind_active_trace`, `inherited_trace_options`,
+  `random_thread_id`, `is_thread_id`, `valid_tool_call_id`.
+  - Lineage read from the wire is untrusted, bounded input: a `thread_id`
+    or `root_id` that is not a string of `THREAD_ID_HEX_LEN` lowercase hex
+    characters is a malformed envelope (`ProtocolError`); an empty string
+    or `null` is absent.
+  - `TraceOptions` rejects an `edge_subject` that can never be published
+    to (empty, wildcard, whitespace) with `ValueError`.
 - `SenderSignatureRequiredError` exposes stable `code` (`401`),
   `description` (`"signature required"`), and `subject` attributes for
   handling local signed-target preflight failures without parsing a message.
@@ -31,6 +70,13 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Changed
 
+- **A half lineage pair is a malformed envelope.** `decode()` rejects a
+  wire envelope carrying exactly one of `thread_id` and `root_id` with a
+  `ProtocolError` — an agent service answers `400`, as for a wrongly
+  shaped id. A caller sends both or neither; adopting a lone field would
+  file the execution under a tree the caller never named. The TypeScript
+  SDK reads the wire the same way. An explicit `Envelope` handed to
+  `prompt()` may still name one field; `prompt()` completes it as before.
 - Sender identity is now opt-in: omitting `identity` performs no lookup and
   sends no `Agent-Sender` header; explicit `Identity()` enables unsigned
   claims, and `send_unsigned_claim=False` performs no automatic identity

@@ -61,8 +61,14 @@ from synadia_ai.agents import (
     ResponseChunk,
     SenderResolver,
     StatusChunk,
+    TraceOptions,
+    TraceScope,
+    active_trace,
+    bind_active_trace,
     decode,
     format_sender,
+    random_thread_id,
+    trace_record_counts,
 )
 from synadia_ai.agents.identity import (
     DEFAULT_RESOLVE_TTL_S,
@@ -144,6 +150,34 @@ DEFAULT_ATTACHMENTS_OK = True
 DEFAULT_KEEPALIVE_INTERVAL_S: float = 30.0
 
 
+def _trace_binding(
+    envelope: Envelope, options: TraceOptions | None
+) -> contextlib.AbstractContextManager[None]:
+    """Bind this execution's trace, or nothing at all.
+
+    A caller's lineage — the pair, ``thread_id`` and ``root_id`` — is
+    adopted whatever this service is configured for, so a tree that starts
+    upstream is not broken here. With no lineage on the envelope, only a
+    service that opted in mints a root — an untraced service binds
+    nothing, so nothing is minted per request and
+    :meth:`PromptStream.trace_headers` stays empty rather than stamping
+    ids on model requests the operator never asked to trace.
+
+    A half pair is never completed: :func:`~synadia_ai.agents.decode`
+    already rejects it on the wire, and an envelope built by hand gets the
+    same :class:`ProtocolError` here — a ``400`` to the caller — rather
+    than a tree of its own.
+    """
+    thread_id, root_id = envelope.thread_id, envelope.root_id
+    if thread_id is None or root_id is None:
+        if thread_id is not None or root_id is not None:
+            raise ProtocolError("envelope thread_id and root_id must be given together")
+        if options is None:
+            return contextlib.nullcontext()
+        thread_id = root_id = random_thread_id()
+    return bind_active_trace(TraceScope(thread_id, root_id), options)
+
+
 class PromptStream:
     """Handle given to a prompt handler for emitting response chunks.
 
@@ -163,6 +197,29 @@ class PromptStream:
         self._request = request
         self._nc = nc
         self._sender = sender
+
+    def trace_headers(self) -> dict[str, str]:
+        """Headers for every model request this execution issues.
+
+        An agent stamps these on each completion request so the model
+        proxy files the call under the right thread and tree without
+        seeing any NATS traffic. Hierarchy is the edge records' job, so
+        the proxy needs no parent or tool-call header.
+
+        ``{}`` when the prompt was untraced, so harness code needs no
+        plumbing and degrades to nothing.
+
+        Each call counts against this execution: the running total is
+        recorded on the edge of any thread it spawns afterwards.
+        """
+        scope = active_trace()
+        if scope is None:
+            return {}
+        scope.turn_count_hint[0] += 1
+        return {
+            "X-Synadia-Thread-ID": scope.thread_id,
+            "X-Synadia-Root-ID": scope.root_id,
+        }
 
     @property
     def sender(self) -> SenderInfo | None:
@@ -333,6 +390,7 @@ class AgentService:
         accept_sender: AcceptSenderHook | None = None,
         resolve_ttl_s: float = DEFAULT_RESOLVE_TTL_S,
         operator_attested: bool = False,
+        trace: TraceOptions | None = None,
     ) -> None:
         if heartbeat_interval_s <= 0:
             raise ValueError("heartbeat_interval_s must be > 0 (heartbeat is mandatory in v0.3)")
@@ -359,6 +417,9 @@ class AgentService:
         self._effective_max_payload_value = max_payload
         self._attachments_ok = attachments_ok
         self._keepalive_interval_s = keepalive_interval_s
+        # Observability: handed down to clients used inside prompt handlers.
+        # The service itself never writes trace records.
+        self._trace = trace
         self._prompt_handler: PromptHandler | None = None
         self._service: Service | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
@@ -564,6 +625,7 @@ class AgentService:
                 self._heartbeat_interval_s,
                 self._service.id,
                 self._heartbeat_stop,
+                extras=self._heartbeat_extras,
             ),
             name=f"heartbeat-{self.subject.inbox}",
         )
@@ -583,6 +645,25 @@ class AgentService:
             await self._service.stop()
             self._service = None
         log.info("agent stopped on %s", self.subject.inbox)
+
+    def _heartbeat_extras(self) -> dict[str, object]:
+        """What goes on the heartbeat beyond the §8.3 required fields.
+
+        When the service opted in to tracing and publishes records: how
+        many trace records this process has published and dropped since
+        it started, as ``records_published`` and ``records_dropped``.
+        Read when each beat is built, so every beat carries the current
+        totals. A rising dropped count tells whoever consumes the
+        heartbeat that records this process owed were never sent. An
+        untraced service reports nothing, so its heartbeat stays
+        byte-identical to plain protocol 0.3; so does a propagate-only
+        one (``edge_subject=None``), which publishes no records and would
+        otherwise report a constant 0/0 that looks like a healthy zero.
+        """
+        if self._trace is None or self._trace.edge_subject is None:
+            return {}
+        counts = trace_record_counts()
+        return {"records_published": counts.published, "records_dropped": counts.dropped}
 
     async def _on_status_request(self, request: Request) -> None:
         """Reply with a freshly-built §8.3 heartbeat payload (v0.3 §-TBD).
@@ -608,6 +689,7 @@ class AgentService:
                 self.subject,
                 self._heartbeat_interval_s,
                 self._service.id,
+                self._heartbeat_extras(),
             )
             data = payload.model_dump_json().encode("utf-8")
             await request.respond(data)
@@ -721,7 +803,10 @@ class AgentService:
                 )
 
             try:
-                await handler(envelope, stream)
+                # Place thread_id and root_id in the context storage
+                # to allow clients used as tools to reache them
+                with _trace_binding(envelope, self._trace):
+                    await handler(envelope, stream)
             except ProtocolError as exc:
                 log.warning(
                     "prompt handler rejected protocol input on %s: %s",

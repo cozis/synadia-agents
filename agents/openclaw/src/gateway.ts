@@ -7,7 +7,10 @@ import {
   formatSender,
   type Logger,
   type NatsConnectionBundle,
+  activeTrace,
+  DEFAULT_EDGE_SUBJECT,
   type RequestEnvelope,
+  type TraceOptions,
 } from "@synadia-ai/agents";
 import {
   AgentService,
@@ -25,6 +28,8 @@ import {
 import { connectToNats, drainConnection } from "./nats/connection.js";
 import type { ResolvedNatsAccount } from "./types.js";
 import { getNatsRuntime, setActiveConnection } from "./runtime.js";
+import { newTraceId, runWithTraceId } from "./trace-scope.js";
+import { ServedPublisher, type ServedStatus } from "./served.js";
 import {
   cleanupAgentStaging,
   stageAttachmentsIntoPrompt,
@@ -33,6 +38,21 @@ import {
 // Stage attachments under OpenClaw's media-access allowlist.
 const ATTACHMENT_BASE_DIR = join(resolveStateDir(), "media", "nats-channel");
 const HEARTBEAT_INTERVAL_S = 5;
+
+/**
+ * The SDK trace options for the resolved account; `undefined` when off.
+ * With tracing on the service adopts a traced caller's thread, or mints
+ * one for a prompt that carries none, and reports the trace record counts
+ * on its heartbeat. The plugin exposes no tool that prompts other agents,
+ * so it never writes an edge record; what it publishes is the served pair
+ * that binds each prompt to the trace id its model calls carry (see
+ * `ServedPublisher`), on the same default subject.
+ */
+export function traceOptionsFor(
+  account: Pick<ResolvedNatsAccount, "tracing">,
+): TraceOptions | undefined {
+  return account.tracing === "on" ? {} : undefined;
+}
 
 // One OpenClaw channel account runs at a time.
 let activeService: AgentService | null = null;
@@ -78,8 +98,13 @@ export async function startNatsGateway(
   ctx.log?.info?.(
     `nats: gateway starting — oc/${account.owner}/${agentName} using ${sourceLabel} ` +
       `(accountId: ${account.accountId}, senderIdentity: ${account.senderIdentity}, ` +
-      `minSenderTrust: ${account.minSenderTrust})`,
+      `minSenderTrust: ${account.minSenderTrust}, tracing: ${account.tracing})`,
   );
+  if (account.tracing === "on" && account.senderIdentity !== "signed") {
+    ctx.log?.warn?.(
+      "nats: tracing is on but senderIdentity is off; trace records are signed, so none will be published",
+    );
+  }
 
   await cleanupPrevious();
 
@@ -92,6 +117,8 @@ export async function startNatsGateway(
   activeBundle = connected.bundle;
   activeAgentName = agentName;
 
+  const traceOptions = traceOptionsFor(account);
+  const logger = gatewayLogger(ctx);
   const service = new AgentService({
     nc: connected.nc,
     agent: AGENT_ID,
@@ -112,9 +139,25 @@ export async function startNatsGateway(
       ? { identity: { signer: connected.bundle.signer } }
       : {}),
     minSenderTrust: account.minSenderTrust,
-    logger: gatewayLogger(ctx),
+    // Tracing: adopt the caller's thread and root, or mint them for an
+    // envelope that carries none, exactly as an SDK-built agent does.
+    ...(traceOptions ? { trace: traceOptions } : {}),
+    logger,
   });
   activeService = service;
+
+  // Tracing: the served pair per prompt is the plugin's own record. It is
+  // signed with the host identity, which the service only knows once it
+  // has started, hence the getter.
+  const served = traceOptions
+    ? new ServedPublisher({
+        nc: connected.nc,
+        subject: DEFAULT_EDGE_SUBJECT,
+        signer: connected.bundle.signer,
+        identity: () => service.identity,
+        logger,
+      })
+    : undefined;
 
   const maxPayloadBytes = connected.nc.info?.max_payload ?? 1_048_576;
   service.onPrompt(async (envelope, response) => {
@@ -126,6 +169,7 @@ export async function startNatsGateway(
       envelope,
       response,
       maxPayloadBytes,
+      served,
     );
   });
 
@@ -176,12 +220,24 @@ async function dispatchPromptToOpenClaw(
   envelope: RequestEnvelope,
   response: PromptResponse,
   maxPayloadBytes: number,
+  served: ServedPublisher | undefined,
 ): Promise<void> {
   // Sender identity stays structured metadata: it is visible in logs and on
   // PromptResponse, but is never interpolated into the model's prompt text.
   ctx.log?.info?.(
     `nats: incoming prompt sender=${formatSender(response.sender)}`,
   );
+
+  // Tracing: this prompt's served pair, opened on arrival. The service
+  // bound the prompt's trace scope as the ambient one for this handler.
+  // The harness id is minted here: a fresh trace id that the dispatch
+  // below seeds into OpenClaw's trace scope, so the turn's model calls
+  // carry it as their `traceparent` trace id; the pair names it as
+  // the trace id as `harness_thread_id`, and its `start` goes out now.
+  const scope = activeTrace();
+  const turn = served?.beginTurn(scope);
+  const traceId = turn ? newTraceId() : undefined;
+  turn?.bind(traceId!);
 
   const finalPrompt = stageAttachmentsIntoPrompt({
     baseDir: ATTACHMENT_BASE_DIR,
@@ -227,35 +283,52 @@ async function dispatchPromptToOpenClaw(
     channel: effectiveRuntime,
   };
 
-  await dispatchInboundDirectDmWithRuntime({
-    cfg,
-    runtime: runtimeWithStreaming,
-    channel: "nats",
-    channelLabel: "NATS",
-    accountId: account.accountId,
-    peer: { kind: "direct", id: "remote" },
-    senderId: "remote",
-    senderAddress: "nats:remote",
-    recipientAddress: `nats:${account.agentName}`,
-    conversationLabel: "remote",
-    rawBody: finalPrompt,
-    messageId: `nats-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    timestamp: Date.now(),
-    commandAuthorized: true,
-    deliver: async (payload) => {
-      const text = payload.text ?? "";
-      if (!text) return;
-      for (const slice of splitResponseText(text, maxPayloadBytes)) {
-        await response.send(slice);
-      }
-    },
-    onRecordError: (err) => {
-      ctx.log?.error?.(`nats: session record error: ${String(err)}`);
-    },
-    onDispatchError: (err, info) => {
-      ctx.log?.error?.(`nats: ${info.kind} dispatch error: ${String(err)}`);
-    },
-  });
+  let status: ServedStatus = "ok";
+  try {
+    // Tracing: dispatch inside OpenClaw's trace scope keyed by the minted
+    // id, so every model call of this turn carries it (see trace-scope.ts).
+    // A no-op without a scope store or with tracing off.
+    await runWithTraceId(traceId, () =>
+      dispatchInboundDirectDmWithRuntime({
+      cfg,
+      runtime: runtimeWithStreaming,
+      channel: "nats",
+      channelLabel: "NATS",
+      accountId: account.accountId,
+      peer: { kind: "direct", id: "remote" },
+      senderId: "remote",
+      senderAddress: "nats:remote",
+      recipientAddress: `nats:${account.agentName}`,
+      conversationLabel: "remote",
+      rawBody: finalPrompt,
+      messageId: `nats-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: Date.now(),
+      commandAuthorized: true,
+      deliver: async (payload) => {
+        const text = payload.text ?? "";
+        if (!text) return;
+        for (const slice of splitResponseText(text, maxPayloadBytes)) {
+          await response.send(slice);
+        }
+      },
+      onRecordError: (err) => {
+        ctx.log?.error?.(`nats: session record error: ${String(err)}`);
+      },
+      onDispatchError: (err, info) => {
+        ctx.log?.error?.(`nats: ${info.kind} dispatch error: ${String(err)}`);
+        // OpenClaw reports some dispatch failures here and still resolves;
+        // the served pair records the turn as failed either way.
+        status = "error";
+      },
+      }),
+    );
+  } catch (err) {
+    status = "error";
+    throw err;
+  } finally {
+    // The turn is over either way: `end` carries its outcome.
+    turn?.settle(status);
+  }
 }
 
 function gatewayLogger(

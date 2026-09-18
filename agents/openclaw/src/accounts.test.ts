@@ -20,6 +20,7 @@ const IDENTITY_ENV_VARS = [
   "NATS_CREDS",
   "NATS_SENDER_IDENTITY",
   "NATS_MIN_SENDER_TRUST",
+  "NATS_TRACING",
 ] as const;
 
 function snapshotIdentityEnv(): Record<string, string | undefined> {
@@ -57,6 +58,32 @@ describe("account resolution", () => {
     expect(account.connectionSource).toEqual({ url: "nats://demo.nats.io" });
     expect(account.senderIdentity).toBe("off");
     expect(account.minSenderTrust).toBe("any");
+    expect(account.tracing).toBe("off");
+  });
+
+  it("resolves tracing from config, lets NATS_TRACING win, and rejects other values", () => {
+    const cfg = {
+      channels: {
+        nats: { accounts: { default: { agentName: "a", tracing: "on" } } },
+      },
+    };
+    expect(resolveNatsAccount(cfg).tracing).toBe("on");
+    process.env.NATS_TRACING = "off";
+    expect(resolveNatsAccount(cfg).tracing).toBe("off");
+    process.env.NATS_TRACING = "on";
+    expect(resolveNatsAccount({}).tracing).toBe("on");
+    process.env.NATS_TRACING = "yes";
+    expect(() => resolveNatsAccount({})).toThrow(
+      'NATS_TRACING must be "off" or "on"',
+    );
+    delete process.env.NATS_TRACING;
+    expect(() =>
+      resolveNatsAccount({
+        channels: {
+          nats: { accounts: { default: { agentName: "a", tracing: "always" } } },
+        },
+      }),
+    ).toThrow('channels.nats.accounts.default.tracing must be "off" or "on"');
   });
 
   it("resolves a configured account using the new 'owner' field", () => {

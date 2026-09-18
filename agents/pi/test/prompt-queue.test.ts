@@ -5,6 +5,18 @@ import { PiPromptQueue } from "../extensions/prompt-queue.ts";
 const response = {} as PromptResponse;
 
 describe("PiPromptQueue", () => {
+	test("carries the prompt's trace headers and scope with the request", () => {
+		const queue = new PiPromptQueue();
+		const headers = { "X-Synadia-Thread-ID": "a".repeat(32), "X-Synadia-Root-ID": "a".repeat(32) };
+		const scope = { threadId: "a".repeat(32), rootId: "a".repeat(32), turnCountHint: 0 };
+		const traced = queue.enqueue({ prompt: "traced" }, response, 1, headers, scope);
+		expect(traced.traceHeaders).toBe(headers);
+		expect(traced.trace).toBe(scope);
+		const plain = queue.enqueue({ prompt: "plain" }, response, 2);
+		expect(plain.traceHeaders).toEqual({});
+		expect(plain.trace).toBeUndefined();
+	});
+
 	test("keeps deferred handlers open until their PI turns end", async () => {
 		const queue = new PiPromptQueue();
 		const first = queue.enqueue({ prompt: "one" }, response, 10);

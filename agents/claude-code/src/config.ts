@@ -4,6 +4,7 @@ import type { NatsConnectionSource } from '@synadia-ai/agents'
 export type PermissionMode = 'terminal' | 'query'
 export type SenderIdentityMode = 'off' | 'signed'
 export type MinSenderTrust = 'any' | 'signed'
+export type TracingMode = 'off' | 'on'
 
 export type NatsChannelConfig = {
   context?: string
@@ -11,6 +12,7 @@ export type NatsChannelConfig = {
   sessionName?: string
   senderIdentity?: SenderIdentityMode
   minSenderTrust?: MinSenderTrust
+  tracing?: TracingMode
   permissions?: {
     // 'nats' is accepted as a backward-compatible alias for 'query'.
     mode: PermissionMode | 'nats'
@@ -23,6 +25,7 @@ export type RuntimeSettings = {
   connectionLabel: string
   senderIdentity: SenderIdentityMode
   minSenderTrust: MinSenderTrust
+  tracing: TracingMode
   permissionMode: PermissionMode
 }
 
@@ -48,6 +51,7 @@ export function loadConfig(path: string): NatsChannelConfig {
   optionalString(parsed, 'sessionName')
   optionalString(parsed, 'senderIdentity')
   optionalString(parsed, 'minSenderTrust')
+  optionalString(parsed, 'tracing')
   if (parsed.permissions !== undefined) {
     if (!isRecord(parsed.permissions)) {
       throw new Error('invalid permissions: expected an object')
@@ -74,6 +78,11 @@ export function resolveRuntimeSettings(
     env.NATS_MIN_SENDER_TRUST ?? config.minSenderTrust ?? 'any',
     ['any', 'signed'],
   )
+  const tracing = enumSetting(
+    'tracing',
+    env.NATS_TRACING ?? config.tracing ?? 'off',
+    ['off', 'on'],
+  )
   const configuredPermission = config.permissions?.mode ?? 'terminal'
   const permissionMode = configuredPermission === 'nats'
     ? 'query'
@@ -90,6 +99,7 @@ export function resolveRuntimeSettings(
         : 'default: demo.nats.io',
     senderIdentity,
     minSenderTrust,
+    tracing,
     permissionMode,
   }
 }

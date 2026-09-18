@@ -155,17 +155,26 @@ def _trace_binding(
 ) -> contextlib.AbstractContextManager[None]:
     """Bind this execution's trace, or nothing at all.
 
-    A caller's lineage is adopted whatever this service is configured for,
-    so a tree that starts upstream is not broken here. With no lineage on
-    the envelope, only a service that opted in mints a root — an untraced
-    service binds nothing, so nothing is minted per request and
+    A caller's lineage — the pair, ``thread_id`` and ``root_id`` — is
+    adopted whatever this service is configured for, so a tree that starts
+    upstream is not broken here. With no lineage on the envelope, only a
+    service that opted in mints a root — an untraced service binds
+    nothing, so nothing is minted per request and
     :meth:`PromptStream.trace_headers` stays empty rather than stamping
     ids on model requests the operator never asked to trace.
+
+    A half pair is never completed: :func:`~synadia_ai.agents.decode`
+    already rejects it on the wire, and an envelope built by hand gets the
+    same :class:`ProtocolError` here — a ``400`` to the caller — rather
+    than a tree of its own.
     """
-    if envelope.thread_id is None and options is None:
-        return contextlib.nullcontext()
-    thread_id = envelope.thread_id or random_thread_id()
-    root_id = envelope.root_id or thread_id
+    thread_id, root_id = envelope.thread_id, envelope.root_id
+    if thread_id is None or root_id is None:
+        if thread_id is not None or root_id is not None:
+            raise ProtocolError("envelope thread_id and root_id must be given together")
+        if options is None:
+            return contextlib.nullcontext()
+        thread_id = root_id = random_thread_id()
     return bind_active_trace(TraceScope(thread_id, root_id), options)
 
 

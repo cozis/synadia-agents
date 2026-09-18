@@ -127,9 +127,21 @@ def decode(payload: bytes) -> Envelope:
         raise ProtocolError("zero-byte payload (§5.3)")
     if looks_like_json(payload):
         try:
-            return Envelope.model_validate_json(payload)
+            envelope = Envelope.model_validate_json(payload)
         except ValidationError as exc:
             raise ProtocolError(f"malformed envelope: {exc}") from exc
+        # The pair travels together: a caller that traces sends both, one
+        # that does not sends neither. Exactly one names a broken or
+        # hand-written caller, and adopting the lone field would file this
+        # execution under a tree the caller never named, or root a thread
+        # the caller meant as a child — so it is a malformed envelope, the
+        # same 400 as a wrongly shaped id. Checked on the wire and not on
+        # the model: a caller may still hand ``prompt()`` an explicit
+        # ``Envelope`` naming one field, which ``prompt()`` completes. The
+        # TypeScript SDK reads the wire the same way.
+        if (envelope.thread_id is None) != (envelope.root_id is None):
+            raise ProtocolError("malformed envelope: thread_id and root_id must be given together")
+        return envelope
 
     try:
         text = payload.decode("utf-8")

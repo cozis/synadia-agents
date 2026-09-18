@@ -155,7 +155,19 @@ interface TraceBinding {
   readonly options: TraceOptions | undefined;
 }
 
-const storage = new AsyncLocalStorage<TraceBinding>();
+// Kept on `globalThis` under a well-known symbol, for the reason the
+// counters above are: the binding is written by the agent service and
+// read by a client used as a tool inside the handler, and the two can
+// come from different installed copies of this module — a nested `file:`
+// install, a harness pinning its own version, the ESM and CJS builds both
+// loaded. One AsyncLocalStorage per copy would keep the scope the service
+// bound invisible to the client, and every child thread would silently
+// become a root. One process, one storage, whichever copy asks.
+const STORAGE_KEY = Symbol.for("@synadia-ai/agents:trace-scope");
+const storage: AsyncLocalStorage<TraceBinding> = (() => {
+  const g = globalThis as unknown as Record<symbol, AsyncLocalStorage<TraceBinding> | undefined>;
+  return (g[STORAGE_KEY] ??= new AsyncLocalStorage<TraceBinding>());
+})();
 
 /**
  * Run `fn` with `scope` as the ambient execution (used by the agent

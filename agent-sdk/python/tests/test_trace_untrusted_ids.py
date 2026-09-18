@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from nats.aio.msg import Msg
 
 AGENT = "untrusted"
+ROOT = "b" * 32
 
 
 async def _replies(nc: NATSClient, subject: str, payload: bytes) -> list[Msg]:
@@ -71,7 +72,9 @@ async def test_a_malformed_thread_id_is_a_400_and_never_reaches_the_handler(
     svc.on_prompt(handler)
     await svc.start()
     try:
-        payload = json.dumps({"prompt": "hi", "thread_id": thread_id}).encode()
+        # A well-formed root alongside, so the 400 is the malformed id's
+        # and not the half pair's.
+        payload = json.dumps({"prompt": "hi", "thread_id": thread_id, "root_id": ROOT}).encode()
         frames = await _replies(nc, svc.subject.inbox, payload)
     finally:
         await svc.stop()

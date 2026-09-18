@@ -47,6 +47,13 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Changed
 
+- **A half lineage pair is rejected, not completed.** An envelope
+  carrying exactly one of `thread_id` and `root_id` is a malformed
+  envelope: the `400` frame and the terminator, no ack, and the handler
+  never runs — where the service used to fill in `root_id = thread_id`
+  or mint a thread under the given root. Both present are adopted
+  verbatim; neither makes a service that opted in mint a root; unchanged.
+  The TypeScript host behaves the same.
 - Host identity registration is now opt-in: omitting `identity` performs no
   self lookup and emits no `user_nkey`, `account`, or `id_sig` metadata;
   incoming sender classification and the default `min_sender_trust="any"`

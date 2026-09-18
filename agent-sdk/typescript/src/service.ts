@@ -313,21 +313,32 @@ function randomId(): string {
  * This execution's `(thread, root)`, or `undefined` when there is nothing
  * to trace.
  *
- * A caller's lineage is adopted whatever this service is configured for,
- * so a tree that starts upstream is not broken here. With no lineage on
- * the envelope, only a service that opted in mints a root — an untraced
- * service binds nothing, so nothing is minted per request and
- * `PromptResponse.traceHeaders()` stays empty rather than stamping ids on
- * model requests the operator never asked to trace. The service writes no
- * trace record either way.
+ * A caller's lineage — the pair, `thread_id` and `root_id` — is adopted
+ * whatever this service is configured for, so a tree that starts upstream
+ * is not broken here. With no lineage on the envelope, only a service
+ * that opted in mints a root — an untraced service binds nothing, so
+ * nothing is minted per request and `PromptResponse.traceHeaders()` stays
+ * empty rather than stamping ids on model requests the operator never
+ * asked to trace. The service writes no trace record either way.
+ *
+ * A half pair is never completed: `decodeEnvelope` already rejects it on
+ * the wire, and an envelope built by hand gets the same `ProtocolError`
+ * here — a `400` to the caller — rather than a tree of its own.
  */
 function traceScopeFor(
   envelope: RequestEnvelope,
   options: TraceOptions | undefined,
 ): TraceScope | undefined {
-  if (envelope.threadId === undefined && options === undefined) return undefined;
-  const threadId = envelope.threadId ?? randomThreadId();
-  return { threadId, rootId: envelope.rootId ?? threadId, turnCountHint: 0 };
+  const { threadId, rootId } = envelope;
+  if (threadId !== undefined && rootId !== undefined) {
+    return { threadId, rootId, turnCountHint: 0 };
+  }
+  if (threadId !== undefined || rootId !== undefined) {
+    throw new ProtocolError("envelope `thread_id` and `root_id` must be given together");
+  }
+  if (options === undefined) return undefined;
+  const minted = randomThreadId();
+  return { threadId: minted, rootId: minted, turnCountHint: 0 };
 }
 
 /**

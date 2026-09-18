@@ -123,20 +123,16 @@ export function encodeBase64(bytes: Uint8Array): string {
  * fresh root and file the execution under a tree of its own. An empty
  * string is absent, again matching Python.
  */
-function decodeLineageField(
-  obj: Record<string, unknown>,
-  wireName: string,
-  field: "threadId" | "rootId",
-): Record<string, string> {
+function decodeLineageField(obj: Record<string, unknown>, wireName: string): string | undefined {
   const value = obj[wireName];
-  if (value === undefined || value === null) return {};
+  if (value === undefined || value === null) return undefined;
   if (typeof value !== "string") {
     throw new ProtocolError(`envelope \`${wireName}\` must be a string`);
   }
   // An empty id names nothing. Treating it as absent keeps a receiver
   // from adopting "" as a thread and filing every child under it — and
   // keeps both SDKs reading the same wire the same way.
-  if (value === "") return {};
+  if (value === "") return undefined;
   // Untrusted, bounded input: the id is adopted verbatim and later stamped
   // on the agent's model requests as a header value, so anything not
   // shaped like a minted id (a CRLF, a megabyte of garbage) is malformed.
@@ -145,8 +141,12 @@ function decodeLineageField(
       `envelope \`${wireName}\` must be ${THREAD_ID_HEX_LEN} lowercase hex characters`,
     );
   }
-  return { [field]: value };
+  return value;
 }
+
+// The Python decoder and the agent service's own check on a hand-built
+// envelope say the same.
+const HALF_LINEAGE_PAIR = "envelope `thread_id` and `root_id` must be given together";
 
 export function decodeEnvelope(data: Uint8Array): RequestEnvelope {
   // §5.3: a zero-byte request payload is invalid.
@@ -191,10 +191,18 @@ export function decodeEnvelope(data: Uint8Array): RequestEnvelope {
 
   // Lineage rides through untouched: the agent service adopts it, and a
   // caller that never enabled tracing sees neither field.
-  const lineage = {
-    ...decodeLineageField(obj, "thread_id", "threadId"),
-    ...decodeLineageField(obj, "root_id", "rootId"),
-  };
+  const threadId = decodeLineageField(obj, "thread_id");
+  const rootId = decodeLineageField(obj, "root_id");
+  // The pair travels together: a caller that traces sends both, one that
+  // does not sends neither. Exactly one names a broken or hand-written
+  // caller, and adopting the lone field would file this execution under
+  // a tree the caller never named, or root a thread the caller meant as a
+  // child — so it is a malformed envelope, the same 400 as a wrongly
+  // shaped id. The Python SDK reads the wire the same way.
+  if ((threadId === undefined) !== (rootId === undefined)) {
+    throw new ProtocolError(HALF_LINEAGE_PAIR);
+  }
+  const lineage = threadId !== undefined && rootId !== undefined ? { threadId, rootId } : {};
 
   const rawAttachments = obj["attachments"];
   if (rawAttachments === undefined) {

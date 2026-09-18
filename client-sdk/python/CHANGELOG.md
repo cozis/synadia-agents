@@ -70,6 +70,13 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Changed
 
+- **A half lineage pair is a malformed envelope.** `decode()` rejects a
+  wire envelope carrying exactly one of `thread_id` and `root_id` with a
+  `ProtocolError` — an agent service answers `400`, as for a wrongly
+  shaped id. A caller sends both or neither; adopting a lone field would
+  file the execution under a tree the caller never named. The TypeScript
+  SDK reads the wire the same way. An explicit `Envelope` handed to
+  `prompt()` may still name one field; `prompt()` completes it as before.
 - Sender identity is now opt-in: omitting `identity` performs no lookup and
   sends no `Agent-Sender` header; explicit `Identity()` enables unsigned
   claims, and `send_unsigned_claim=False` performs no automatic identity

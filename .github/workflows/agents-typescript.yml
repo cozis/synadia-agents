@@ -472,12 +472,18 @@ jobs:
       # The committed branch manifest intentionally keeps local SDK links for
       # development. The runtime bundle is committed from the exact packed SDK
       # artifacts, so CI must reproduce and verify it from that same graph.
+      # Externals come from bun.lock, not from whatever is newest on npm: Bun
+      # cannot install this lock itself (see scripts/lock-install.ts), so npm
+      # installs the packed SDKs with every external pinned to its locked
+      # version, and the install fails unless it matches bun.lock exactly.
       - name: Install packed SDKs and verify committed runtime bundle
         working-directory: agents/claude-code
         run: |
           npm pkg set "dependencies.@synadia-ai/agents=file:$CLIENT_SDK_TGZ"
           npm pkg set "dependencies.@synadia-ai/agent-service=file:$AGENT_SDK_TGZ"
+          bun ./scripts/lock-install.ts pin
           npm install --no-package-lock --no-audit --no-fund
+          bun ./scripts/lock-install.ts verify
           bun run build
           git diff --exit-code -- runtime/server.js
           bun run verify:bundle

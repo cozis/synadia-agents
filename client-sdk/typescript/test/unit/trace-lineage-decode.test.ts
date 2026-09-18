@@ -31,10 +31,21 @@ describe("envelope lineage decoding", () => {
     expect(decodeEnvelope(raw(body)).threadId).toBeUndefined();
   });
 
-  it("reads one field without the other", () => {
-    const env = decodeEnvelope(raw(`{"prompt":"x","thread_id":"${THREAD}"}`));
-    expect(env.threadId).toBe(THREAD);
-    expect(env.rootId).toBeUndefined();
+  /**
+   * The pair travels together: a caller that traces sends both, one that
+   * does not sends neither. Exactly one names a broken or hand-written
+   * caller, and adopting the lone field would file the execution under a
+   * tree the caller never named — so it is rejected like a wrongly shaped
+   * id, in both SDKs.
+   */
+  it.each([
+    ["thread_id alone", `{"prompt":"x","thread_id":"${THREAD}"}`],
+    ["root_id alone", `{"prompt":"x","root_id":"${ROOT}"}`],
+    ["thread_id with an empty root_id", `{"prompt":"x","thread_id":"${THREAD}","root_id":""}`],
+    ["root_id with a null thread_id", `{"prompt":"x","thread_id":null,"root_id":"${ROOT}"}`],
+  ])("rejects %s as a half pair", (_label, body) => {
+    expect(() => decodeEnvelope(raw(body))).toThrow(ProtocolError);
+    expect(() => decodeEnvelope(raw(body))).toThrow(/given together/);
   });
 
   it.each([

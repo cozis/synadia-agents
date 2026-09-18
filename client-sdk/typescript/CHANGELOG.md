@@ -143,6 +143,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **A half lineage pair is a malformed envelope.** `decodeEnvelope`
+  rejects an envelope carrying exactly one of `thread_id` and `root_id`
+  with a `ProtocolError` — an agent service answers `400`, as for a
+  wrongly shaped id. A caller sends both or neither; adopting a lone
+  field would file the execution under a tree the caller never named.
+  The Python SDK reads the wire the same way. `encodeEnvelope` and
+  `prompt()` are unchanged: they always send the pair.
+- **One trace scope per process.** The ambient trace binding lives on
+  `globalThis` under a well-known symbol, as the record counts do, so a
+  scope bound by the agent service through one installed copy of this
+  package is seen by a client used as a tool through another — a nested
+  `file:` install, a harness pinning its own version, the ESM and CJS
+  builds both loaded. Each copy used to keep its own `AsyncLocalStorage`,
+  and every child thread spawned across the split silently became a root.
 - `loadContextOptions` now parses context URLs through `parseNatsUrl`: it
   validates the supported scheme and host, extracts URL userinfo into auth
   options, rejects mixed credentials across server entries, and preserves

@@ -81,6 +81,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **A half lineage pair is rejected, not completed.** An envelope
+  carrying exactly one of `thread_id` and `root_id` is a malformed
+  envelope: the `400` frame and the terminator, no ack, and the handler
+  never runs — where the service used to fill in `root_id = thread_id`
+  or mint a thread under the given root. Both present are adopted
+  verbatim; neither makes a service that opted in mint a root; unchanged.
+  The Python host behaves the same.
 - `extraMetadata` can no longer override the required registration keys.
   `AgentService` and `ReferenceAgent` now write `agent`, `owner` and
   `protocol_version` over `extraMetadata` (previously an extra entry

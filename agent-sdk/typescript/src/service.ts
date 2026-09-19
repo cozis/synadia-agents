@@ -39,12 +39,14 @@
 //     a live-bound signer, `id_sig`; omission performs no self lookup and
 //     registers none of those keys. It **always** advertises `min_sender_trust` on the prompt
 //     endpoint. `operatorAttested` (off by default) adds the
-//     `Nats-Request-Info` cross-check of a closed endpoint.
+//     `Nats-Request-Info` cross-check of a closed endpoint. With a signer
+//     every heartbeat carries a signed `Agent-Sender` (`sub` the heartbeat
+//     subject, `ts` the frame's own); the status reply carries none.
 //
 // Mirrors the Python SDK's `AgentService` (`client-sdk/python/src/synadia_ai/agents/service.py`)
 // — wire-equivalent behaviour, idiomatic TS API.
 
-import type { NatsConnection } from "@nats-io/nats-core";
+import type { MsgHdrs, NatsConnection } from "@nats-io/nats-core";
 import { Svcm, type Service, type ServiceHandler, type ServiceMsg } from "@nats-io/services";
 
 import {
@@ -92,6 +94,7 @@ import {
   encodeHeartbeatPayload,
   type BuildHeartbeatPayloadOptions,
 } from "./heartbeat/payload.js";
+import { signHeartbeat, type HeartbeatSigner } from "./heartbeat/sender.js";
 import {
   DEFAULT_MIN_SENDER_TRUST,
   DEFAULT_REPLAY_WINDOW_MS,
@@ -128,12 +131,20 @@ export const DEFAULT_KEEPALIVE_INTERVAL_S = 30;
 /** Default `service.version` advertised in `$SRV.INFO`. */
 const DEFAULT_VERSION = "0.0.1";
 
-/** Sender-identity options of the host: the signer for `id_sig`. The host never sends `Agent-Sender`. */
+/**
+ * Sender-identity options of the host: the signer for `id_sig` and for the
+ * `Agent-Sender` header on every heartbeat the service publishes. The host
+ * sends `Agent-Sender` nowhere else — never on a reply — and carries no
+ * display name.
+ */
 export interface AgentServiceIdentityOptions {
   /**
-   * Signs `id_sig` (`AGENT-ID-V1`) over the prompt subject. Must hold the
-   * live connection's user NKEY; a credentials JWT must also carry that
-   * connection's user and account.
+   * Signs `id_sig` (`AGENT-ID-V1`) over the prompt subject, and every
+   * heartbeat's `Agent-Sender` (`sub` the heartbeat subject, `ts` the
+   * heartbeat's own, a fresh nonce per beat, the payload hash over the
+   * frame published). Must hold the live connection's user NKEY; a
+   * credentials JWT must also carry that connection's user and account.
+   * Without a signer the service beats unsigned, as plain protocol 0.3.
    */
   readonly signer?: SenderSigner;
 }
@@ -490,9 +501,14 @@ export class AgentService {
   readonly #gate: SenderGate;
   readonly #resolver: SenderResolver;
   #identity: AgentId | undefined;
+  #heartbeatSigner: HeartbeatSigner | undefined;
   #handler: PromptHandler | null = null;
   #service: Service | null = null;
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** The beat being signed and published right now; a tick that finds one pending is skipped. */
+  #heartbeatInFlight: Promise<void> | null = null;
+  /** Set first thing in `stop()`, so a beat mid-signature never publishes into the teardown. */
+  #heartbeatsStopped = false;
 
   constructor(options: AgentServiceOptions) {
     const heartbeatIntervalS = options.heartbeatIntervalS ?? DEFAULT_HEARTBEAT_INTERVAL_S;
@@ -688,6 +704,10 @@ export class AgentService {
       }
     }
     this.#identity = identity;
+    // Every heartbeat is signed with the signer that signs `id_sig`, once
+    // the identity is bound to the live connection (a signer that fails
+    // to bind threw above). Without a signer the service beats unsigned.
+    this.#heartbeatSigner = identity !== undefined && signer ? { id: identity, signer } : undefined;
 
     const svcm = new Svcm(this.#options.nc);
     // `extraMetadata` goes first so the required keys overwrite it: a harness
@@ -781,10 +801,14 @@ export class AgentService {
     // must not race the endpoint subscriptions (→ no responders).
     await this.#options.nc.flush();
 
-    this.#startHeartbeats();
+    await this.#startHeartbeats();
   }
 
   async stop(): Promise<void> {
+    // Before anything is torn down: a beat whose signer is still busy reads
+    // this after signing and publishes nothing. `stop()` does not wait for
+    // that signer — a stalled remote HSM must not hold teardown hostage.
+    this.#heartbeatsStopped = true;
     if (this.#heartbeatTimer !== null) {
       clearInterval(this.#heartbeatTimer);
       this.#heartbeatTimer = null;
@@ -822,20 +846,87 @@ export class AgentService {
     return options;
   }
 
-  #startHeartbeats(): void {
-    const publish = (): void => {
-      const service = this.#service;
-      if (!service) return;
-      const payload = buildHeartbeatPayload(
-        this.#subject,
-        this.#heartbeatIntervalS,
-        service.info().id,
-        this.#heartbeatOptions(),
-      );
-      this.#options.nc.publish(this.#subject.heartbeat, encodeHeartbeatPayload(payload));
+  /**
+   * Publish one heartbeat frame. With a signer bound at `start()` the frame
+   * carries the `Agent-Sender` header the SDK puts on its edge records:
+   * `sub` the heartbeat subject as published, `ts` the frame's own `ts`, a
+   * fresh nonce, `sig` over subject · ts · nonce · sha256 of the exact
+   * bytes published. Nothing in the payload changes; a 0.3 subscriber
+   * ignores headers. Without a signer the frame goes out bare, as today.
+   *
+   * A signer that fails mid-life (a wiped key) costs the beat its
+   * signature, never the beat: 0.3 callers keep seeing liveness, and the
+   * fabric — which counts an unsigned beat as a claim — shows the agent
+   * as down until signing works again. Logged at `error` on every beat.
+   * A signer slower than the interval (a remote HSM) never piles beats up
+   * or lands them out of order: `#startHeartbeats` skips a tick while the
+   * previous beat is still pending, the sequential loop of the Python
+   * publisher by construction.
+   */
+  async #publishHeartbeat(): Promise<void> {
+    const service = this.#service;
+    if (!service) return;
+    const payload = buildHeartbeatPayload(
+      this.#subject,
+      this.#heartbeatIntervalS,
+      service.info().id,
+      this.#heartbeatOptions(),
+    );
+    const data = encodeHeartbeatPayload(payload);
+    const sender = this.#heartbeatSigner;
+    let hdrs: MsgHdrs | undefined;
+    if (sender !== undefined) {
+      try {
+        hdrs = await signHeartbeat({
+          sender,
+          subject: this.#subject.heartbeat,
+          ts: payload.ts,
+          data,
+        });
+      } catch (err) {
+        this.#logger.error("heartbeat signing failed; publishing unsigned", {
+          subject: this.#subject.heartbeat,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+      // `stop()` may have begun while the signer was busy: no beat after it.
+      if (this.#heartbeatsStopped) return;
+    }
+    this.#options.nc.publish(
+      this.#subject.heartbeat,
+      data,
+      hdrs !== undefined ? { headers: hdrs } : {},
+    );
+  }
+
+  /** The first beat is out when this resolves (§8.5: subscribe, then discover). */
+  async #startHeartbeats(): Promise<void> {
+    this.#heartbeatsStopped = false;
+    const beat = (): void => {
+      // One beat at a time. A tick that finds the previous beat still
+      // being signed is skipped — logged, because a signer that keeps
+      // missing the interval is worth an operator's attention — rather
+      // than started alongside it, which could publish an older `ts`
+      // after a newer one and let a stalled signer accumulate calls.
+      if (this.#heartbeatInFlight !== null) {
+        this.#logger.warn("heartbeat skipped: the previous beat is still being signed", {
+          subject: this.#subject.heartbeat,
+        });
+        return;
+      }
+      this.#heartbeatInFlight = this.#publishHeartbeat()
+        .catch((err: unknown) => {
+          this.#logger.error("heartbeat publish failed", {
+            subject: this.#subject.heartbeat,
+            reason: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => {
+          this.#heartbeatInFlight = null;
+        });
     };
-    publish();
-    this.#heartbeatTimer = setInterval(publish, this.#heartbeatIntervalS * 1000);
+    await this.#publishHeartbeat();
+    this.#heartbeatTimer = setInterval(beat, this.#heartbeatIntervalS * 1000);
     // Allow the Node process to exit even if the timer is still active.
     this.#heartbeatTimer.unref?.();
   }

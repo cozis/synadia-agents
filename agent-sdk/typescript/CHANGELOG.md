@@ -8,6 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Signed heartbeats.** With `identity: { signer }` the service sets the
+  `Agent-Sender` header of the sender-identity extension on every
+  heartbeat it publishes — `sub` the heartbeat subject as published, `ts`
+  the frame's own `ts`, a fresh nonce per beat, `sig` over subject · ts ·
+  nonce · sha256 of the exact bytes published — with the signer that signs
+  `id_sig`. No new payload field, no new signing format; a 0.3 subscriber
+  ignores headers. Without a signer the service beats unsigned, as before;
+  the status reply carries no header. A signer that fails mid-life costs
+  the beat its signature, never the beat (logged at `error`); a signer
+  slower than the interval never piles beats up — a tick that finds the
+  previous beat still being signed is skipped and logged. `start()`
+  resolves once the first beat is published; `stop()` lets a beat still
+  being signed finish without publishing. `signHeartbeat` /
+  `signHeartbeatHeader` and `HeartbeatSigner` are exported for hand-rolled
+  publishers; the shared fixtures gain the `signed-heartbeat` vector.
 - **Heartbeat trace record counts.** A service that opted in to tracing
   puts `records_published` and `records_dropped` — two counters since
   process start, read fresh on every beat from `traceRecordCounts()` — in

@@ -74,14 +74,19 @@ SenderResolverFn: TypeAlias = Callable[["AgentId"], Awaitable["AgentInfo | None"
 
 @dataclass(frozen=True, slots=True)
 class ServiceIdentity:
-    """Sender-identity options of the host: the signer for ``id_sig``.
+    """Sender-identity options of the host: the signer for ``id_sig`` and the heartbeats.
 
-    The host never sends ``Agent-Sender`` (so there is no display name
-    here); ``signer`` signs the ``AGENT-ID-V1`` registration signature
-    over the prompt subject and must hold the live connection's user NKEY.
-    When it carries a credentials JWT, that JWT's user and account must also
-    match the live connection — :meth:`AgentService.start` raises an identity
-    error if binding cannot be established.
+    ``signer`` signs the ``AGENT-ID-V1`` registration signature over the
+    prompt subject and the ``Agent-Sender`` header on every heartbeat the
+    service publishes (``sub`` the heartbeat subject, ``ts`` the
+    heartbeat's own, a fresh nonce per beat, the payload hash over the
+    frame published). The host sends ``Agent-Sender`` nowhere else — never
+    on a reply — and carries no display name, so there is none here. The
+    signer must hold the live connection's user NKEY. When it carries a
+    credentials JWT, that JWT's user and account must also match the live
+    connection — :meth:`AgentService.start` raises an identity error if
+    binding cannot be established. Without a signer the service beats
+    unsigned, as plain protocol 0.3.
     """
 
     signer: SenderSigner | None = None

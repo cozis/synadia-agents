@@ -84,7 +84,7 @@ from synadia_ai.agents.messages import encode_chunk
 from ._bytes import format_human_bytes, parse_human_bytes
 from ._inbox import new_inbox
 from ._logging import get_logger
-from .heartbeat import build_heartbeat_payload, run_publisher
+from .heartbeat import HeartbeatSigner, build_heartbeat_payload, run_publisher
 from .identity import (
     DEFAULT_MIN_SENDER_TRUST,
     DEFAULT_REPLAY_WINDOW_S,
@@ -398,8 +398,9 @@ class AgentService:
             raise ValueError("keepalive_interval_s must be > 0 or None (None disables keep-alive)")
         if identity is not None and not isinstance(identity, ServiceIdentity):
             raise TypeError(
-                "identity must be a ServiceIdentity(signer=...) (the host never sends "
-                f"Agent-Sender, so there is no display name); got {type(identity).__name__}"
+                "identity must be a ServiceIdentity(signer=...) (the host's Agent-Sender, "
+                "on its heartbeats, carries no display name); "
+                f"got {type(identity).__name__}"
             )
         if resolve_ttl_s < 0:
             raise ValueError(f"resolve_ttl_s must be >= 0 (got {resolve_ttl_s!r})")
@@ -616,6 +617,14 @@ class AgentService:
         await self._nc.flush()
 
         self._heartbeat_stop.clear()
+        # Every heartbeat is signed with the signer that signs `id_sig`, once
+        # the identity is bound to the live connection (a signer that failed
+        # to bind raised above). Without a signer the service beats unsigned.
+        heartbeat_signer = (
+            HeartbeatSigner(id=agent_id, signer=signer)
+            if agent_id is not None and signer is not None
+            else None
+        )
         # §8.3 instance_id matches the micro-service instance id assigned by
         # nats-py; this is what callers correlate heartbeats against.
         self._heartbeat_task = asyncio.create_task(
@@ -626,6 +635,7 @@ class AgentService:
                 self._service.id,
                 self._heartbeat_stop,
                 extras=self._heartbeat_extras,
+                sender=heartbeat_signer,
             ),
             name=f"heartbeat-{self.subject.inbox}",
         )

@@ -142,9 +142,20 @@ What to know:
 - **`status`** is classified and logged (its verified nonce enters the
   shared set), never rejected — a liveness probe must not depend on the
   prober's credentials.
-- **Only the incoming request is signed.** Prompt responses and mid-stream
-  query replies are not independently authenticated; do not attribute a
-  query reply to the original prompt sender.
+- **Every heartbeat is signed** when a signer is configured: the frame
+  carries the `Agent-Sender` header of the extension — `sub` the heartbeat
+  subject as published, `ts` the frame's own `ts`, a fresh nonce per beat,
+  `sig` over subject · ts · nonce · sha256 of the bytes published — with
+  the same signer as `id_sig`. Nothing in the payload changes and a 0.3
+  subscriber ignores headers; without a signer the service beats unsigned.
+  A consumer verifies a beat with `verify_sender(msg, "live")` over its own
+  nonce set (`synadia_ai.agent_service.heartbeat.sign_heartbeat` builds
+  the header for a hand-rolled publisher). The status reply carries no
+  header.
+- **Only the incoming request and the service's own heartbeats are
+  signed.** Prompt responses, the status reply and mid-stream query
+  replies are not independently authenticated; do not attribute a query
+  reply to the original prompt sender.
 - **Account-token insertion requires a hand-rolled wildcard service.** An
   export with `account_token_position` turns AgentService's fixed
   five-token subject into a six-token arrival its subscription cannot

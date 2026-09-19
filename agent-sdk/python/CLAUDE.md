@@ -200,7 +200,13 @@ deferred to a follow-up. All shapes are imported from
   on emission, and the shared `HeartbeatPayload` decoder accepts its
   absence so we interop with spec-compliant session-less peers. The
   publisher loop lives here; the wire model `HeartbeatPayload` is
-  imported from `synadia_ai.agents`.
+  imported from `synadia_ai.agents`. With
+  `identity=ServiceIdentity(signer=…)` every beat carries the signed
+  `Agent-Sender` header of the extension — `sub` the heartbeat subject
+  as published, `ts` the frame's own `ts`, a fresh nonce, the hash over
+  the exact bytes published (`heartbeat.sign_heartbeat`; the
+  `signed-heartbeat` vector in `test-fixtures/identity/`). No new payload
+  field; without a signer the beat goes out bare, as 0.3.
 - **Status** (v0.3 §-TBD): request/response on
   `agents.status.{a}.{o}.{session_name}` returns the same payload
   shape as a heartbeat, freshly built per request. Handler lives
@@ -227,8 +233,9 @@ deferred to a follow-up. All shapes are imported from
   (2) two wire descriptions only — `signature required` / `sender
   rejected` — the detail goes to the log, rendered through
   `format_sender`; (3) `operator_attested` is a deployment promise
-  (closed endpoint), off by default; (4) the host never sends
-  `Agent-Sender` and never counts header bytes in its own size check.
+  (closed endpoint), off by default; (4) the host sends `Agent-Sender`
+  only on its own heartbeats (below) — never on a reply — and never
+  counts header bytes in its own size check.
 
 ## Toolchain
 

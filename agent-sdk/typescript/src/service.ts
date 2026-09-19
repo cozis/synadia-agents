@@ -505,6 +505,10 @@ export class AgentService {
   #handler: PromptHandler | null = null;
   #service: Service | null = null;
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** The beat being signed and published right now; a tick that finds one pending is skipped. */
+  #heartbeatInFlight: Promise<void> | null = null;
+  /** Set first thing in `stop()`, so a beat mid-signature never publishes into the teardown. */
+  #heartbeatsStopped = false;
 
   constructor(options: AgentServiceOptions) {
     const heartbeatIntervalS = options.heartbeatIntervalS ?? DEFAULT_HEARTBEAT_INTERVAL_S;
@@ -801,6 +805,10 @@ export class AgentService {
   }
 
   async stop(): Promise<void> {
+    // Before anything is torn down: a beat whose signer is still busy reads
+    // this after signing and publishes nothing. `stop()` does not wait for
+    // that signer — a stalled remote HSM must not hold teardown hostage.
+    this.#heartbeatsStopped = true;
     if (this.#heartbeatTimer !== null) {
       clearInterval(this.#heartbeatTimer);
       this.#heartbeatTimer = null;
@@ -850,6 +858,10 @@ export class AgentService {
    * signature, never the beat: 0.3 callers keep seeing liveness, and the
    * fabric — which counts an unsigned beat as a claim — shows the agent
    * as down until signing works again. Logged at `error` on every beat.
+   * A signer slower than the interval (a remote HSM) never piles beats up
+   * or lands them out of order: `#startHeartbeats` skips a tick while the
+   * previous beat is still pending, the sequential loop of the Python
+   * publisher by construction.
    */
   async #publishHeartbeat(): Promise<void> {
     const service = this.#service;
@@ -877,8 +889,8 @@ export class AgentService {
           reason: err instanceof Error ? err.message : String(err),
         });
       }
-      // `stop()` may have run while the signer was busy: no beat after it.
-      if (this.#service === null) return;
+      // `stop()` may have begun while the signer was busy: no beat after it.
+      if (this.#heartbeatsStopped) return;
     }
     this.#options.nc.publish(
       this.#subject.heartbeat,
@@ -889,13 +901,29 @@ export class AgentService {
 
   /** The first beat is out when this resolves (§8.5: subscribe, then discover). */
   async #startHeartbeats(): Promise<void> {
+    this.#heartbeatsStopped = false;
     const beat = (): void => {
-      void this.#publishHeartbeat().catch((err: unknown) => {
-        this.#logger.error("heartbeat publish failed", {
+      // One beat at a time. A tick that finds the previous beat still
+      // being signed is skipped — logged, because a signer that keeps
+      // missing the interval is worth an operator's attention — rather
+      // than started alongside it, which could publish an older `ts`
+      // after a newer one and let a stalled signer accumulate calls.
+      if (this.#heartbeatInFlight !== null) {
+        this.#logger.warn("heartbeat skipped: the previous beat is still being signed", {
           subject: this.#subject.heartbeat,
-          reason: err instanceof Error ? err.message : String(err),
         });
-      });
+        return;
+      }
+      this.#heartbeatInFlight = this.#publishHeartbeat()
+        .catch((err: unknown) => {
+          this.#logger.error("heartbeat publish failed", {
+            subject: this.#subject.heartbeat,
+            reason: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => {
+          this.#heartbeatInFlight = null;
+        });
     };
     await this.#publishHeartbeat();
     this.#heartbeatTimer = setInterval(beat, this.#heartbeatIntervalS * 1000);

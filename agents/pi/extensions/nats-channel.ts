@@ -97,6 +97,16 @@ const KEEPALIVE_INTERVAL_S = 20;
 
 const QUEUED_PROMPT_TTL_MS = 30 * 60 * 1000;
 
+function promptCompletionNotice(
+  promptId: string,
+  state: "completed" | "error",
+): string {
+  return [
+    `Agent prompt ${promptId} ${state === "completed" ? "completed" : "finished with an error"}.`,
+    `Call wait_for_reply with prompt_ids [${JSON.stringify(promptId)}] and timeout_ms 0 to retrieve the result.`,
+  ].join(" ");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Config / paths
 // ─────────────────────────────────────────────────────────────────────────────
@@ -907,6 +917,20 @@ export default function (pi: ExtensionAPI) {
       const result = await outboundPrompts.promptAgent(client, params, {
         toolCallId,
         ...(scope ? { traceScope: scope } : {}),
+        onSettled: (event) => {
+          const content = promptCompletionNotice(event.prompt_id, event.state);
+          injectInScope(scope, () =>
+            pi.sendMessage(
+              {
+                customType: "nats-prompt-completed",
+                content,
+                display: true,
+                details: event,
+              },
+              { triggerTurn: true, deliverAs: "followUp" },
+            ),
+          );
+        },
       });
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],

@@ -39,10 +39,17 @@ export interface WaitForReplyInput {
 export interface PromptAgentOptions {
   readonly toolCallId?: string;
   readonly traceScope?: TraceScope;
+  /** Called once when the background prompt settles and no waiter consumed it. */
+  readonly onSettled?: (event: PromptSettledEvent) => void | Promise<void>;
 }
 
 type PromptState = "pending" | "completed" | "error";
 type AgentDescription = ReturnType<typeof describeAgent>;
+
+export interface PromptSettledEvent {
+  readonly prompt_id: string;
+  readonly state: Exclude<PromptState, "pending">;
+}
 
 type ManagedPrompt = {
   readonly promptId: string;
@@ -54,8 +61,12 @@ type ManagedPrompt = {
   readonly statuses: string[];
   readonly queries: Array<{ id: string; prompt: string; response: string }>;
   readonly attachments: Array<{ filename: string; content_base64: string }>;
+  readonly onSettled?: (event: PromptSettledEvent) => void | Promise<void>;
   state: PromptState;
   response: string;
+  waiterCount: number;
+  notificationDeferred: boolean;
+  notifyOnSettle: boolean;
   error?: string;
   completedAt?: number;
 };
@@ -119,7 +130,18 @@ export class AsyncPromptManager {
     }
     if (input.timeout_ms === 0) return { timed_out: true };
 
-    const settled = await waitUntilOneSettles(prompts, input.timeout_ms);
+    for (const prompt of prompts) prompt.waiterCount += 1;
+    let settled: ManagedPrompt | undefined;
+    try {
+      settled = await waitUntilOneSettles(prompts, input.timeout_ms);
+    } finally {
+      for (const prompt of prompts) prompt.waiterCount -= 1;
+      for (const prompt of prompts) {
+        if (!prompt.notificationDeferred || prompt.waiterCount > 0) continue;
+        if (prompt === settled) prompt.notificationDeferred = false;
+        else this.#notifySettled(prompt);
+      }
+    }
     return settled
       ? { timed_out: false, ...snapshotPrompt(settled) }
       : { timed_out: true };
@@ -131,6 +153,7 @@ export class AsyncPromptManager {
       prompt.state = "error";
       prompt.error = reason;
       prompt.completedAt = Date.now();
+      prompt.notifyOnSettle = false;
       prompt.controller.abort(new Error(reason));
       prompt.finish();
     }
@@ -149,7 +172,7 @@ export class AsyncPromptManager {
       );
     }
 
-    const prompt = createManagedPrompt(agent);
+    const prompt = createManagedPrompt(agent, options.onSettled);
     const stream = await agent.prompt(input.prompt, {
       ...(input.max_wait_ms !== undefined
         ? { maxWaitMs: input.max_wait_ms }
@@ -206,6 +229,25 @@ export class AsyncPromptManager {
     } finally {
       if (prompt.completedAt === undefined) prompt.completedAt = Date.now();
       prompt.finish();
+      if (prompt.notifyOnSettle && prompt.onSettled) {
+        if (prompt.waiterCount > 0) prompt.notificationDeferred = true;
+        else this.#notifySettled(prompt);
+      }
+    }
+  }
+
+  #notifySettled(prompt: ManagedPrompt): void {
+    if (!prompt.onSettled || !prompt.notifyOnSettle) return;
+    prompt.notificationDeferred = false;
+    prompt.notifyOnSettle = false;
+    const event: PromptSettledEvent = {
+      prompt_id: prompt.promptId,
+      state: prompt.state === "completed" ? "completed" : "error",
+    };
+    try {
+      void Promise.resolve(prompt.onSettled(event)).catch(() => undefined);
+    } catch {
+      // A host notification is best-effort and must never change the prompt result.
     }
   }
 
@@ -220,7 +262,10 @@ export class AsyncPromptManager {
   }
 }
 
-function createManagedPrompt(agent: Agent): ManagedPrompt {
+function createManagedPrompt(
+  agent: Agent,
+  onSettled?: (event: PromptSettledEvent) => void | Promise<void>,
+): ManagedPrompt {
   let finish!: () => void;
   const completion = new Promise<void>((resolve) => {
     finish = resolve;
@@ -237,6 +282,10 @@ function createManagedPrompt(agent: Agent): ManagedPrompt {
     statuses: [],
     queries: [],
     attachments: [],
+    ...(onSettled ? { onSettled } : {}),
+    waiterCount: 0,
+    notificationDeferred: false,
+    notifyOnSettle: true,
   };
 }
 

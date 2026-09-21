@@ -62,7 +62,11 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { AsyncPromptManager, discoverAgents } from "./agent-tools.ts";
+import {
+  AsyncPromptManager,
+  PromptToolError,
+  discoverAgents,
+} from "./agent-tools.ts";
 import { PiPromptQueue, type QueuedPiPrompt } from "./prompt-queue.ts";
 import { resolveOwner, sanitizeSubjectToken } from "./subject.ts";
 
@@ -99,11 +103,11 @@ const QUEUED_PROMPT_TTL_MS = 30 * 60 * 1000;
 
 function promptCompletionNotice(
   promptId: string,
-  state: "completed" | "error",
+  state: "completed" | "failed" | "cancelled" | "expired",
 ): string {
   return [
-    `Agent prompt ${promptId} ${state === "completed" ? "completed" : "finished with an error"}.`,
-    `Call wait_for_reply with prompt_ids [${JSON.stringify(promptId)}] and timeout_ms 0 to retrieve the result.`,
+    `Agent prompt ${promptId} finished with state ${state}.`,
+    `Call wait_for_prompt with prompt_ids [${JSON.stringify(promptId)}] and timeout_ms 0 to retrieve the result.`,
   ].join(" ");
 }
 
@@ -885,7 +889,12 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params) {
       const client = agentClient;
-      if (!client) throw new Error("NATS is not connected");
+      if (!client) {
+        throw new PromptToolError(
+          "nats_not_connected",
+          "NATS is not connected",
+        );
+      }
       const result = await discoverAgents(client, params);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -898,18 +907,32 @@ export default function (pi: ExtensionAPI) {
     name: "prompt_agent",
     label: "Prompt agent",
     description:
-      "Start prompting one discovered agent and return a pending prompt handle immediately. Use wait_for_reply to poll or wait for results.",
+      "Start prompting one discovered agent and return a short, session-scoped prompt handle after the target accepts it. Use wait_for_prompt to poll or wait for its result.",
     parameters: Type.Object({
       instance_id: Type.String({ minLength: 1 }),
-      prompt: Type.String({ minLength: 1 }),
-      max_wait_ms: Type.Optional(
+      label: Type.String({ minLength: 1 }),
+      text: Type.String({ minLength: 1 }),
+      attachments: Type.Optional(
+        Type.Array(
+          Type.Object({
+            path: Type.String({ minLength: 1 }),
+            filename: Type.Optional(Type.String({ minLength: 1 })),
+          }),
+        ),
+      ),
+      max_runtime_ms: Type.Optional(
         Type.Integer({ minimum: 1, maximum: 3_600_000 }),
       ),
       query_response: Type.Optional(Type.String()),
     }),
     async execute(toolCallId, params) {
       const client = agentClient;
-      if (!client) throw new Error("NATS is not connected");
+      if (!client) {
+        throw new PromptToolError(
+          "nats_not_connected",
+          "NATS is not connected",
+        );
+      }
       // PI normally preserves the scope seeded by injectInScope(). The queue
       // fallback makes the handoff explicit if a host release schedules tool
       // execution from a neutral async context.
@@ -940,10 +963,25 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "wait_for_reply",
-    label: "Wait for agent replies",
+    name: "list_pending_prompts",
+    label: "List pending prompts",
     description:
-      "Wait until one supplied prompt finishes or timeout_ms elapses. Returns only the finished result, including its prompt_id. timeout_ms is required; use 0 to poll. A timeout does not cancel pending prompts.",
+      "List prompts started by this PI session that have not reached a terminal state.",
+    parameters: Type.Object({}),
+    async execute() {
+      const result = outboundPrompts.listPendingPrompts();
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        details: result,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "wait_for_prompt",
+    label: "Wait for an agent prompt",
+    description:
+      "Wait until the first supplied prompt reaches a terminal state or timeout_ms elapses. Returns exactly one result and does not consume it. timeout_ms is required; use 0 to poll.",
     parameters: Type.Object({
       prompt_ids: Type.Array(Type.String({ minLength: 1 }), {
         minItems: 1,
@@ -952,7 +990,27 @@ export default function (pi: ExtensionAPI) {
       timeout_ms: Type.Integer({ minimum: 0, maximum: 3_600_000 }),
     }),
     async execute(_toolCallId, params) {
-      const result = await outboundPrompts.waitForReply(params);
+      const result = await outboundPrompts.waitForPrompt(params);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        details: result,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "cancel_prompts",
+    label: "Cancel agent prompts",
+    description:
+      "Cancel one or more prompts started by this PI session. Completed prompts are left unchanged.",
+    parameters: Type.Object({
+      prompt_ids: Type.Array(Type.String({ minLength: 1 }), {
+        minItems: 1,
+        uniqueItems: true,
+      }),
+    }),
+    async execute(_toolCallId, params) {
+      const result = outboundPrompts.cancelPrompts(params);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         details: result,

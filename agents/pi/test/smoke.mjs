@@ -147,7 +147,7 @@ delete process.env.NATS_PI_OWNER;
 delete process.env.SYNADIA_PI_NAME;
 delete process.env.SYNADIA_NAME;
 if (SIGNED) process.env.NATS_SENDER_IDENTITY = "signed";
-else delete process.env.NATS_SENDER_IDENTITY;
+else process.env.NATS_SENDER_IDENTITY = "off";
 if (STRICT) process.env.NATS_MIN_SENDER_TRUST = "signed";
 else delete process.env.NATS_MIN_SENDER_TRUST;
 // Tracing needs no identity: it only stamps headers on PI's model calls. The
@@ -302,6 +302,16 @@ await step("$SRV.INFO returns spec-shaped service info", async () => {
   assert.equal(ep.metadata?.attachments_ok, "true");
   assert.equal(ep.metadata?.min_sender_trust, STRICT ? "signed" : "any");
   if (SIGNED) assert.equal(verifyAgentId(mine.metadata, ep.subject), true);
+})();
+
+await step("registers the complete non-SDK prompt tool contract", async () => {
+  assert.deepEqual([...registeredTools.keys()], [
+    "discover_agents",
+    "prompt_agent",
+    "list_pending_prompts",
+    "wait_for_prompt",
+    "cancel_prompts",
+  ]);
 })();
 
 await step(

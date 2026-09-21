@@ -164,11 +164,19 @@ cases where a local action shares the turn with a remote prompt.
 
 ### Agent tools
 
-| Tool              | What it does |
-| ----------------- | ------------ |
-| `discover_agents` | Discovers reachable agents and returns their `instance_id` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched. |
-| `prompt_agent`    | Starts a prompt to one discovered `instance_id` and immediately returns a pending `prompt_id`. `max_wait_ms`, when set, limits the remote request's total lifetime. |
-| `wait_for_reply`  | Waits for any supplied `prompt_id` to finish or for the required `timeout_ms` to elapse. Returns only that finished result, including its `prompt_id`; a timeout returns no prompt result. Use `timeout_ms: 0` to poll. |
+| Tool                   | What it does                                                                                                                                                                                   |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `discover_agents`      | Discovers reachable agents and returns their `instance_id` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched.                                                   |
+| `prompt_agent`         | Starts a labeled prompt with optional file-path attachments and returns a short session-scoped `prompt_id` after the target accepts it. `max_runtime_ms` limits the remote request's lifetime. |
+| `list_pending_prompts` | Lists this session's prompts that have not reached a terminal state.                                                                                                                           |
+| `wait_for_prompt`      | Waits for the first supplied `prompt_id` to finish or for required `timeout_ms` to elapse. Returns exactly one non-consuming result; use `timeout_ms: 0` to poll.                              |
+| `cancel_prompts`       | Cancels one or more pending prompts.                                                                                                                                                           |
+
+Up to 256 prompts are retained per session. At the limit, the oldest terminal
+result is evicted; a new prompt is rejected if every retained prompt is still
+pending. Response attachments are written to private temporary files and
+returned by path. A background completion injects an `agent_prompt_finished`
+follow-up unless an active `wait_for_prompt` receives it.
 
 ### In-PI commands
 

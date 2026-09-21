@@ -6,7 +6,13 @@
     "onStartup": true
   },
   "contracts": {
-    "tools": ["discover_agents", "prompt_agent", "wait_for_reply"]
+    "tools": [
+      "discover_agents",
+      "prompt_agent",
+      "list_pending_prompts",
+      "wait_for_prompt",
+      "cancel_prompts"
+    ]
   },
   "channelConfigs": {
     "nats": {

@@ -24,12 +24,15 @@ export default defineChannelPluginEntry({
   },
   registerFull(api: OpenClawPluginApi) {
     ensureNatsChannelConfig(api.runtime);
-    api.registerTool(
-      (toolContext) => createNatsAgentTools(toolContext),
-      {
-        names: ["discover_agents", "prompt_agent", "wait_for_reply"],
-      },
-    );
+    api.registerTool((toolContext) => createNatsAgentTools(toolContext), {
+      names: [
+        "discover_agents",
+        "prompt_agent",
+        "list_pending_prompts",
+        "wait_for_prompt",
+        "cancel_prompts",
+      ],
+    });
   },
 });
 

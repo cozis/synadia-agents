@@ -1,12 +1,16 @@
+import { describe, expect, test } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  StreamMaxWaitExceededError,
   activeTrace,
   type Agent,
   type Agents,
   type StreamMessage,
   type TraceScope,
 } from "@synadia-ai/agents";
-import { describe, expect, it } from "vitest";
-import { AsyncPromptManager } from "./agent-tools.js";
+import { AsyncPromptManager, PromptToolError } from "./agent-tools.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -16,7 +20,10 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function fakeAgent(messages: () => AsyncIterable<StreamMessage>): Agent {
+function fakeAgent(
+  messages: () => AsyncIterable<StreamMessage>,
+  onPrompt?: (text: string, options: any) => void,
+): Agent {
   return {
     instanceId: "instance-1",
     agent: "test",
@@ -31,7 +38,10 @@ function fakeAgent(messages: () => AsyncIterable<StreamMessage>): Agent {
       attachmentsOk: true,
     },
     idSigVerified: true,
-    prompt: async () => messages(),
+    prompt: async (text: string, options: any) => {
+      onPrompt?.(text, options);
+      return messages();
+    },
   } as unknown as Agent;
 }
 
@@ -42,8 +52,20 @@ function clientFor(agent: Agent): Pick<Agents, "lookupInstance"> {
   } as Pick<Agents, "lookupInstance">;
 }
 
+function start(
+  manager: AsyncPromptManager,
+  agent: Agent,
+  label = "Test prompt",
+) {
+  return manager.promptAgent(clientFor(agent), {
+    instance_id: agent.instanceId,
+    label,
+    text: "hello",
+  });
+}
+
 describe("AsyncPromptManager", () => {
-  it("returns pending, polls, then collects a reply", async () => {
+  test("uses short handles, lists pending work, and keeps results readable", async () => {
     const release = deferred<void>();
     const agent = fakeAgent(async function* () {
       yield { type: "status", status: "ack" };
@@ -51,114 +73,135 @@ describe("AsyncPromptManager", () => {
       yield { type: "response", text: "hello" };
     });
     const manager = new AsyncPromptManager();
-    const started = await manager.promptAgent(clientFor(agent), {
-      instance_id: agent.instanceId,
-      prompt: "hello",
-    });
-    const polled = await manager.waitForReply({
-      prompt_ids: [started.prompt_id],
-      timeout_ms: 0,
-    });
-    expect(polled).toEqual({ timed_out: true });
 
-    const timed = await manager.waitForReply({
-      prompt_ids: [started.prompt_id],
-      timeout_ms: 5,
+    const started = await start(manager, agent);
+    expect(started).toMatchObject({
+      prompt_id: "p1",
+      label: "Test prompt",
+      state: "pending",
+      target_instance_id: agent.instanceId,
     });
-    expect(timed).toEqual({ timed_out: true });
+    expect(manager.listPendingPrompts()).toEqual([started]);
+    expect(
+      await manager.waitForPrompt({
+        prompt_ids: [started.prompt_id],
+        timeout_ms: 0,
+      }),
+    ).toEqual({ type: "timeout", pending_prompt_ids: ["p1"] });
 
     release.resolve();
-    const completed = await manager.waitForReply({
+    const completed = await manager.waitForPrompt({
       prompt_ids: [started.prompt_id],
       timeout_ms: 100,
     });
-    expect(completed.timed_out).toBe(false);
     expect(completed).toMatchObject({
-      prompt_id: started.prompt_id,
+      type: "prompt_result",
+      prompt_id: "p1",
+      label: "Test prompt",
       state: "completed",
-      response: "hello",
+      response_text: "hello",
+      remaining_prompt_ids: [],
     });
+    expect(manager.listPendingPrompts()).toEqual([]);
+    expect(
+      await manager.waitForPrompt({ prompt_ids: ["p1"], timeout_ms: 0 }),
+    ).toEqual(completed);
   });
 
-  it("returns when the first of multiple handles settles", async () => {
+  test("wait_for_prompt returns only the first terminal result", async () => {
     const releases = [deferred<void>(), deferred<void>()];
     let call = 0;
     const agent = fakeAgent(() => {
       const current = call++;
       return (async function* () {
+        yield { type: "status", status: "ack" };
         await releases[current]!.promise;
         yield { type: "response", text: String(current + 1) };
       })();
     });
     const manager = new AsyncPromptManager();
-    const first = await manager.promptAgent(clientFor(agent), {
-      instance_id: agent.instanceId,
-      prompt: "first",
-    });
-    const second = await manager.promptAgent(clientFor(agent), {
-      instance_id: agent.instanceId,
-      prompt: "second",
-    });
-    setTimeout(() => releases[0]!.resolve(), 5);
-    const result = await manager.waitForReply({
-      prompt_ids: [first.prompt_id, second.prompt_id],
-      timeout_ms: 100,
-    });
-    expect(result.timed_out).toBe(false);
-    expect(result).toMatchObject({
-      prompt_id: first.prompt_id,
-      state: "completed",
-      response: "1",
-    });
-    expect(result).not.toHaveProperty("prompts");
+    const a = await start(manager, agent, "first");
+    const b = await start(manager, agent, "second");
 
-    releases[1]!.resolve();
-    const remaining = await manager.waitForReply({
-      prompt_ids: [second.prompt_id],
+    const waiting = manager.waitForPrompt({
+      prompt_ids: [a.prompt_id, b.prompt_id],
       timeout_ms: 100,
     });
-    expect(remaining).toMatchObject({
-      prompt_id: second.prompt_id,
-      state: "completed",
-      response: "2",
+    releases[1]!.resolve();
+    expect(await waiting).toMatchObject({
+      prompt_id: "p2",
+      response_text: "2",
+      remaining_prompt_ids: ["p1"],
     });
+
+    releases[0]!.resolve();
+    expect(
+      await manager.waitForPrompt({ prompt_ids: ["p1"], timeout_ms: 100 }),
+    ).toMatchObject({ prompt_id: "p1", response_text: "1" });
   });
 
-  it("returns background errors and rejects unknown handles", async () => {
+  test("stores failures as terminal results and reports unknown handles", async () => {
     const agent = fakeAgent(async function* () {
+      yield { type: "status", status: "ack" };
       throw new Error("remote failed");
     });
     const manager = new AsyncPromptManager();
-    const started = await manager.promptAgent(clientFor(agent), {
-      instance_id: agent.instanceId,
-      prompt: "fail",
+    const started = await start(manager, agent);
+    expect(
+      await manager.waitForPrompt({
+        prompt_ids: [started.prompt_id],
+        timeout_ms: 100,
+      }),
+    ).toMatchObject({
+      prompt_id: "p1",
+      state: "failed",
+      error: { code: "remote_error", message: "remote failed" },
     });
-    const result = await manager.waitForReply({
-      prompt_ids: [started.prompt_id],
-      timeout_ms: 100,
-    });
-    expect(result).toMatchObject({
-      prompt_id: started.prompt_id,
-      state: "error",
-      error: "remote failed",
-    });
-    await expect(
-      manager.waitForReply({ prompt_ids: ["missing"], timeout_ms: 0 }),
-    ).rejects.toThrow('pending prompt "missing" was not found');
+    try {
+      await manager.waitForPrompt({ prompt_ids: ["missing"], timeout_ms: 0 });
+      throw new Error("expected an error");
+    } catch (error) {
+      expect(error).toBeInstanceOf(PromptToolError);
+      expect((error as PromptToolError).code).toBe("prompt_not_found");
+    }
   });
 
-  it("notifies once when a prompt settles without an active waiter", async () => {
-    const release = deferred<void>();
-    const notified = deferred<void>();
-    const events: Array<{ prompt_id: string; state: string }> = [];
-    const agent = fakeAgent(async function* () {
-      await release.promise;
-      yield { type: "response", text: "done" };
+  test("does not create a handle before acceptance and records deadline expiry", async () => {
+    const rejected = fakeAgent(async function* () {
+      throw new Error("acceptance failed");
     });
     const manager = new AsyncPromptManager();
-    const started = await manager.promptAgent(
+    await expect(start(manager, rejected)).rejects.toThrow("acceptance failed");
+    expect(manager.listPendingPrompts()).toEqual([]);
+
+    const expired = fakeAgent(async function* () {
+      yield { type: "status", status: "ack" };
+      throw new StreamMaxWaitExceededError(10);
+    });
+    const started = await start(manager, expired);
+    expect(
+      await manager.waitForPrompt({
+        prompt_ids: [started.prompt_id],
+        timeout_ms: 100,
+      }),
+    ).toMatchObject({
+      state: "expired",
+      error: { code: "deadline_exceeded" },
+    });
+  });
+
+  test("notifies only when no active waiter receives the completion", async () => {
+    const release = deferred<void>();
+    const notified = deferred<void>();
+    const events: unknown[] = [];
+    const agent = fakeAgent(async function* () {
+      yield { type: "status", status: "ack" };
+      await release.promise;
+    });
+    const manager = new AsyncPromptManager();
+    const background = await manager.promptAgent(
       clientFor(agent),
-      { instance_id: agent.instanceId, prompt: "background" },
+      { instance_id: agent.instanceId, label: "background", text: "go" },
       {
         onSettled: (event) => {
           events.push(event);
@@ -166,42 +209,153 @@ describe("AsyncPromptManager", () => {
         },
       },
     );
-
     release.resolve();
     await notified.promise;
     expect(events).toEqual([
-      { prompt_id: started.prompt_id, state: "completed" },
+      {
+        event: "agent_prompt_finished",
+        prompt_id: background.prompt_id,
+        state: "completed",
+      },
     ]);
-  });
 
-  it("an active wait consumes completion without a duplicate notification", async () => {
-    const release = deferred<void>();
-    const events: Array<{ prompt_id: string; state: string }> = [];
-    const agent = fakeAgent(async function* () {
-      await release.promise;
-      yield { type: "response", text: "done" };
+    const waitedRelease = deferred<void>();
+    const waitedEvents: unknown[] = [];
+    const waitedAgent = fakeAgent(async function* () {
+      yield { type: "status", status: "ack" };
+      await waitedRelease.promise;
     });
-    const manager = new AsyncPromptManager();
-    const started = await manager.promptAgent(
-      clientFor(agent),
-      { instance_id: agent.instanceId, prompt: "wait" },
-      { onSettled: (event) => events.push(event) },
+    const waited = await manager.promptAgent(
+      clientFor(waitedAgent),
+      { instance_id: waitedAgent.instanceId, label: "waited", text: "go" },
+      {
+        onSettled: (event) => {
+          waitedEvents.push(event);
+        },
+      },
     );
-    const waiting = manager.waitForReply({
-      prompt_ids: [started.prompt_id],
+    const waiting = manager.waitForPrompt({
+      prompt_ids: [waited.prompt_id],
       timeout_ms: 100,
     });
-
-    release.resolve();
-    expect(await waiting).toMatchObject({
-      timed_out: false,
-      prompt_id: started.prompt_id,
-    });
+    waitedRelease.resolve();
+    await waiting;
     await Promise.resolve();
-    expect(events).toEqual([]);
+    expect(waitedEvents).toEqual([]);
   });
 
-  it("keeps the initiating trace active in background collection", async () => {
+  test("cancels prompts, evicts terminal results, and rejects an all-pending limit", async () => {
+    const releases = [deferred<void>(), deferred<void>(), deferred<void>()];
+    let call = 0;
+    const agent = fakeAgent(() => {
+      const current = call++;
+      return (async function* () {
+        yield { type: "status", status: "ack" };
+        await releases[current]!.promise;
+      })();
+    });
+    const manager = new AsyncPromptManager({ maxTrackedPrompts: 1 });
+    const first = await start(manager, agent, "first");
+    releases[0]!.resolve();
+    await manager.waitForPrompt({
+      prompt_ids: [first.prompt_id],
+      timeout_ms: 100,
+    });
+    const second = await start(manager, agent, "second");
+    await expect(
+      manager.waitForPrompt({ prompt_ids: [first.prompt_id], timeout_ms: 0 }),
+    ).rejects.toMatchObject({ code: "prompt_not_found" });
+    expect(
+      manager.cancelPrompts({ prompt_ids: [second.prompt_id, "missing"] }),
+    ).toEqual([
+      { prompt_id: "p2", outcome: "cancelled" },
+      { prompt_id: "missing", outcome: "not_found" },
+    ]);
+    expect(
+      await manager.waitForPrompt({ prompt_ids: ["p2"], timeout_ms: 0 }),
+    ).toMatchObject({ prompt_id: "p2", state: "cancelled" });
+
+    const allPending = new AsyncPromptManager({ maxTrackedPrompts: 1 });
+    await start(allPending, agent);
+    await expect(start(allPending, agent)).rejects.toMatchObject({
+      code: "prompt_limit_reached",
+    });
+    allPending.cancelAll();
+  });
+
+  test("reserves capacity while awaiting acceptance and cancels startup on shutdown", async () => {
+    const release = deferred<void>();
+    const agent = fakeAgent(async function* () {
+      await release.promise;
+      yield { type: "status", status: "ack" };
+    });
+    const manager = new AsyncPromptManager({ maxTrackedPrompts: 1 });
+    const starting = start(manager, agent);
+    await Promise.resolve();
+    expect(manager.listPendingPrompts()).toEqual([]);
+    await expect(start(manager, agent)).rejects.toMatchObject({
+      code: "prompt_limit_reached",
+    });
+    manager.cancelAll();
+    release.resolve();
+    await expect(starting).rejects.toMatchObject({ code: "prompt_cancelled" });
+    expect(manager.listPendingPrompts()).toEqual([]);
+  });
+
+  test("loads request attachments and materializes response attachments", async () => {
+    const sourceDir = mkdtempSync(join(tmpdir(), "prompt-input-"));
+    const sourcePath = join(sourceDir, "input.txt");
+    writeFileSync(sourcePath, "request bytes");
+    let promptOptions: any;
+    const agent = fakeAgent(
+      async function* () {
+        yield { type: "status", status: "ack" };
+        yield {
+          type: "response",
+          text: "attached",
+          attachments: [
+            {
+              filename: "../answer.txt",
+              content: Buffer.from("response bytes").toString("base64"),
+            },
+          ],
+        };
+      },
+      (_text, options) => {
+        promptOptions = options;
+      },
+    );
+    const manager = new AsyncPromptManager();
+    try {
+      const started = await manager.promptAgent(clientFor(agent), {
+        instance_id: agent.instanceId,
+        label: "attachments",
+        text: "inspect this",
+        attachments: [{ path: sourcePath, filename: "renamed.txt" }],
+      });
+      expect(promptOptions.attachments[0].filename).toBe("renamed.txt");
+      expect(Buffer.from(promptOptions.attachments[0].content).toString()).toBe(
+        "request bytes",
+      );
+      const result: any = await manager.waitForPrompt({
+        prompt_ids: [started.prompt_id],
+        timeout_ms: 100,
+      });
+      expect(result.attachments[0]).toMatchObject({
+        filename: "answer.txt",
+        size_bytes: 14,
+      });
+      expect(readFileSync(result.attachments[0].path, "utf8")).toBe(
+        "response bytes",
+      );
+      expect(result.attachments[0].path).toContain("/p1/");
+    } finally {
+      manager.cancelAll();
+      rmSync(sourceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("propagates the initiating trace scope through prompt acceptance", async () => {
     const seen: Array<TraceScope | undefined> = [];
     const scope: TraceScope = {
       threadId: "a".repeat(32),
@@ -209,6 +363,8 @@ describe("AsyncPromptManager", () => {
       turnCountHint: 1,
     };
     const agent = fakeAgent(async function* () {
+      seen.push(activeTrace());
+      yield { type: "status", status: "ack" };
       seen.push(activeTrace());
       yield { type: "response", text: "ok" };
     });
@@ -222,10 +378,13 @@ describe("AsyncPromptManager", () => {
     const manager = new AsyncPromptManager();
     const started = await manager.promptAgent(
       clientFor(agent),
-      { instance_id: agent.instanceId, prompt: "trace" },
+      { instance_id: agent.instanceId, label: "trace", text: "trace" },
       { traceScope: scope },
     );
-    await manager.waitForReply({ prompt_ids: [started.prompt_id], timeout_ms: 100 });
-    expect(seen).toEqual([scope, scope]);
+    await manager.waitForPrompt({
+      prompt_ids: [started.prompt_id],
+      timeout_ms: 100,
+    });
+    expect(seen).toEqual([scope, scope, scope]);
   });
 });

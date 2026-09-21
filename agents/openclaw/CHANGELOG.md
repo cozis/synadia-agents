@@ -10,11 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `discover_agents`, asynchronous `prompt_agent`, and `wait_for_reply` model
-  tools. `prompt_agent` returns a pending handle immediately; `wait_for_reply`
-  waits until any one of the supplied handles finishes and returns only that
-  result with its `prompt_id`, with a required timeout including zero for
-  polling. The gateway keeps an SDK
+- The non-SDK prompt tool contract: `discover_agents`, asynchronous
+  `prompt_agent`, `list_pending_prompts`, `wait_for_prompt`, and
+  `cancel_prompts`. Handles and retained work are isolated per OpenClaw
+  session; waits return only the first terminal result and do not consume it;
+  and response attachments are materialized as private temporary files. The
+  gateway keeps an SDK
   client on its active NATS connection; when tracing is on, `prompt_agent`
   recovers the originating `TraceScope` through OpenClaw's per-turn trace id
   and publishes the child edge with the host identity.

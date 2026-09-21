@@ -12,7 +12,12 @@ import type {
 import type { ChannelSetupWizard } from "openclaw/plugin-sdk/channel-setup";
 import { Type } from "@sinclair/typebox";
 import { activeTrace } from "@synadia-ai/agents";
-import { AsyncPromptManager, discoverAgents } from "./agent-tools.js";
+import {
+  AsyncPromptManager,
+  PromptToolError,
+  discoverAgents,
+  type PromptSettledEvent,
+} from "./agent-tools.js";
 import { outboundSubject } from "./nats/index.js";
 import { listNatsAccountIds, resolveNatsAccount } from "./accounts.js";
 import { startNatsGateway, stopNatsGateway } from "./gateway.js";
@@ -21,26 +26,50 @@ import {
   getActiveAgentClient,
   getActiveAgentName,
   getActiveOwner,
+  getNatsRuntime,
 } from "./runtime.js";
 import { activeAgentTraceScope } from "./trace-scope.js";
 import type { ResolvedNatsAccount } from "./types.js";
 
-const outboundPrompts = new AsyncPromptManager();
+const outboundPromptsBySession = new Map<string, AsyncPromptManager>();
+
+function promptManagerFor(
+  toolContext: OpenClawPluginToolContext,
+): AsyncPromptManager {
+  const sessionKey = toolContext.sessionKey;
+  if (!sessionKey) {
+    throw new PromptToolError(
+      "session_unavailable",
+      "OpenClaw did not provide a session key for this prompt tool call",
+    );
+  }
+  let manager = outboundPromptsBySession.get(sessionKey);
+  if (!manager) {
+    manager = new AsyncPromptManager();
+    outboundPromptsBySession.set(sessionKey, manager);
+  }
+  return manager;
+}
+
+function cancelAllOutboundPrompts(): void {
+  for (const manager of outboundPromptsBySession.values()) manager.cancelAll();
+  outboundPromptsBySession.clear();
+}
 
 function promptCompletionNotice(
   promptId: string,
-  state: "completed" | "error",
+  state: PromptSettledEvent["state"],
 ): string {
   return [
-    `Agent prompt ${promptId} ${state === "completed" ? "completed" : "finished with an error"}.`,
-    `Call wait_for_reply with prompt_ids [${JSON.stringify(promptId)}] and timeout_ms 0 to retrieve the result.`,
+    `Agent prompt ${promptId} finished with state ${state}.`,
+    `Call wait_for_prompt with prompt_ids [${JSON.stringify(promptId)}] and timeout_ms 0 to retrieve the result.`,
   ].join(" ");
 }
 
 export function notifyPromptCompletion(
   runtime: Pick<ReturnType<typeof getNatsRuntime>, "system">,
   toolContext: OpenClawPluginToolContext,
-  event: { readonly prompt_id: string; readonly state: "completed" | "error" },
+  event: PromptSettledEvent,
 ): void {
   if (!toolContext.sessionKey) {
     console.warn(
@@ -93,7 +122,12 @@ export function createNatsAgentTools(
       }),
       async execute(_toolCallId, params) {
         const client = getActiveAgentClient();
-        if (!client) throw new Error("NATS is not connected");
+        if (!client) {
+          throw new PromptToolError(
+            "nats_not_connected",
+            "NATS is not connected",
+          );
+        }
         const result = await discoverAgents(
           client,
           params as Parameters<typeof discoverAgents>[1],
@@ -108,18 +142,33 @@ export function createNatsAgentTools(
       name: "prompt_agent",
       label: "Prompt agent",
       description:
-        "Start prompting one agent instance returned by discover_agents. Returns a pending prompt handle immediately; use wait_for_reply to collect the response. Interactive queries receive query_response, or a conservative denial when omitted.",
+        "Start prompting one agent instance returned by discover_agents. Returns a short, session-scoped handle after the target accepts it; use wait_for_prompt to collect the response.",
       parameters: Type.Object({
         instance_id: Type.String({ minLength: 1 }),
-        prompt: Type.String({ minLength: 1 }),
-        max_wait_ms: Type.Optional(
+        label: Type.String({ minLength: 1 }),
+        text: Type.String({ minLength: 1 }),
+        attachments: Type.Optional(
+          Type.Array(
+            Type.Object({
+              path: Type.String({ minLength: 1 }),
+              filename: Type.Optional(Type.String({ minLength: 1 })),
+            }),
+          ),
+        ),
+        max_runtime_ms: Type.Optional(
           Type.Integer({ minimum: 1, maximum: 3_600_000 }),
         ),
         query_response: Type.Optional(Type.String()),
       }),
       async execute(toolCallId, params) {
         const client = getActiveAgentClient();
-        if (!client) throw new Error("NATS is not connected");
+        if (!client) {
+          throw new PromptToolError(
+            "nats_not_connected",
+            "NATS is not connected",
+          );
+        }
+        const outboundPrompts = promptManagerFor(toolContext);
         const scope = activeTrace() ?? activeAgentTraceScope();
         const result = await outboundPrompts.promptAgent(
           client,
@@ -130,7 +179,11 @@ export function createNatsAgentTools(
             ...(toolContext.sessionKey
               ? {
                   onSettled: (event) =>
-                    notifyPromptCompletion(getNatsRuntime(), toolContext, event),
+                    notifyPromptCompletion(
+                      getNatsRuntime(),
+                      toolContext,
+                      event,
+                    ),
                 }
               : {}),
           },
@@ -142,10 +195,24 @@ export function createNatsAgentTools(
       },
     },
     {
-      name: "wait_for_reply",
-      label: "Wait for reply",
+      name: "list_pending_prompts",
+      label: "List pending prompts",
       description:
-        "Wait for one or more prompt_agent handles until one finishes or timeout_ms elapses. Returns only the finished result, including its prompt_id. A timeout of 0 polls and does not cancel pending prompts.",
+        "List prompts started by this OpenClaw session that have not reached a terminal state.",
+      parameters: Type.Object({}),
+      async execute() {
+        const result = promptManagerFor(toolContext).listPendingPrompts();
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          details: result,
+        };
+      },
+    },
+    {
+      name: "wait_for_prompt",
+      label: "Wait for an agent prompt",
+      description:
+        "Wait until the first supplied prompt reaches a terminal state or timeout_ms elapses. Returns exactly one result and does not consume it. A timeout of 0 polls.",
       parameters: Type.Object({
         prompt_ids: Type.Array(Type.String({ minLength: 1 }), {
           minItems: 1,
@@ -154,8 +221,31 @@ export function createNatsAgentTools(
         timeout_ms: Type.Integer({ minimum: 0, maximum: 3_600_000 }),
       }),
       async execute(_toolCallId, params) {
-        const result = await outboundPrompts.waitForReply(
-          params as Parameters<AsyncPromptManager["waitForReply"]>[0],
+        const manager = promptManagerFor(toolContext);
+        const result = await manager.waitForPrompt(
+          params as Parameters<AsyncPromptManager["waitForPrompt"]>[0],
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          details: result,
+        };
+      },
+    },
+    {
+      name: "cancel_prompts",
+      label: "Cancel agent prompts",
+      description:
+        "Cancel one or more prompts started by this OpenClaw session. Completed prompts are left unchanged.",
+      parameters: Type.Object({
+        prompt_ids: Type.Array(Type.String({ minLength: 1 }), {
+          minItems: 1,
+          uniqueItems: true,
+        }),
+      }),
+      async execute(_toolCallId, params) {
+        const manager = promptManagerFor(toolContext);
+        const result = manager.cancelPrompts(
+          params as Parameters<AsyncPromptManager["cancelPrompts"]>[0],
         );
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -468,7 +558,7 @@ export const natsPlugin = createChatChannelPlugin<ResolvedNatsAccount>({
     gateway: {
       startAccount: startNatsGateway,
       stopAccount: async (ctx) => {
-        outboundPrompts.cancelAll();
+        cancelAllOutboundPrompts();
         await stopNatsGateway(ctx);
       },
     },

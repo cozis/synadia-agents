@@ -1,6 +1,9 @@
 import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import { describe, expect, it, vi } from "vitest";
-import { notifyPromptCompletion } from "./channel.js";
+import {
+  createNatsAgentTools,
+  notifyPromptCompletion,
+} from "./channel.js";
 import type { getNatsRuntime } from "./runtime.js";
 
 describe("OpenClaw prompt completion notifications", () => {
@@ -17,12 +20,15 @@ describe("OpenClaw prompt completion notifications", () => {
     } as unknown as OpenClawPluginToolContext;
 
     notifyPromptCompletion(runtime, context, {
+      event: "agent_prompt_finished",
       prompt_id: "prompt-1",
       state: "completed",
     });
 
     expect(enqueueSystemEvent).toHaveBeenCalledWith(
-      expect.stringContaining("Agent prompt prompt-1 completed"),
+      expect.stringContaining(
+        "Agent prompt prompt-1 finished with state completed",
+      ),
       {
         sessionKey: "agent:main:conversation-1",
         contextKey: "nats-prompt:prompt-1",
@@ -50,9 +56,29 @@ describe("OpenClaw prompt completion notifications", () => {
     notifyPromptCompletion(
       runtime,
       { sessionKey: "agent:main:conversation-1" } as OpenClawPluginToolContext,
-      { prompt_id: "prompt-2", state: "error" },
+      {
+        event: "agent_prompt_finished",
+        prompt_id: "prompt-2",
+        state: "failed",
+      },
     );
 
     expect(requestHeartbeat).not.toHaveBeenCalled();
+  });
+});
+
+describe("OpenClaw agent tool registration", () => {
+  it("exposes the complete non-SDK prompt tool contract", () => {
+    const tools = createNatsAgentTools({
+      sessionKey: "agent:main:conversation-1",
+    } as OpenClawPluginToolContext);
+
+    expect(tools.map((tool) => tool.name)).toEqual([
+      "discover_agents",
+      "prompt_agent",
+      "list_pending_prompts",
+      "wait_for_prompt",
+      "cancel_prompts",
+    ]);
   });
 });

@@ -207,7 +207,8 @@ plugin takes part in the SDKs' observability tracing extension:
   startup, and every record owed counts as dropped on the heartbeat's
   `records_dropped`.
 
-The plugin exposes `discover_agents`, `prompt_agent`, and `wait_for_reply`. The gateway associates
+The plugin exposes `discover_agents`, `prompt_agent`, `list_pending_prompts`,
+`wait_for_prompt`, and `cancel_prompts`. The gateway associates
 OpenClaw's per-turn trace id with the active SDK service scope for the lifetime
 of the dispatch, so `prompt_agent` can recover the parent thread even when the
 tool runs through OpenClaw's command lane. With tracing on, its SDK client
@@ -215,11 +216,20 @@ publishes the child `edge` record using the host identity.
 
 ### Agent tools
 
-| Tool              | What it does |
-| ----------------- | ------------ |
-| `discover_agents` | Discovers reachable agents and returns their `instance_id` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched. |
-| `prompt_agent`    | Starts a prompt to one discovered `instance_id` and immediately returns a pending `prompt_id`. `max_wait_ms`, when set, limits the remote request's total lifetime. |
-| `wait_for_reply`  | Waits for any supplied `prompt_id` to finish or for the required `timeout_ms` to elapse. Returns only that finished result, including its `prompt_id`; a timeout returns no prompt result. Use `timeout_ms: 0` to poll. |
+| Tool                   | What it does                                                                                                                                                                                   |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `discover_agents`      | Discovers reachable agents and returns their `instance_id` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched.                                                   |
+| `prompt_agent`         | Starts a labeled prompt with optional file-path attachments and returns a short session-scoped `prompt_id` after the target accepts it. `max_runtime_ms` limits the remote request's lifetime. |
+| `list_pending_prompts` | Lists this session's prompts that have not reached a terminal state.                                                                                                                           |
+| `wait_for_prompt`      | Waits for the first supplied `prompt_id` to finish or for required `timeout_ms` to elapse. Returns exactly one non-consuming result; use `timeout_ms: 0` to poll.                              |
+| `cancel_prompts`       | Cancels one or more pending prompts.                                                                                                                                                           |
+
+Each OpenClaw session retains up to 256 prompts independently. At the limit,
+the oldest terminal result is evicted; a new prompt is rejected if every
+retained prompt is still pending. Response attachments are written to private
+temporary files and returned by path. A background completion queues an
+`agent_prompt_finished` event for the originating session unless an active
+`wait_for_prompt` receives it.
 
 ## Verify
 

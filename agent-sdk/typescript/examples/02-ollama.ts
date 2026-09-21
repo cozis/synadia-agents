@@ -9,7 +9,7 @@
 // (`/v1/chat/completions`, SSE) rather than the native `/api/generate` — so
 // `OLLAMA_URL` accepts anything that speaks that wire shape: a local Ollama
 // (the default), or an OpenAI-style metering/audit proxy sitting in front of
-// one (e.g. a synadia-model-proxy per-agent identity URL).
+// one.
 //
 // Prerequisites: a local Ollama (https://ollama.com) with the model pulled:
 //   ollama pull llama3.2

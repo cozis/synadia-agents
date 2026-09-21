@@ -1,0 +1,157 @@
+{
+  "max_name_bytes": 200,
+  "max_extension_chars": 16,
+  "names": [
+    {
+      "input": "report.pdf",
+      "expected": "report.pdf",
+      "note": "an ordinary name is kept"
+    },
+    {
+      "input": "r\u00e9sum\u00e9 final.pdf",
+      "expected": "r\u00e9sum\u00e9 final.pdf",
+      "note": "non-ASCII letters and inner spaces are kept"
+    },
+    {
+      "input": "archive.tar.gz",
+      "expected": "archive.tar.gz",
+      "note": "a double extension is kept"
+    },
+    {
+      "input": "../../etc/passwd",
+      "expected": "passwd",
+      "note": "a POSIX path keeps only its last part"
+    },
+    {
+      "input": "/etc/",
+      "expected": "attachment-1",
+      "note": "a trailing separator leaves nothing: fallback"
+    },
+    {
+      "input": "C:\\Users\\x\\evil.txt",
+      "expected": "evil.txt",
+      "note": "a Windows path keeps only its last part"
+    },
+    {
+      "input": "..\\..\\boot.ini",
+      "expected": "boot.ini",
+      "note": "backslash traversal keeps only its last part"
+    },
+    {
+      "input": "a/b\\c.txt",
+      "expected": "c.txt",
+      "note": "mixed separators: the part after the last one"
+    },
+    {
+      "input": ".bashrc",
+      "expected": "bashrc",
+      "note": "a leading dot is stripped (no hidden files)"
+    },
+    {
+      "input": "...",
+      "expected": "attachment-1",
+      "note": "only dots: fallback"
+    },
+    {
+      "input": "..",
+      "expected": "attachment-1",
+      "note": "a parent reference: fallback"
+    },
+    {
+      "input": "",
+      "expected": "attachment-1",
+      "note": "empty: fallback"
+    },
+    {
+      "input": "a\u0000b.txt",
+      "expected": "ab.txt",
+      "note": "a NUL inside the name is removed"
+    },
+    {
+      "input": "tab\tname\n.txt",
+      "expected": "tabname.txt",
+      "note": "tab and newline are removed"
+    },
+    {
+      "input": "bell\u007f.txt",
+      "expected": "bell.txt",
+      "note": "DEL is removed"
+    },
+    {
+      "input": "\u0000\u001f",
+      "expected": "attachment-1",
+      "note": "only control characters: fallback"
+    },
+    {
+      "input": "name. ",
+      "expected": "name",
+      "note": "trailing dot and space are stripped"
+    },
+    {
+      "input": "file.",
+      "expected": "file",
+      "note": "a trailing dot is stripped"
+    },
+    {
+      "input": "  spaced name.txt  ",
+      "expected": "spaced name.txt",
+      "note": "leading and trailing spaces are stripped, inner kept"
+    },
+    {
+      "input": "\u00a0nbsp.txt\u00a0",
+      "expected": "nbsp.txt",
+      "note": "no-break spaces are whitespace"
+    },
+    {
+      "input": "\ufeffbom.txt",
+      "expected": "bom.txt",
+      "note": "U+FEFF counts as whitespace in both SDKs"
+    },
+    {
+      "input": "\u0085nel.txt\u3000",
+      "expected": "nel.txt",
+      "note": "U+0085 and U+3000 count as whitespace in both SDKs"
+    },
+    {
+      "input": "a\ud800b.txt",
+      "expected": "a\ufffdb.txt",
+      "note": "a lone surrogate becomes U+FFFD"
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt",
+      "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt",
+      "note": "300-char stem: shortened to 200 bytes, extension kept"
+    },
+    {
+      "input": "\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5.md",
+      "expected": "\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5\u65e5.md",
+      "note": "3-byte characters: the stem stops before the character that would cross 200 bytes"
+    },
+    {
+      "input": "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00.js",
+      "expected": "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00.js",
+      "note": "4-byte characters (surrogate pairs in JS): never split"
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbb",
+      "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbb",
+      "note": "extension over 16 characters: the whole name is shortened"
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "note": "a cut that ends on whitespace drops it"
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "note": "exactly 200 bytes is kept"
+    },
+    {
+      "input": "..",
+      "position": 3,
+      "expected": "attachment-3",
+      "note": "the fallback names the 1-based position"
+    }
+  ]
+}

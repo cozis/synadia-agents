@@ -15,6 +15,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **`saveAttachments(attachments, dir, { maxTotalBytes })`.** The receiving
+  counterpart of `normalizeAttachments`: decodes the attachments of a reply
+  (§6.3) or a mid-stream query (§7.1) and writes each into `dir`, created if
+  missing. It returns one `SavedAttachment` per input, in order —
+  `filename`, `sizeBytes`, the absolute `path`, and `skipped` when the file
+  was not written — so a caller can hand its model paths instead of base64.
+  The sender's name is untrusted: only its last path component is kept,
+  control characters are removed, leading and trailing dots and whitespace
+  stripped, `attachment-<n>` when nothing is left, and a name over 200
+  UTF-8 bytes is shortened keeping its extension. Files are created
+  exclusively, so nothing is overwritten and no symlink is followed; a
+  clash takes the next free `name (2).ext`. Content that is not strict
+  RFC 4648 §4 base64 is skipped as `"invalid_content"`, never thrown; the
+  decoded bytes written per call are capped by
+  `DEFAULT_SAVE_ATTACHMENTS_MAX_TOTAL_BYTES` (64 MiB; `Infinity` disables
+  it), an attachment over it skipped as `"over_limit"`. Real I/O errors
+  reject. The Python SDK's `save_attachments` behaves the same; both run the
+  shared cases in `test-fixtures/attachments/`. Nothing on the wire changes.
 - **`signed-heartbeat` vector.** `test-fixtures/identity/sender-vectors.json`
   gains a host's signed heartbeat: `sub` the heartbeat subject as
   published, `ts` the frame's own `ts`, the hash over the frame bytes —

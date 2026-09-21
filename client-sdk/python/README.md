@@ -96,6 +96,7 @@ asyncio.run(main())
 | `Identity`, `signer_from_seed` / `signer_from_creds_file` / `signer_from_context` | [`identity/`](src/synadia_ai/agents/identity/) | Sender identity: sign every `prompt` / `status` with the connection's NKEY — see below. |
 | `Agents.self_id()`, `Agents.sign_sender` / `publish_signed` / `request_signed`, `Agents.resolve_sender` | [`agents.py`](src/synadia_ai/agents/agents.py) | The connection's own agent ID; signed publishes for any subject; the reverse lookup. |
 | `Agent.status()` | [`agent.py`](src/synadia_ai/agents/agent.py) | The §8.7 status probe (header attached) → `HeartbeatPayload`. |
+| `save_attachments` | [`attachments.py`](src/synadia_ai/agents/attachments.py) | Save a reply's attachments to disk under safe, never-overwriting names; returns the absolute paths. |
 | `AgentId`, `verify_sender_header`, `parse_sender_header`, `format_sender` | [`identity/`](src/synadia_ai/agents/identity/) | The shared identity codec (also used by the host package). |
 | `AgentService` | [`synadia-ai-agent-service`](../../agent-sdk/python/) | Server-side; ships in a separate distribution. Import from `synadia_ai.agent_service`. |
 

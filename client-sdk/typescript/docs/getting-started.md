@@ -121,7 +121,9 @@ for await (const msg of stream) {
     case "response":
       process.stdout.write(msg.text);
       if (msg.attachments) {
-        /* agent returned artifacts */
+        // Agent returned files: decode and write them under safe, never-overwriting
+        // names; each entry has the absolute `path`, or `skipped` and why.
+        const saved = await saveAttachments(msg.attachments, "./replies");
       }
       break;
     case "status":

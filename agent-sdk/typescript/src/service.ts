@@ -855,9 +855,10 @@ export class AgentService {
    * ignores headers. Without a signer the frame goes out bare, as today.
    *
    * A signer that fails mid-life (a wiped key) costs the beat its
-   * signature, never the beat: 0.3 callers keep seeing liveness, and the
-   * fabric — which counts an unsigned beat as a claim — shows the agent
-   * as down until signing works again. Logged at `error` on every beat.
+   * signature, never the beat: 0.3 callers keep seeing liveness, and a
+   * receiver that requires signed heartbeats counts an unsigned beat as a
+   * claim and shows the agent as down until signing works again. Logged at
+   * `error` on every beat.
    * A signer slower than the interval (a remote HSM) never piles beats up
    * or lands them out of order: `#startHeartbeats` skips a tick while the
    * previous beat is still pending, the sequential loop of the Python

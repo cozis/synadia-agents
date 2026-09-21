@@ -1,10 +1,11 @@
 """The ``Agent-Sender`` header on a heartbeat.
 
-An agent's presence on the fabric is its signed heartbeat: with a signer
-the publisher sets the header of the sender-identity extension, unchanged,
-on every beat — ``sub`` the heartbeat subject as published, ``ts`` the
-frame's own ``ts``, a fresh nonce per beat, ``sig`` over subject · ts ·
-nonce · sha256 of the exact bytes published. Without a signer the beat
+To a receiver that requires signed heartbeats, an agent's presence is its
+signed heartbeat: with a signer the publisher sets the header of the
+sender-identity extension, unchanged, on every beat — ``sub`` the
+heartbeat subject as published, ``ts`` the frame's own ``ts``, a fresh
+nonce per beat, ``sig`` over subject · ts · nonce · sha256 of the exact
+bytes published. Without a signer the beat
 goes out bare, as protocol 0.3. Checked against the shared known-answer
 vector (``test-fixtures/identity/sender-vectors.json``,
 ``signed-heartbeat``) byte for byte, with the SDK's own verifier over the

@@ -173,7 +173,7 @@ describe("AsyncPromptManager", () => {
     const rejected = fakeAgent(async function* () {
       throw new Error("acceptance failed");
     });
-    const manager = new AsyncPromptManager();
+    const manager = new AsyncPromptManager({ discoveryCacheTtlMs: 0 });
     await expect(start(manager, rejected)).rejects.toThrow("acceptance failed");
     expect(manager.listPendingPrompts()).toEqual([]);
 
@@ -238,6 +238,83 @@ describe("AsyncPromptManager", () => {
     ).rejects.toMatchObject({ code: "agent_not_found" });
   });
 
+  test("caches only the latest discovery when its filters match and it is fresh", async () => {
+    const agent = fakeAgent(async function* () {
+      yield { type: "status", status: "ack" };
+    });
+    let calls = 0;
+    const client = {
+      discover: async (options: any) => {
+        calls += 1;
+        return options.filter?.name === "missing" ? [] : [agent];
+      },
+    } as Pick<Agents, "discover">;
+    const manager = new AsyncPromptManager();
+
+    const first = await manager.discoverAgents(client, {
+      owner: "owner",
+      timeout_ms: 10,
+    });
+    const cached = await manager.discoverAgents(client, {
+      owner: "owner",
+      timeout_ms: 20,
+    });
+    expect(cached).toEqual(first);
+    expect(calls).toBe(1);
+
+    expect(await manager.discoverAgents(client, { name: "missing" })).toEqual(
+      [],
+    );
+    expect(calls).toBe(2);
+    await expect(
+      manager.promptAgent({
+        prompt_endpoint: agent.promptSubject,
+        label: "stale",
+        text: "ask",
+      }),
+    ).rejects.toMatchObject({ code: "agent_not_found" });
+
+    await manager.discoverAgents(client, { owner: "owner" });
+    expect(calls).toBe(3);
+
+    const uncached = new AsyncPromptManager({ discoveryCacheTtlMs: 0 });
+    await uncached.discoverAgents(client, { owner: "owner" });
+    await uncached.discoverAgents(client, { owner: "owner" });
+    expect(calls).toBe(5);
+  });
+
+  test("an older concurrent discovery cannot replace the latest call", async () => {
+    const releaseOlder = deferred<void>();
+    const agent = fakeAgent(async function* () {
+      yield { type: "status", status: "ack" };
+    });
+    const client = {
+      discover: async (options: any) => {
+        if (options.filter?.owner === "older") {
+          await releaseOlder.promise;
+          return [agent];
+        }
+        return [];
+      },
+    } as Pick<Agents, "discover">;
+    const manager = new AsyncPromptManager();
+
+    const older = manager.discoverAgents(client, { owner: "older" });
+    await Promise.resolve();
+    expect(await manager.discoverAgents(client, { owner: "latest" })).toEqual(
+      [],
+    );
+    releaseOlder.resolve();
+    expect(await older).toHaveLength(1);
+    await expect(
+      manager.promptAgent({
+        prompt_endpoint: agent.promptSubject,
+        label: "superseded",
+        text: "ask",
+      }),
+    ).rejects.toMatchObject({ code: "agent_not_found" });
+  });
+
   test("notifies only when no active waiter receives the completion", async () => {
     const release = deferred<void>();
     const notified = deferred<void>();
@@ -246,7 +323,7 @@ describe("AsyncPromptManager", () => {
       yield { type: "status", status: "ack" };
       await release.promise;
     });
-    const manager = new AsyncPromptManager();
+    const manager = new AsyncPromptManager({ discoveryCacheTtlMs: 0 });
     await manager.discoverAgents(clientFor(agent));
     const background = await manager.promptAgent(
       { prompt_endpoint: agent.promptSubject, label: "background", text: "go" },

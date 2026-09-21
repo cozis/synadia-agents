@@ -27,6 +27,7 @@ import {
 const NON_INTERACTIVE_QUERY_RESPONSE =
   "This caller cannot answer interactive queries; deny or continue without approval.";
 export const DEFAULT_MAX_TRACKED_PROMPTS = 256;
+export const DEFAULT_DISCOVERY_CACHE_TTL_MS = 5_000;
 
 export interface DiscoverAgentsInput {
   readonly agent?: string;
@@ -69,6 +70,7 @@ export interface PromptAgentOptions {
 
 export interface AsyncPromptManagerOptions {
   readonly maxTrackedPrompts?: number;
+  readonly discoveryCacheTtlMs?: number;
 }
 
 export type PromptState =
@@ -126,9 +128,18 @@ export class AsyncPromptManager {
   readonly #agentsByEndpoint = new Map<string, Agent>();
   readonly #startingControllers = new Set<AbortController>();
   readonly #maxTrackedPrompts: number;
+  readonly #discoveryCacheTtlMs: number;
+  #lastDiscovery:
+    | {
+        readonly filterKey: string;
+        readonly discoveredAt: number;
+        readonly agents: readonly Agent[];
+      }
+    | undefined;
   #nextPromptNumber = 1;
   #startingPrompts = 0;
   #generation = 0;
+  #discoveryGeneration = 0;
   #attachmentRoot: string | undefined;
 
   constructor(options: AsyncPromptManagerOptions = {}) {
@@ -136,7 +147,15 @@ export class AsyncPromptManager {
     if (!Number.isInteger(maximum) || maximum < 1) {
       throw new TypeError("maxTrackedPrompts must be a positive integer");
     }
+    const discoveryCacheTtlMs =
+      options.discoveryCacheTtlMs ?? DEFAULT_DISCOVERY_CACHE_TTL_MS;
+    if (!Number.isInteger(discoveryCacheTtlMs) || discoveryCacheTtlMs < 0) {
+      throw new TypeError(
+        "discoveryCacheTtlMs must be a non-negative integer",
+      );
+    }
     this.#maxTrackedPrompts = maximum;
+    this.#discoveryCacheTtlMs = discoveryCacheTtlMs;
   }
 
   async discoverAgents(
@@ -149,16 +168,38 @@ export class AsyncPromptManager {
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(input.session !== undefined ? { session: input.session } : {}),
     };
+    const filterKey = JSON.stringify(filter);
+    const now = Date.now();
+    if (
+      this.#lastDiscovery?.filterKey === filterKey &&
+      now - this.#lastDiscovery.discoveredAt < this.#discoveryCacheTtlMs
+    ) {
+      return this.#lastDiscovery.agents.map(describeAgent);
+    }
+
+    // Only the most recent query is cached. A changed filter or an expired
+    // entry replaces both the returned discovery set and the prompt handles.
+    this.#lastDiscovery = undefined;
+    this.#agentsByEndpoint.clear();
+    const discoveryGeneration = ++this.#discoveryGeneration;
     const found = await client.discover({
       ...(input.timeout_ms !== undefined
         ? { timeoutMs: input.timeout_ms }
         : {}),
       ...(Object.keys(filter).length > 0 ? { filter } : {}),
     });
-    for (const agent of found) {
-      this.#agentsByEndpoint.set(agent.promptSubject, agent);
+    const agents = [...found];
+    if (discoveryGeneration === this.#discoveryGeneration) {
+      for (const agent of agents) {
+        this.#agentsByEndpoint.set(agent.promptSubject, agent);
+      }
+      this.#lastDiscovery = {
+        filterKey,
+        discoveredAt: Date.now(),
+        agents,
+      };
     }
-    return found.map(describeAgent);
+    return agents.map(describeAgent);
   }
 
   async promptAgent(
@@ -248,6 +289,7 @@ export class AsyncPromptManager {
 
   cancelAll(): void {
     this.#generation += 1;
+    this.#discoveryGeneration += 1;
     for (const controller of this.#startingControllers) {
       controller.abort(new Error("NATS channel shutting down"));
     }
@@ -262,6 +304,7 @@ export class AsyncPromptManager {
     }
     this.#prompts.clear();
     this.#agentsByEndpoint.clear();
+    this.#lastDiscovery = undefined;
     if (this.#attachmentRoot) {
       rmSync(this.#attachmentRoot, { recursive: true, force: true });
       this.#attachmentRoot = undefined;

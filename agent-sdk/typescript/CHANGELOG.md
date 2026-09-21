@@ -20,7 +20,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   acks and runs the rest of the chain and the handler; an interceptor runs
   it inside its own context (`AsyncLocalStorage.run`), which the handler
   then sees. One that returns without calling `next()` answers `500`; a
-  second call of `next()` rejects.
+  second call of `next()` rejects. A throw after `next()` resolved — the
+  handler's reply already out in full — leaves that reply standing: no
+  error frame, the normal terminator, and one error-level log line with a
+  fixed message, never the error's details.
 - **`heartbeatExtras`.** `AgentServiceOptions.heartbeatExtras` — a provider
   read when each heartbeat and each `status` reply is built, merged into
   its extras. A provider that throws, a §8.3 field name, or a value that

@@ -6,7 +6,12 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it } from "vitest";
 import { connect, type Msg } from "@nats-io/transport-node";
 import { createInbox, type NatsConnection } from "@nats-io/nats-core";
-import { decodeHeartbeatPayload, ProtocolError, type HeartbeatPayload } from "@synadia-ai/agents";
+import {
+  decodeHeartbeatPayload,
+  ProtocolError,
+  type HeartbeatPayload,
+  type Logger,
+} from "@synadia-ai/agents";
 import { RequestRejectedError, type RequestInterceptor } from "../../src/interceptor.js";
 import { AgentService, type AgentServiceOptions } from "../../src/service.js";
 
@@ -26,6 +31,21 @@ function frame(m: Msg): Frame {
   if (m.data.length === 0) return { kind: "terminator" };
   const chunk = JSON.parse(dec.decode(m.data)) as { type: string; data?: unknown };
   return chunk.type === "status" ? { kind: "ack" } : { kind: "response", text: String(chunk.data) };
+}
+
+interface LogLine {
+  readonly level: string;
+  readonly msg: string;
+  readonly ctx: Record<string, unknown> | undefined;
+}
+
+function capturingLogger(lines: LogLine[]): Logger {
+  const push =
+    (level: string) =>
+    (msg: string, ctx?: Record<string, unknown>): void => {
+      lines.push({ level, msg, ctx });
+    };
+  return { debug: push("debug"), info: push("info"), warn: push("warn"), error: push("error") };
 }
 
 describe.skipIf(!natsUrl)("AgentService request interceptors and heartbeat extras", () => {
@@ -134,6 +154,33 @@ describe.skipIf(!natsUrl)("AgentService request interceptors and heartbeat extra
         { kind: "terminator" },
       ]);
       expect(handled).toBe(false);
+    }
+  });
+
+  it("keeps a full reply when an interceptor throws after next(), and logs it", async () => {
+    for (const thrown of [new Error("secret detail"), new RequestRejectedError(403, "too late")]) {
+      const lines: LogLine[] = [];
+      const late: RequestInterceptor = {
+        async aroundRequest(_ctx, next) {
+          await next();
+          throw thrown;
+        },
+      };
+      const svc = await start({ interceptors: [late], logger: capturingLogger(lines) });
+      expect(await frames(svc, "x")).toEqual([
+        { kind: "ack" },
+        { kind: "response", text: "echo:x" },
+        { kind: "terminator" },
+      ]);
+      expect(lines.filter((l) => l.level === "error")).toEqual([
+        {
+          level: "error",
+          msg: "request interceptor failed after the handler completed; the reply is kept",
+          ctx: { subject: svc.subject.prompt, error: "exception" },
+        },
+      ]);
+      // The fixed line only: the error's own text never reaches the log.
+      expect(JSON.stringify(lines)).not.toMatch(/secret detail|too late/);
     }
   });
 

@@ -30,7 +30,10 @@ export interface RequestInterceptorContext {
  * runs the interceptors after this one and then the handler, and resolves
  * when they are done — or rejects with what they threw, which an
  * interceptor may let through or replace. An interceptor must call `next()`
- * once or throw: returning without calling it answers the caller `500`.
+ * once or throw: returning without calling it answers the caller `500`. A
+ * throw after `next()` resolved — the handler's reply already out in full —
+ * leaves that reply standing and is logged with a fixed line, never the
+ * error's details: an interceptor that wants those logged logs them itself.
  */
 export interface RequestInterceptor {
   aroundRequest(ctx: RequestInterceptorContext, next: () => Promise<void>): Promise<void>;

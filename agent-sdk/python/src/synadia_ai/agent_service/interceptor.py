@@ -49,7 +49,10 @@ class RequestInterceptor(Protocol):
     and then the handler, and returns when they are done — or raises what
     they raised, which an interceptor may let through or replace. An
     interceptor must call it once or raise: returning without calling it
-    answers the caller ``500``.
+    answers the caller ``500``. An exception after ``call_next()`` returned
+    — the handler's reply already out in full — leaves that reply standing
+    and is logged with a fixed line, never the exception's details: an
+    interceptor that wants those logged logs them itself.
     """
 
     async def around_request(self, ctx: RequestInterceptorContext, call_next: CallNext) -> None: ...

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
@@ -183,6 +184,41 @@ async def test_a_refusal_before_call_next_answers_its_code_and_no_ack(
         await svc.stop()
     assert frames == [expected, ("terminator",)]
     assert handled is False
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [RuntimeError("secret detail"), RequestRejectedError(403, "too late")],
+    ids=["runtime-error", "request-rejected"],
+)
+async def test_a_failure_after_call_next_returned_keeps_the_reply_and_is_logged(
+    nc: NATSClient,
+    caplog: pytest.LogCaptureFixture,
+    evidence: EvidenceRecorder,
+    raised: Exception,
+) -> None:
+    class Late:
+        async def around_request(self, ctx: RequestInterceptorContext, call_next: CallNext) -> None:
+            await call_next()
+            raise raised
+
+    svc = await _start(nc, f"late-{type(raised).__name__.lower()}", interceptors=[Late()])
+    try:
+        with caplog.at_level(logging.ERROR, logger="synadia_ai.agent_service"):
+            frames = await _frames(nc, svc, "x", evidence)
+    finally:
+        await svc.stop()
+    assert frames == [("ack",), ("response", "echo:x"), ("terminator",)]
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert [r.getMessage() for r in errors] == [
+        f"request interceptor failed on {svc.subject.prompt} after the handler completed; "
+        "the reply is kept (exception)"
+    ]
+    # The fixed line only: the exception's text and traceback never reach the log.
+    assert all(r.exc_info is None for r in caplog.records)
+    assert not any(
+        "secret detail" in r.getMessage() or "too late" in r.getMessage() for r in caplog.records
+    )
 
 
 async def test_a_handler_failure_passes_through_the_chain_which_may_replace_it(

@@ -794,14 +794,18 @@ class AgentService:
             # request interceptors: one that refuses before calling it leaves
             # the caller an error frame and the terminator, and no ack.
             started = False
+            # Set once the handler returns: from then on the caller has its
+            # full reply, and a failure is no longer the caller's.
+            answered = False
 
             async def serve() -> None:
-                nonlocal started, keepalive_task
+                nonlocal started, answered, keepalive_task
                 if started:
                     raise RuntimeError("request interceptor called call_next() more than once")
                 started = True
                 keepalive_task = await self._ack_and_keep_alive(request)
                 await handler(envelope, stream)
+                answered = True
 
             ctx = RequestInterceptorContext(
                 envelope=envelope,
@@ -814,32 +818,25 @@ class AgentService:
                 if not started:
                     # Neither refused nor answered: a stream with no ack is no answer.
                     raise RuntimeError("request interceptor returned without calling call_next()")
-            except RequestRejectedError as exc:
-                log.warning("prompt request refused on %s: %d", request.subject, exc.code)
-                await _stop_keepalive(keepalive_task)
-                keepalive_task = None
-                await request.respond_error(str(exc.code), _sanitize_error_desc(exc.description))
-            except ProtocolError as exc:
-                log.warning(
-                    "prompt handler rejected protocol input on %s: %s",
-                    request.subject,
-                    exc,
-                )
-                await _stop_keepalive(keepalive_task)
-                keepalive_task = None
-                await request.respond_error("400", _sanitize_error_desc(str(exc)))
-            except Exception:
-                log.error(
-                    "prompt handler raised on %s (exception)",
-                    request.subject,
-                )
+            except Exception as exc:
                 # Stop keep-alive BEFORE the §9 error frame so the keepalive
-                # task can't race an ack chunk in between error(500) and the
+                # task can't race an ack chunk in between the error and the
                 # §6.5 terminator emitted in the outer `finally`. Ditto in
                 # the success path right below.
                 await _stop_keepalive(keepalive_task)
                 keepalive_task = None
-                await request.respond_error("500", "handler error")
+                if answered:
+                    # A request interceptor raised after its call_next()
+                    # returned: the handler's reply went out in full, so it
+                    # stands, and the stream ends with its terminator (outer
+                    # `finally`) and no error frame.
+                    log.error(
+                        "request interceptor failed on %s after the handler completed; "
+                        "the reply is kept (exception)",
+                        request.subject,
+                    )
+                else:
+                    await _respond_failure(request, exc)
             else:
                 await _stop_keepalive(keepalive_task)
                 keepalive_task = None
@@ -903,6 +900,24 @@ async def _run_intercepted(
         await interceptors[index].around_request(ctx, lambda: at(index + 1))
 
     await at(0)
+
+
+async def _respond_failure(request: Request, exc: Exception) -> None:
+    """Answer the §9 error frame for a request its handler did not answer.
+
+    A :class:`RequestRejectedError` answers its own code, a
+    :class:`ProtocolError` ``400``, anything else a generic ``500`` whose
+    exception stays out of the reply and the log alike.
+    """
+    if isinstance(exc, RequestRejectedError):
+        log.warning("prompt request refused on %s: %d", request.subject, exc.code)
+        await request.respond_error(str(exc.code), _sanitize_error_desc(exc.description))
+    elif isinstance(exc, ProtocolError):
+        log.warning("prompt handler rejected protocol input on %s: %s", request.subject, exc)
+        await request.respond_error("400", _sanitize_error_desc(str(exc)))
+    else:
+        log.error("prompt handler raised on %s (exception)", request.subject)
+        await request.respond_error("500", "handler error")
 
 
 async def _stop_keepalive(task: asyncio.Task[None] | None) -> None:

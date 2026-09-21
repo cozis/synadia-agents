@@ -22,8 +22,11 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
   a `ProtocolError` `400`, anything else `500`. `call_next()` acks and runs
   the rest of the chain and the handler; an interceptor runs it inside a
   `contextvars` binding of its own, which the handler then sees. One that
-  returns without calling it answers `500`; a second call raises. The
-  TypeScript host has the same hook.
+  returns without calling it answers `500`; a second call raises. An
+  exception after `call_next()` returned — the handler's reply already out
+  in full — leaves that reply standing: no error frame, the normal
+  terminator, and one error-level log line with a fixed message, never the
+  exception's details. The TypeScript host has the same hook.
 - **`heartbeat_extras`.** `AgentService(heartbeat_extras=...)` — a provider
   read when each heartbeat and each `status` reply is built, merged into
   its extras. A provider that raises, a §8.3 field name, or a value that

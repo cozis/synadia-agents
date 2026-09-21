@@ -192,7 +192,7 @@ const service = new AgentService({
 ```
 
 - Interceptors run for every admitted prompt — after the envelope is decoded and the sender classified, before the §6.4 ack — the first listed outermost. Throwing before `next()` refuses the request with no ack: a `RequestRejectedError` answers its §9 code, a `ProtocolError` `400`, anything else `500`.
-- `next()` acks, runs the rest of the chain and the handler, and resolves when they are done; an interceptor must call it once or throw.
+- `next()` acks, runs the rest of the chain and the handler, and resolves when they are done; an interceptor must call it once or throw. A throw after `next()` resolved leaves the handler's full reply standing — no error frame — and is logged with a fixed line, never the error's details: an interceptor that wants those logged logs them itself.
 - `heartbeatExtras` is read when each heartbeat and `status` reply is built. A provider that throws, a §8.3 field name, or a value that does not serialize costs that beat its extras, never the beat.
 
 ## Reference agent (`@synadia-ai/agent-service/testing`)

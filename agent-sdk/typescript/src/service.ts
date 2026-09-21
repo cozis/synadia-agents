@@ -1003,6 +1003,9 @@ export class AgentService {
     // interceptors: an interceptor that refuses before calling it leaves
     // the caller an error frame and the terminator, and no ack.
     let started = false;
+    // Set once the handler returns: from then on the caller has its full
+    // reply, and a failure is no longer the caller's.
+    let answered = false;
     let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
     const stopKeepalive = (): void => {
       if (keepaliveTimer !== null) {
@@ -1015,6 +1018,7 @@ export class AgentService {
       started = true;
       keepaliveTimer = this.#ackAndKeepAlive(msg);
       await handler(envelope, response);
+      answered = true;
     };
     const ctx: RequestInterceptorContext = {
       envelope,
@@ -1033,6 +1037,16 @@ export class AgentService {
       // Stop keep-alive BEFORE the §9 error frame so an ack chunk can't
       // race in between the error and the terminator.
       stopKeepalive();
+      if (answered) {
+        // A request interceptor failed after its next() returned: the
+        // handler's reply went out in full, so it stands, and the stream
+        // ends with its terminator (below) and no error frame.
+        this.#logger.error(
+          "request interceptor failed after the handler completed; the reply is kept",
+          { subject: msg.subject, error: "exception" },
+        );
+        return;
+      }
       const rejected = rejectionOf(err);
       if (rejected === undefined) {
         this.#logger.error("prompt handler failed", {

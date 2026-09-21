@@ -252,6 +252,10 @@ service = AgentService(
   `400`, anything else `500`.
 - `call_next()` acks, runs the rest of the chain and the handler, and
   returns when they are done; an interceptor must call it once or raise.
+  An exception after `call_next()` returned leaves the handler's full
+  reply standing — no error frame — and is logged with a fixed line, never
+  the exception's details: an interceptor that wants those logged logs
+  them itself.
 - `heartbeat_extras` is read when each heartbeat and `status` reply is
   built. A provider that raises, a §8.3 field name, or a value that does
   not serialise costs that beat its extras, never the beat.

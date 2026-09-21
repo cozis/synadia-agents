@@ -45,20 +45,20 @@ function fakeAgent(
   } as unknown as Agent;
 }
 
-function clientFor(agent: Agent): Pick<Agents, "lookupInstance"> {
+function clientFor(agent: Agent): Pick<Agents, "discover"> {
   return {
-    lookupInstance: async (id: string) =>
-      id === agent.instanceId ? agent : undefined,
-  } as Pick<Agents, "lookupInstance">;
+    discover: async () => [agent],
+  } as Pick<Agents, "discover">;
 }
 
-function start(
+async function start(
   manager: AsyncPromptManager,
   agent: Agent,
   label = "Test prompt",
 ) {
-  return manager.promptAgent(clientFor(agent), {
-    instance_id: agent.instanceId,
+  await manager.discoverAgents(clientFor(agent));
+  return manager.promptAgent({
+    prompt_endpoint: agent.promptSubject,
     label,
     text: "hello",
   });
@@ -79,7 +79,7 @@ describe("AsyncPromptManager", () => {
       prompt_id: "p1",
       label: "Test prompt",
       state: "pending",
-      target_instance_id: agent.instanceId,
+      prompt_endpoint: agent.promptSubject,
     });
     expect(manager.listPendingPrompts()).toEqual([started]);
     expect(
@@ -190,6 +190,51 @@ describe("AsyncPromptManager", () => {
     });
   });
 
+  test("resolves the exact prompt endpoint and denies interactive queries", async () => {
+    let queryReply = "";
+    let discoveryOptions: unknown;
+    const agent = fakeAgent(async function* () {
+      yield { type: "status", status: "ack" };
+      yield {
+        type: "query",
+        id: "q1",
+        prompt: "May I continue?",
+        reply: async (answer: string) => {
+          queryReply = answer;
+        },
+      };
+    });
+    const client = {
+      discover: async (options: unknown) => {
+        discoveryOptions = options;
+        return [agent];
+      },
+    } as Pick<Agents, "discover">;
+    const manager = new AsyncPromptManager();
+    await manager.discoverAgents(client);
+    const started = await manager.promptAgent({
+      prompt_endpoint: agent.promptSubject,
+      label: "query",
+      text: "ask",
+    });
+    await manager.waitForPrompt({
+      prompt_ids: [started.prompt_id],
+      timeout_ms: 100,
+    });
+
+    expect(discoveryOptions).toEqual({});
+    expect(queryReply).toBe(
+      "This caller cannot answer interactive queries; deny or continue without approval.",
+    );
+    await expect(
+      new AsyncPromptManager().promptAgent({
+        prompt_endpoint: agent.promptSubject,
+        label: "missing",
+        text: "ask",
+      }),
+    ).rejects.toMatchObject({ code: "agent_not_found" });
+  });
+
   test("notifies only when no active waiter receives the completion", async () => {
     const release = deferred<void>();
     const notified = deferred<void>();
@@ -199,9 +244,9 @@ describe("AsyncPromptManager", () => {
       await release.promise;
     });
     const manager = new AsyncPromptManager();
+    await manager.discoverAgents(clientFor(agent));
     const background = await manager.promptAgent(
-      clientFor(agent),
-      { instance_id: agent.instanceId, label: "background", text: "go" },
+      { prompt_endpoint: agent.promptSubject, label: "background", text: "go" },
       {
         onSettled: (event) => {
           events.push(event);
@@ -225,9 +270,13 @@ describe("AsyncPromptManager", () => {
       yield { type: "status", status: "ack" };
       await waitedRelease.promise;
     });
+    await manager.discoverAgents(clientFor(waitedAgent));
     const waited = await manager.promptAgent(
-      clientFor(waitedAgent),
-      { instance_id: waitedAgent.instanceId, label: "waited", text: "go" },
+      {
+        prompt_endpoint: waitedAgent.promptSubject,
+        label: "waited",
+        text: "go",
+      },
       {
         onSettled: (event) => {
           waitedEvents.push(event);
@@ -290,10 +339,16 @@ describe("AsyncPromptManager", () => {
       yield { type: "status", status: "ack" };
     });
     const manager = new AsyncPromptManager({ maxTrackedPrompts: 1 });
-    const starting = start(manager, agent);
+    await manager.discoverAgents(clientFor(agent));
+    const input = {
+      prompt_endpoint: agent.promptSubject,
+      label: "Test prompt",
+      text: "hello",
+    };
+    const starting = manager.promptAgent(input);
     await Promise.resolve();
     expect(manager.listPendingPrompts()).toEqual([]);
-    await expect(start(manager, agent)).rejects.toMatchObject({
+    await expect(manager.promptAgent(input)).rejects.toMatchObject({
       code: "prompt_limit_reached",
     });
     manager.cancelAll();
@@ -327,8 +382,9 @@ describe("AsyncPromptManager", () => {
     );
     const manager = new AsyncPromptManager();
     try {
-      const started = await manager.promptAgent(clientFor(agent), {
-        instance_id: agent.instanceId,
+      await manager.discoverAgents(clientFor(agent));
+      const started = await manager.promptAgent({
+        prompt_endpoint: agent.promptSubject,
         label: "attachments",
         text: "inspect this",
         attachments: [{ path: sourcePath, filename: "renamed.txt" }],
@@ -376,9 +432,9 @@ describe("AsyncPromptManager", () => {
       },
     });
     const manager = new AsyncPromptManager();
+    await manager.discoverAgents(clientFor(agent));
     const started = await manager.promptAgent(
-      clientFor(agent),
-      { instance_id: agent.instanceId, label: "trace", text: "trace" },
+      { prompt_endpoint: agent.promptSubject, label: "trace", text: "trace" },
       { traceScope: scope },
     );
     await manager.waitForPrompt({

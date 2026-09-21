@@ -36,7 +36,6 @@ import { z } from "zod";
 import {
   AsyncPromptManager,
   PromptToolError,
-  discoverAgents,
   type PromptSettledEvent,
 } from "./src/agent-tools.js";
 import {
@@ -651,7 +650,7 @@ async function run(): Promise<void> {
         {
           name: "discover_agents",
           description:
-            "Discover agents reachable on NATS. Returns instance_id values for prompt_agent. All filters are optional and AND-matched.",
+            "Discover agents reachable on NATS. Returns prompt_endpoint values for prompt_agent. All filters are optional and AND-matched.",
           inputSchema: {
             type: "object",
             properties: {
@@ -670,11 +669,11 @@ async function run(): Promise<void> {
         {
           name: "prompt_agent",
           description:
-            "Start prompting one agent instance returned by discover_agents. Returns a short, session-scoped handle after the target accepts it; use wait_for_prompt to collect the response.",
+            "Start prompting one prompt_endpoint returned by discover_agents. Returns a short, session-scoped handle after the target accepts it; use wait_for_prompt to collect the response.",
           inputSchema: {
             type: "object",
             properties: {
-              instance_id: { type: "string", minLength: 1 },
+              prompt_endpoint: { type: "string", minLength: 1 },
               label: { type: "string", minLength: 1 },
               text: { type: "string", minLength: 1 },
               attachments: {
@@ -694,9 +693,8 @@ async function run(): Promise<void> {
                 minimum: 1,
                 maximum: 3_600_000,
               },
-              query_response: { type: "string" },
             },
-            required: ["instance_id", "label", "text"],
+            required: ["prompt_endpoint", "label", "text"],
           },
         },
         {
@@ -762,7 +760,10 @@ async function run(): Promise<void> {
               "NATS is not connected",
             );
           }
-          const result = await discoverAgents(agentClient, args);
+          const result = await outboundPrompts.discoverAgents(
+            agentClient,
+            args,
+          );
           return {
             content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           };
@@ -783,8 +784,7 @@ async function run(): Promise<void> {
             ? pendingRequests.get(lastActiveRequestId)
             : undefined;
           const result = await outboundPrompts.promptAgent(
-            agentClient,
-            args as unknown as Parameters<AsyncPromptManager["promptAgent"]>[1],
+            args as unknown as Parameters<AsyncPromptManager["promptAgent"]>[0],
             {
               ...(active?.trace ? { traceScope: active.trace } : {}),
               onSettled: (event) => {

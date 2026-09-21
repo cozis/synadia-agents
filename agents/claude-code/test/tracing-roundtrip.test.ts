@@ -304,10 +304,14 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
     let prompted = ''
     let promptedId = ''
     onPrompt = async (mcp, requestId, content) => {
+      await mcp.callTool({
+        name: 'discover_agents',
+        arguments: { agent: 'trace-target', owner: OWNER, name: 'trace-target' },
+      })
       const result = await mcp.callTool({
         name: 'prompt_agent',
         arguments: {
-          instance_id: targetService.instanceId,
+          prompt_endpoint: targetService.subject.prompt,
           label: 'delegated trace prompt',
           text: 'delegated prompt',
         },
@@ -361,7 +365,7 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
         prompt_id: promptedId,
         state: 'completed',
         response_text: 'target response',
-        target_instance_id: targetService.instanceId,
+        prompt_endpoint: targetService.subject.prompt,
       })
     } finally {
       onPrompt = previousOnPrompt
@@ -382,10 +386,14 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
     onPromptCompletion = (content, meta) => resolveCompletion({ content, meta })
 
     try {
+      await tracedPlugin.callTool({
+        name: 'discover_agents',
+        arguments: { agent: 'trace-target', owner: OWNER, name: 'trace-target' },
+      })
       const startedResult = await tracedPlugin.callTool({
         name: 'prompt_agent',
         arguments: {
-          instance_id: targetService.instanceId,
+          prompt_endpoint: targetService.subject.prompt,
           label: 'background notification',
           text: 'background notification prompt',
         },

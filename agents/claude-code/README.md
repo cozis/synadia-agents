@@ -188,8 +188,8 @@ nats micro info agents
 | --- | --- |
 | `reply` | Send a response over NATS. Takes `request_id` + `text`. The server wraps the text in a `{"type":"response","data":...}` chunk. Set `done=false` for intermediate replies; `done=true` (default) emits the empty-body terminator. |
 | `request_info` | Return the safely classified sender of an active request. Identity is available only on explicit inspection and is never inserted into the incoming model prompt or channel metadata. |
-| `discover_agents` | Discover reachable agents and return their `instance_id` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched. |
-| `prompt_agent` | Start a labeled prompt with optional file-path attachments and return a short session-scoped `prompt_id` after the target accepts it. `max_runtime_ms` limits the remote request's lifetime. |
+| `discover_agents` | Discover reachable agents and return their `prompt_endpoint` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched. |
+| `prompt_agent` | Start a labeled prompt to one discovered `prompt_endpoint`, with optional file-path attachments, and return a short session-scoped `prompt_id` after acceptance. `max_runtime_ms` limits its lifetime. |
 | `list_pending_prompts` | List this session's prompts that have not reached a terminal state. |
 | `wait_for_prompt` | Wait for the first supplied `prompt_id` to finish or for required `timeout_ms` to elapse. Returns exactly one non-consuming result; use `timeout_ms: 0` to poll. |
 | `cancel_prompts` | Cancel one or more pending prompts. |

@@ -27,7 +27,6 @@ import contextvars
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeAlias
-from weakref import WeakSet
 
 import pydantic
 
@@ -61,16 +60,6 @@ from .interceptor import (
     collect_extras,
 )
 from .messages import QueryChunk, ResponseChunk, StatusChunk, decode_chunk
-from .trace import (
-    TraceOptions,
-    active_trace,
-    build_edge_record,
-    count_trace_record_dropped,
-    count_trace_record_published,
-    inherited_trace_options,
-    random_thread_id,
-    valid_tool_call_id,
-)
 from .validation import (
     assert_attachments_allowed,
     assert_prompt_non_empty,
@@ -85,16 +74,6 @@ log = get_logger(__name__)
 
 _SERVICE_ERROR_CODE_HEADER = "Nats-Service-Error-Code"
 _SERVICE_ERROR_HEADER = "Nats-Service-Error"
-
-# Set to the record id so a stream de-duplicates a record it already
-# stored. Same string as agents.NATS_MSG_ID_HEADER, spelled again here
-# because agents.py imports this module.
-_MSG_ID_HEADER = "Nats-Msg-Id"
-
-# Connections already warned that their edge records go nowhere. One
-# warning per connection: a per-prompt log would itself be a way for
-# observability to disturb an agent.
-_warned_unsigned: WeakSet[NATSClient] = WeakSet()
 
 # Default `Agent.status()` request timeout — 2 seconds (mirrors the TS
 # SDK's DEFAULT_STATUS_TIMEOUT_MS).
@@ -151,61 +130,6 @@ StreamMessage: TypeAlias = ResponseChunk | StatusChunk | Query
 """One item yielded by :meth:`Agent.prompt`'s async iterator."""
 
 
-def _override_lineage(
-    envelope: Envelope,
-    thread_id: str | None,
-    root_id: str | None,
-    parent_id: str | None,
-) -> tuple[str | None, str | None]:
-    """Let an explicit ``Envelope`` override the minted lineage.
-
-    The pair travels together on the wire, so an overridden thread with no
-    root of its own starts its own tree — exactly as a minted one does, and
-    exactly as the agent service does when it adopts an ID-less envelope.
-    Splicing the minted root onto it instead would name a root that is
-    neither this thread nor any ancestor of it. Inside a handler
-    (``parent_id`` set) the ambient root wins: the overridden thread is
-    still part of that tree.
-
-    An envelope naming this execution's own thread is the incoming
-    envelope being forwarded — the most natural relay code hands what it
-    received straight to a sub-agent. Forwarding spawns a thread, it does
-    not continue one: honouring that id would file the sub-agent's
-    execution under its parent's thread, collapsing the two into one and
-    recording an edge from a thread to itself. So the minted thread stands
-    and the envelope's id remains what it already is: the parent.
-    """
-    if envelope.thread_id is not None and envelope.thread_id != parent_id:
-        thread_id = envelope.thread_id
-        if envelope.root_id is None and parent_id is None:
-            root_id = thread_id
-    if envelope.root_id is not None:
-        root_id = envelope.root_id
-    return thread_id, root_id
-
-
-@dataclass(frozen=True, slots=True)
-class _EdgePlan:
-    """What :meth:`Agent.prompt` decided to record; built into a record at publish time.
-
-    The lineage is fixed when the prompt is planned — that is when the
-    ambient trace is still the caller's — but the record's ``ts`` must say
-    when the prompt actually went out and its ``agent`` is whoever signs
-    it, so the bytes are produced by :meth:`Agent._publish_edge`
-    immediately before the publish.
-    """
-
-    subject: str
-    thread_id: str
-    parent_id: str | None
-    root_id: str
-    tool_call_id: str | None
-    turn_count_hint: int
-    #: No identity signer: the record is due when the prompt goes out and
-    #: cannot be published, so it is counted as a drop at that moment.
-    unsigned: bool = False
-
-
 @dataclass(frozen=True, slots=True)
 class _Interception:
     """What :meth:`Agent.prompt` hands its stream for the prompt interceptors."""
@@ -252,7 +176,6 @@ class Agent:
         prompt_max_wait_s: float = DEFAULT_PROMPT_MAX_WAIT_S,
         close_event: asyncio.Event | None = None,
         identity: Identity | None = None,
-        trace: TraceOptions | None = None,
         interceptors: Sequence[PromptInterceptor] = (),
     ) -> None:
         if prompt_max_wait_s <= 0:
@@ -263,14 +186,8 @@ class Agent:
         self._default_max_wait_s = prompt_max_wait_s
         self._close_event = close_event
         self._sender_identity = identity
-        self._trace = trace
         # Copied: a caller mutating its list afterwards changes nothing here.
         self._interceptors = tuple(interceptors)
-
-    @property
-    def tracing_enabled(self) -> bool:
-        """``True`` iff tracing was enabled on this handle."""
-        return self._trace is not None
 
     @property
     def interceptors(self) -> tuple[PromptInterceptor, ...]:
@@ -377,7 +294,6 @@ class Agent:
         max_wait_s: float | None = None,
         subject: str | None = None,
         sub: str | None = None,
-        tool_call_id: str | None = None,
         context: Mapping[str, object] | None = None,
     ) -> AsyncIterator[StreamMessage]:
         """Send a prompt and return an async iterator of streamed messages.
@@ -407,9 +323,6 @@ class Agent:
         :class:`ValueError` synchronously — there is no "no limit"
         sentinel, since an unbounded prompt stream is the exact failure
         mode this ceiling exists to prevent.
-
-        ``tool_call_id`` is the ID of the model tool call this prompt
-        serves, used to label the trace edge when tracing is enabled.
 
         ``context`` holds opaque values for the client's prompt
         interceptors, handed to each as ``ctx.context`` — the SDK never
@@ -481,31 +394,6 @@ class Agent:
                 f"max_wait_s must be > 0 (got {max_wait_s!r}); pass None to use the default."
             )
 
-        # Tracing is best-effort and shouldn't stop an agent from
-        # sending out a prompt. Invalid tools are just ignored.
-        if tool_call_id is not None and not valid_tool_call_id(tool_call_id):
-            tool_call_id = None
-
-        # Effective configuration: this handle's own, else the one handed
-        # down by the enclosing AgentService, else tracing is off.
-        trace_options = self._trace if self._trace is not None else inherited_trace_options()
-
-        # If tracing is enabled, mint a thread ID for this prompt
-        thread_id: str | None = None
-        root_id: str | None = None
-        parent_id: str | None = None
-        turn_count_hint = 0
-        if trace_options is not None:
-            thread_id = random_thread_id()
-            ambient = active_trace()
-            if ambient is None:
-                root_id = thread_id
-                parent_id = None
-            else:
-                root_id = ambient.root_id
-                parent_id = ambient.thread_id
-                turn_count_hint = ambient.turn_count_hint[0]
-
         if isinstance(text, Envelope):
             merged_attachments: list[Attachment] | None
             if attachments:
@@ -513,39 +401,16 @@ class Agent:
                 merged_attachments.extend(attachments)
             else:
                 merged_attachments = list(text.attachments) if text.attachments else None
-
-            # Only a tracing client honours the envelope's lineage. With
-            # tracing off the fields are dropped like any other extra, so an
-            # untraced relay that forwards what it received sends a plain
-            # v0.3 envelope — exactly what it sent before tracing existed —
-            # rather than filing the sub-agent under its own thread.
-            if trace_options is not None:
-                thread_id, root_id = _override_lineage(text, thread_id, root_id, parent_id)
-
-            envelope = Envelope(
-                prompt=text.prompt,
-                attachments=merged_attachments,
-                thread_id=thread_id,
-                root_id=root_id,
-            )
+            # Only the prompt and its attachments are carried over: the
+            # envelope's extra fields are its sender's, and a relay that
+            # forwards what it received sends a plain envelope unless its
+            # own prompt interceptors add fields.
+            envelope = Envelope(prompt=text.prompt, attachments=merged_attachments)
         else:
             envelope = Envelope(
                 prompt=text,
                 attachments=list(attachments) if attachments else None,
-                thread_id=thread_id,
-                root_id=root_id,
             )
-
-        # We do this after constructing the envelope to allow
-        # overriding fields. Only the plan is made here — the record,
-        # signing and the publish happen in _stream_prompt, at publish time.
-        edge_publish = (
-            self._plan_edge(
-                trace_options, thread_id, parent_id, root_id, tool_call_id, turn_count_hint
-            )
-            if trace_options is not None and thread_id is not None and root_id is not None
-            else None
-        )
 
         # §5.4: local validation happens synchronously BEFORE any wire I/O.
         # Raising here means callers don't even allocate a reply subject.
@@ -598,7 +463,6 @@ class Agent:
             subject=publish_subject,
             sub=signed_subject,
             require_signed=require_signed,
-            edge_publish=edge_publish,
             intercept=intercept,
         )
 
@@ -761,93 +625,6 @@ class Agent:
         if self._close_event is not None and self._close_event.is_set():
             raise ProtocolError(f"prompt stream cancelled: owning Agents is closed (reply={reply})")
 
-    def _plan_edge(
-        self,
-        trace_options: TraceOptions,
-        thread_id: str,
-        parent_id: str | None,
-        root_id: str,
-        tool_call_id: str | None,
-        turn_count_hint: int,
-    ) -> _EdgePlan | None:
-        """The edge to publish, or ``None`` for nothing.
-
-        Split out of :meth:`prompt` only to keep that method within
-        ruff's statement budget.
-        """
-        if trace_options.edge_subject is None:
-            return None
-        # Consumers ignore unsigned records, so publishing without a
-        # signer would be pure waste: warn once per connection and skip.
-        # Minting and envelope lineage need no identity and still happen,
-        # so downstream agents that do have one keep tracing.
-        identity = self._sender_identity
-        unsigned = identity is None or identity.signer is None
-        if unsigned and self._nc not in _warned_unsigned:
-            _warned_unsigned.add(self._nc)
-            log.warning(
-                "tracing is enabled but no identity signer is configured; edge "
-                "records are not published (consumers ignore unsigned records). "
-                "Pass identity=Identity(signer=...) to sign them."
-            )
-        return _EdgePlan(
-            trace_options.edge_subject,
-            thread_id,
-            parent_id,
-            root_id,
-            tool_call_id,
-            turn_count_hint,
-            unsigned=unsigned,
-        )
-
-    async def _publish_edge(self, edge_publish: _EdgePlan) -> None:
-        """Build and publish one signed edge record.
-
-        The signature covers the short-form subject the record is
-        published to: per the identity design a remap that only drops the
-        account token is not a rename, so no ``sub`` override is needed.
-        Consumers verify in stored mode. The record's ``agent`` is the
-        identity the header plan resolved — the same one that signs it —
-        so body and header agree. Its ``record_id`` is the header's nonce
-        and the ``Nats-Msg-Id`` as well: one id, so a reader de-duplicating
-        on ``(user, record_id)`` and a stream de-duplicating on the message
-        id see the same record once.
-
-        Fail-open — tracing never fails a prompt. It is counted: every
-        record that goes out or fails to moves the process-wide
-        :func:`trace_record_counts`, which the ``AgentService`` reports on
-        its heartbeat.
-        """
-        subject = edge_publish.subject
-        if edge_publish.unsigned:
-            # Due now — the prompt is about to go out — and cannot go out:
-            # a drop, reported on the heartbeat as a record that was owed
-            # and never sent. Counted here rather than when the prompt was
-            # planned, so a prompt that is never sent counts nothing.
-            count_trace_record_dropped()
-            return
-        try:
-            plan = await plan_sender_header(
-                self._sender_identity, self._nc, subject, require_signed=True
-            )
-            if plan is None:  # pragma: no cover — guarded in _plan_edge
-                raise SenderSignatureRequiredError(subject)
-            record_id, payload = build_edge_record(
-                plan.id,
-                edge_publish.thread_id,
-                edge_publish.parent_id,
-                edge_publish.root_id,
-                edge_publish.tool_call_id,
-                edge_publish.turn_count_hint,
-            )
-            headers = await plan.build_headers(payload, nonce=record_id)
-            headers[_MSG_ID_HEADER] = record_id
-            await self._nc.publish(subject, payload, headers=headers)
-            count_trace_record_published()
-        except Exception:
-            count_trace_record_dropped()
-            log.exception("failed to publish edge record on %s", subject)
-
     async def _prepare_request(
         self,
         encoded: bytes,
@@ -907,7 +684,6 @@ class Agent:
         subject: str,
         sub: str,
         require_signed: bool,
-        edge_publish: _EdgePlan | None = None,
         intercept: _Interception | None = None,
     ) -> AsyncIterator[StreamMessage]:
         # Pre-flight: refuse outright if the owning Agents is already
@@ -948,16 +724,8 @@ class Agent:
 
             # Signed at publish time so `ts` / nonce are fresh even when the
             # caller iterates late; the signature covers exactly `encoded`.
-            # Built BEFORE the edge record goes out: signing can still fail,
-            # and an edge record is a claim that a prompt was sent, so
-            # nothing may be published until that claim is certain.
             signed = await plan.build_headers(encoded) if plan is not None else {}
             headers = {**extra_headers, **signed} or None
-
-            # Observability: publish the edge before the prompt goes out, so
-            # an observer sees the node before it runs.
-            if edge_publish is not None:
-                await self._publish_edge(edge_publish)
 
             await self._nc.publish(subject, encoded, reply=reply, headers=headers)
 

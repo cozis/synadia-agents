@@ -54,7 +54,7 @@ spec to catch up.
 | Pre-publish `max_payload` check              | `PayloadTooLargeError(limit, actual)` before any wire I/O. Effective limit is `min(endpoint.max_payload_bytes, nc.max_payload)` — caller's broker cap binds when smaller. | §5.4       |
 | Empty prompt rejected pre-publish            | `PromptEmptyError` before any wire I/O.                                               | §5.1, §5.3 |
 | Endpoint subject resolution                  | Always `endpoints[].subject` from discovery; never constructed from identity.         | §4.3, §12  |
-| Unknown envelope fields                      | `Envelope` uses `extra="allow"`; decode → encode round-trips lossless per §5.6. A stray inbound `session` from a non-compliant peer rides this bag — under v0.3 the request subject IS the session, so `Envelope.session` is no longer a first-class field. | §5.6 |
+| Unknown envelope fields                      | `Envelope` uses `extra="allow"`; decode → encode round-trips lossless per §5.6 (a `null` included), readable on `Envelope.extras`. A stray inbound `session` from a non-compliant peer rides this bag — under v0.3 the request subject IS the session, so `Envelope.session` is no longer a first-class field. Prompt interceptors add fields here; request interceptors read them. | §5.6 |
 
 ## Response streaming (§6)
 
@@ -100,7 +100,7 @@ spec to catch up.
 | Default interval             | `AgentService(heartbeat_interval_s=30)` (spec recommendation).                                   | §8.2       |
 | Payload fields               | `{agent, owner, session, instance_id, ts, interval_s}` — `session` mirrors `metadata.session` (== subject token 5); decoder tolerates absence to interop with spec-compliant session-less peers that omit the field. | §8.3 |
 | `HeartbeatPayload` tolerance | `extra="allow"` - unknown fields accepted per §8.3, readable on `HeartbeatPayload.extras`, preserved on re-encode. | §8.3       |
-| Trace record counts          | A service that opted in to tracing (and publishes records) puts `records_published` / `records_dropped` (two counters since process start; `trace_record_counts()`) on every heartbeat and `status` reply — only drops the SDK itself observed, not records lost after they left the process. Absent when untraced or propagate-only. | extension  |
+| Heartbeat extras             | `AgentService(heartbeat_extras=...)` merges a provider's fields into every heartbeat and `status` reply, read per beat; a §8.3 field name, an unserialisable value or a raising provider costs that beat its extras, never the beat. Absent without a provider. | §8.3       |
 | `instance_id` source         | `service.id` assigned by nats-py's micro framework (matches `$SRV.INFO` `id`).                   | §3.4, §8.3 |
 | First heartbeat              | Published immediately after service registration so subscribe-then-discover sees liveness.       | §8.5       |
 | Tracker API                  | `Agents.liveness(instance_id)` → `Liveness \| None` (keyed on `payload.instance_id`).            | §8.2       |

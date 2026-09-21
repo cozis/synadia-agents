@@ -222,16 +222,16 @@ from synadia_ai.agent_service import (
 )
 
 request_id: ContextVar[str | None] = ContextVar("request_id", default=None)
-served = 0
+handled = 0
 
 class Tagging:
     async def around_request(self, ctx: RequestInterceptorContext, call_next: CallNext) -> None:
         # ctx.envelope (unknown fields in ctx.envelope.extras), ctx.sender, ctx.subject, ctx.headers
-        global served
+        global handled
         value = ctx.envelope.extras.get("x_request")
         if value is not None and not isinstance(value, str):
             raise RequestRejectedError(400, "bad x_request")
-        served += 1
+        handled += 1
         token = request_id.set(value)  # the handler sees request_id.get()
         try:
             await call_next()
@@ -241,7 +241,7 @@ class Tagging:
 service = AgentService(
     agent="my-agent", owner="me", session_name="demo", nc=nc,
     interceptors=[Tagging()],
-    heartbeat_extras=lambda: {"served": served},
+    heartbeat_extras=lambda: {"handled": handled},
 )
 ```
 

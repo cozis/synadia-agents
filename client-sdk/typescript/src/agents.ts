@@ -51,7 +51,6 @@ import {
 } from "./identity/signed-publish.js";
 import { type Logger, SILENT_LOGGER } from "./internal/logger.js";
 import type { PromptInterceptor } from "./prompt/interceptor.js";
-import { assertValidTraceOptions, type TraceOptions } from "./trace.js";
 
 /** Default per-stream inactivity timeout (§6.6) — 60 seconds. */
 export const DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS = 60_000;
@@ -79,11 +78,6 @@ export interface AgentsOptions {
    */
   readonly resolveTtlMs?: number;
   /**
-   * Observability tracing (opt-in). Omit for no tracing — prompts stay
-   * byte-identical to plain protocol 0.3; pass `{}` to enable with defaults.
-   */
-  readonly trace?: TraceOptions;
-  /**
    * Prompt interceptors, run in order before every prompt an `Agent` from
    * this client publishes — each may publish signed messages of its own and
    * add envelope fields and headers. Default: none, and prompts are exactly
@@ -103,7 +97,6 @@ export class Agents {
   readonly #logger: Logger;
   readonly #streamInactivityTimeoutMs: number;
   readonly #identity: IdentityContext | undefined;
-  readonly #trace: TraceOptions | undefined;
   readonly #interceptors: ReadonlyArray<PromptInterceptor>;
   readonly #resolver: SenderResolver;
   readonly #closeController = new AbortController();
@@ -120,10 +113,6 @@ export class Agents {
       options.identity !== undefined
         ? new IdentityContext(options.nc, options.identity)
         : undefined;
-    // Omission is meaningful: no trace options, no tracing. A subject that
-    // can never be published to fails here, not as a warning per prompt.
-    assertValidTraceOptions(options.trace);
-    this.#trace = options.trace;
     // Copied: a caller mutating its array afterwards changes nothing here.
     this.#interceptors = Object.freeze([...(options.interceptors ?? [])]);
     // Validates `resolveTtlMs` up front (throws `IdentityError`).
@@ -142,11 +131,6 @@ export class Agents {
   /** Default per-stream inactivity timeout applied to every `Agent.prompt()`. */
   get streamInactivityTimeoutMs(): number {
     return this.#streamInactivityTimeoutMs;
-  }
-
-  /** The tracing options this client was constructed with; `undefined` = tracing off. */
-  get trace(): TraceOptions | undefined {
-    return this.#trace;
   }
 
   /** The prompt interceptors every `Agent` from this client runs, in order. */
@@ -195,7 +179,6 @@ export class Agents {
       this.#closeController.signal,
       opts,
       this.#identity,
-      this.#trace,
       this.#interceptors,
     );
   }
@@ -266,7 +249,6 @@ export class Agents {
       this.#closeController.signal,
       opts,
       this.#identity,
-      this.#trace,
       this.#interceptors,
     );
   }

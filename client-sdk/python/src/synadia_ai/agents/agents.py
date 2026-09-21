@@ -68,7 +68,6 @@ from .identity.signed_publish import (
     to_bytes,
 )
 from .interceptor import PromptInterceptor
-from .trace import TraceOptions
 
 if TYPE_CHECKING:
     import logging
@@ -113,7 +112,6 @@ class Agents:
         logger: logging.Logger | None = None,
         identity: Identity | None = None,
         resolve_ttl_s: float = DEFAULT_RESOLVE_TTL_S,
-        trace: TraceOptions | None = None,
         interceptors: Sequence[PromptInterceptor] = (),
     ) -> None:
         if prompt_max_wait_s <= 0:
@@ -123,8 +121,6 @@ class Agents:
         self._prompt_max_wait_s = prompt_max_wait_s
         self._logger = logger if logger is not None else log
         self._identity = identity
-        # Omission is meaningful: no trace options, no tracing.
-        self._trace = trace
         # Copied: a caller mutating its list afterwards changes nothing here.
         self._interceptors = tuple(interceptors)
         self._resolver = SenderResolver(nc, ttl_s=resolve_ttl_s)
@@ -174,11 +170,6 @@ class Agents:
     def identity(self) -> Identity | None:
         """The sender-identity options this client was constructed with."""
         return self._identity
-
-    @property
-    def trace(self) -> TraceOptions | None:
-        """The tracing options this client was constructed with; ``None`` = tracing off."""
-        return self._trace
 
     @property
     def interceptors(self) -> tuple[PromptInterceptor, ...]:
@@ -236,7 +227,6 @@ class Agents:
                 prompt_max_wait_s=self._prompt_max_wait_s,
                 close_event=self._close_event,
                 identity=self._identity,
-                trace=self._trace,
                 interceptors=self._interceptors,
             )
             for info in infos

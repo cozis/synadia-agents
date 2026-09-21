@@ -44,10 +44,11 @@ from synadia_ai.agents import (
     AgentId,
     Agents,
     Identity,
+    PromptExtras,
+    PromptInterceptorContext,
     ResponseChunk,
     SenderSignatureRequiredError,
     StatusChunk,
-    TraceOptions,
     signer_from_seed,
 )
 
@@ -395,30 +396,46 @@ async def test_python_unsigned_caller_is_refused_by_ts_signed_reference_agent(
 
 
 @pytest.mark.asyncio
-async def test_traced_python_caller_against_ts_reference_agent(
+async def test_extra_envelope_fields_from_a_python_interceptor_reach_a_ts_host(
     nc: NATSClient, ts_reference_agent: _ReferenceAgentProcess
 ) -> None:
-    """A traced Python caller must not upset an agent hosted by the TS SDK.
+    """A TS host answers a prompt whose envelope carries fields it does not know.
 
-    Lineage is the tracing extension's only addition to the envelope. The
-    TS host has to read it — or at minimum tolerate it — for a mixed-
-    language fleet to work; §5.6 says unknown fields are tolerated, and
-    the TS decoder adopts these two. Propagate-only mode keeps the test
-    to the envelope, with no signer or edge subject involved.
+    A Python prompt interceptor adds two top-level fields and a header;
+    §5.6 obliges the TS decoder to tolerate the fields, so a mixed-language
+    fleet running an extension on the caller side keeps working with a
+    host that knows nothing about it.
     """
     assert ts_reference_agent.prompt_subject is not None
 
-    agents = Agents(nc=nc, trace=TraceOptions(edge_subject=None))
+    class Extend:
+        async def before_prompt(self, ctx: PromptInterceptorContext) -> PromptExtras | None:
+            return PromptExtras(
+                fields={"x_ext_id": "interop-1", "x_ext_meta": {"n": 1, "ok": True}},
+                headers={"X-Ext": "interop-1"},
+            )
+
+    agents = Agents(nc=nc, interceptors=[Extend()])
+    seen: list[bytes] = []
+
+    async def spy(msg: object) -> None:
+        seen.append(msg.data)  # type: ignore[attr-defined]
+
+    sub = await nc.subscribe(ts_reference_agent.prompt_subject, cb=spy)
     try:
         found = await agents.discover(timeout=3.0)
         discovered = next(a for a in found if a.prompt_subject == ts_reference_agent.prompt_subject)
 
         responses = [
             chunk
-            async for chunk in discovered.prompt("traced hello", timeout=10.0)
+            async for chunk in discovered.prompt("extended hello", timeout=10.0)
             if isinstance(chunk, ResponseChunk)
         ]
-        assert len(responses) == 1, f"traced prompt was not answered: {responses!r}"
+        assert len(responses) == 1, f"extended prompt was not answered: {responses!r}"
         assert responses[0].text == "demo agent received your prompt."
+        assert seen == [
+            b'{"prompt":"extended hello","x_ext_id":"interop-1","x_ext_meta":{"n":1,"ok":true}}'
+        ]
     finally:
+        await sub.unsubscribe()
         await agents.close()

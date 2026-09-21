@@ -36,11 +36,6 @@ export interface PromptOptions {
    */
   readonly sub?: string;
   /**
-   * The ID of the model tool call this prompt serves, used to label the
-   * trace edge when tracing is enabled.
-   */
-  readonly toolCallId?: string;
-  /**
    * Opaque values for the client's prompt interceptors, handed to each as
    * `ctx.context` — the SDK never reads them. A caller that knows which
    * interceptors it runs passes what they need here (the ID of the model

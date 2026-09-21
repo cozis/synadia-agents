@@ -54,9 +54,9 @@ export interface SenderHeaderPlan {
   readonly wireBytes: number;
   /**
    * Build the header over the exact payload bytes — a fresh `ts` each
-   * call, and a fresh nonce unless `nonce` names one. A signed record
-   * whose body carries its own id (an edge record's `record_id`) passes
-   * it here, so the header's nonce, `Nats-Msg-Id` and the body agree.
+   * call, and a fresh nonce unless `nonce` names one. A signed message
+   * whose body carries its own id passes it here, so the header's nonce,
+   * `Nats-Msg-Id` and the body agree (`SignedPublishOptions.nonce`).
    */
   build(payload: Uint8Array, nonce?: string): Promise<AgentSenderHeader>;
 }

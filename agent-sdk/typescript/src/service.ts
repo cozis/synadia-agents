@@ -56,12 +56,9 @@ import type { MsgHdrs, NatsConnection } from "@nats-io/nats-core";
 import { Svcm, type Service, type ServiceHandler, type ServiceMsg } from "@nats-io/services";
 
 import {
-  activeTrace,
-  assertValidTraceOptions,
   agentIdAccount,
   agentIdUser,
   AgentSubject,
-  bindActiveTrace,
   decodeEnvelope,
   encodeBase64,
   formatHumanBytes,
@@ -74,7 +71,6 @@ import {
   PROMPT_ENDPOINT_NAME,
   PROMPT_QUEUE_GROUP,
   ProtocolError,
-  randomThreadId,
   SDK_PROTOCOL_VERSION,
   selfId,
   SenderResolver,
@@ -90,9 +86,6 @@ import {
   type RequestEnvelope,
   type SenderInfo,
   type SenderSigner,
-  traceRecordCounts,
-  type TraceOptions,
-  type TraceScope,
 } from "@synadia-ai/agents";
 
 import {
@@ -211,14 +204,6 @@ export interface AgentServiceOptions {
    * cadence). Defaults to 30.
    */
   readonly keepaliveIntervalS?: number | null;
-  /**
-   * Observability tracing handed down to clients used inside prompt
-   * handlers (opt-in). The service itself never writes trace records; it
-   * always adopts or mints the execution's `(thread, root)` and binds it
-   * as the ambient trace. Passing this makes a nested `Agent.prompt()`
-   * with no configuration of its own trace the calls it spawns.
-   */
-  readonly trace?: TraceOptions;
   /**
    * Extra metadata keys merged into the service metadata (forward-compat).
    * The required keys (`agent`, `owner`, `protocol_version`, and `session`
@@ -354,38 +339,6 @@ function randomId(): string {
 }
 
 /**
- * This execution's `(thread, root)`, or `undefined` when there is nothing
- * to trace.
- *
- * A caller's lineage — the pair, `thread_id` and `root_id` — is adopted
- * whatever this service is configured for, so a tree that starts upstream
- * is not broken here. With no lineage on the envelope, only a service
- * that opted in mints a root — an untraced service binds nothing, so
- * nothing is minted per request and `PromptResponse.traceHeaders()` stays
- * empty rather than stamping ids on model requests the operator never
- * asked to trace. The service writes no trace record either way.
- *
- * A half pair is never completed: `decodeEnvelope` already rejects it on
- * the wire, and an envelope built by hand gets the same `ProtocolError`
- * here — a `400` to the caller — rather than a tree of its own.
- */
-function traceScopeFor(
-  envelope: RequestEnvelope,
-  options: TraceOptions | undefined,
-): TraceScope | undefined {
-  const { threadId, rootId } = envelope;
-  if (threadId !== undefined && rootId !== undefined) {
-    return { threadId, rootId, turnCountHint: 0 };
-  }
-  if (threadId !== undefined || rootId !== undefined) {
-    throw new ProtocolError("envelope `thread_id` and `root_id` must be given together");
-  }
-  if (options === undefined) return undefined;
-  const minted = randomThreadId();
-  return { threadId: minted, rootId: minted, turnCountHint: 0 };
-}
-
-/**
  * Server-side handle given to a {@link PromptHandler} for emitting response
  * chunks back to the caller. The {@link AgentService} owns stream
  * termination — handlers `send(...)` zero or more chunks and return.
@@ -408,30 +361,6 @@ export class PromptResponse {
     this.#msg = msg;
     this.#nc = nc;
     this.sender = sender;
-  }
-
-  /**
-   * Headers for every model request this execution issues.
-   *
-   * An agent stamps these on each completion request so the model proxy
-   * files the call under the right thread and tree without seeing any
-   * NATS traffic. Hierarchy is the edge records' job, so the proxy needs
-   * no parent or tool-call header.
-   *
-   * `{}` when the prompt was untraced, so harness code needs no plumbing
-   * and degrades to nothing.
-   *
-   * Each call counts against this execution: the running total is
-   * recorded on the edge of any thread it spawns afterwards.
-   */
-  traceHeaders(): Record<string, string> {
-    const scope = activeTrace();
-    if (scope === undefined) return {};
-    scope.turnCountHint += 1;
-    return {
-      "X-Synadia-Thread-ID": scope.threadId,
-      "X-Synadia-Root-ID": scope.rootId,
-    };
   }
 
   /**
@@ -573,9 +502,6 @@ export class AgentService {
     if (options.operatorAttested !== undefined && typeof options.operatorAttested !== "boolean") {
       throw new Error("AgentService: operatorAttested must be a boolean");
     }
-    // Handed down to every client used inside a handler; a subject that can
-    // never be published to fails here, not as a warning per prompt.
-    assertValidTraceOptions(options.trace);
 
     this.#options = options;
     this.#subject = AgentSubject.new(
@@ -857,31 +783,16 @@ export class AgentService {
 
   /**
    * What goes on the heartbeat beyond the §8.3 required fields: the
-   * session label when the harness multiplexes, and — when the service
-   * opted in to tracing and publishes records — how many trace records
-   * this process has published and dropped since it started, as
-   * `records_published` and `records_dropped`. The counts are read when
-   * each heartbeat is built, so every beat carries the current totals. A
-   * rising dropped count tells whoever consumes the heartbeat that
-   * records this process owed were never sent. An untraced service
-   * reports nothing, so its heartbeat stays byte-identical to plain
-   * protocol 0.3; so does a propagate-only one (`edgeSubject: null`),
-   * which publishes no records and would otherwise report a constant 0/0
-   * that looks like a healthy zero.
+   * session label when the harness multiplexes, and the `heartbeatExtras`
+   * provider's fields, read when each heartbeat is built so every beat
+   * carries current values. Without a provider the heartbeat is exactly
+   * plain protocol 0.3.
    */
   #heartbeatOptions(): BuildHeartbeatPayloadOptions {
     const options: { session?: string; extras?: Record<string, unknown> } = {};
     if (this.#options.session !== undefined) options.session = this.#options.session;
     const provided = this.#providedExtras();
     if (provided !== undefined) options.extras = { ...provided };
-    if (this.#options.trace !== undefined && this.#options.trace.edgeSubject !== null) {
-      const counts = traceRecordCounts();
-      options.extras = {
-        ...options.extras,
-        records_published: counts.published,
-        records_dropped: counts.dropped,
-      };
-    }
     return options;
   }
 
@@ -927,7 +838,7 @@ export class AgentService {
 
   /**
    * Publish one heartbeat frame. With a signer bound at `start()` the frame
-   * carries the `Agent-Sender` header the SDK puts on its edge records:
+   * carries an `Agent-Sender` header of the sender-identity extension:
    * `sub` the heartbeat subject as published, `ts` the frame's own `ts`, a
    * fresh nonce, `sig` over subject · ts · nonce · sha256 of the exact
    * bytes published. Nothing in the payload changes; a 0.3 subscriber
@@ -1103,12 +1014,7 @@ export class AgentService {
       if (started) throw new Error("request interceptor called next() more than once");
       started = true;
       keepaliveTimer = this.#ackAndKeepAlive(msg);
-      // Place threadId and rootId in the ambient context so clients used
-      // as tools can reach them.
-      const scope = traceScopeFor(envelope, this.#options.trace);
-      await (scope === undefined
-        ? handler(envelope, response)
-        : bindActiveTrace(scope, () => handler(envelope, response), this.#options.trace));
+      await handler(envelope, response);
     };
     const ctx: RequestInterceptorContext = {
       envelope,
@@ -1120,7 +1026,7 @@ export class AgentService {
     try {
       await runIntercepted(this.#interceptors, ctx, serve);
       if (!started) {
-        // Neither refused nor served: a stream with no ack is no answer.
+        // Neither refused nor answered: a stream with no ack is no answer.
         throw new Error("request interceptor returned without calling next()");
       }
     } catch (err) {

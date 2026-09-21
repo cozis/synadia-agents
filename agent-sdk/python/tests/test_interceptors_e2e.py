@@ -59,7 +59,7 @@ RECORDS = "lineage.records"
 
 
 @dataclass(frozen=True, slots=True)
-class Served:
+class Handled:
     scope: LineageScope | None
     envelope: Envelope
 
@@ -79,9 +79,9 @@ class World:
         name: str,
         *,
         extra: Sequence[RequestInterceptor] = (),
-        on_prompt: Callable[[Served], Awaitable[None]] | None = None,
-    ) -> tuple[AgentService, list[Served]]:
-        served: list[Served] = []
+        on_prompt: Callable[[Handled], Awaitable[None]] | None = None,
+    ) -> tuple[AgentService, list[Handled]]:
+        handled: list[Handled] = []
         svc = AgentService(
             nc=self.nc,
             agent="lineage",
@@ -94,8 +94,8 @@ class World:
         )
 
         async def handler(envelope: Envelope, stream: PromptStream) -> None:
-            entry = Served(scope=lin.current(), envelope=envelope)
-            served.append(entry)
+            entry = Handled(scope=lin.current(), envelope=envelope)
+            handled.append(entry)
             if on_prompt is not None:
                 await on_prompt(entry)
             await stream.send("ok")
@@ -103,7 +103,7 @@ class World:
         svc.on_prompt(handler)
         await svc.start()
         self.services.append(svc)
-        return svc, served
+        return svc, handled
 
     def caller(
         self,
@@ -196,7 +196,7 @@ async def test_a_signed_record_goes_out_before_the_prompt_and_the_pair_rides_the
     world: World,
 ) -> None:
     lin = Lineage(RECORDS)
-    svc, served = await world.host(lin, "record")
+    svc, handled = await world.host(lin, "record")
     agents = world.caller(lin)
     order: list[str] = []
 
@@ -238,9 +238,9 @@ async def test_a_signed_record_goes_out_before_the_prompt_and_the_pair_rides_the
 
     # The host adopted the pair from the envelope's unknown fields and ran
     # the handler inside it.
-    assert len(served) == 1
-    assert served[0].envelope.extras == {NODE_FIELD: record["node"], ROOT_FIELD: record["root"]}
-    assert served[0].scope == LineageScope(node=record["node"], root=record["root"])
+    assert len(handled) == 1
+    assert handled[0].envelope.extras == {NODE_FIELD: record["node"], ROOT_FIELD: record["root"]}
+    assert handled[0].scope == LineageScope(node=record["node"], root=record["root"])
     assert (lin.counts.published, lin.counts.dropped) == (1, 0)
     assert (lin.counts.adopted, lin.counts.minted) == (1, 0)
 
@@ -256,7 +256,7 @@ async def test_the_host_interceptor_sees_envelope_sender_subject_and_headers(
             seen.append(ctx)
             await call_next()
 
-    svc, served = await world.host(lin, "ctx", extra=[Spy()])
+    svc, handled = await world.host(lin, "ctx", extra=[Spy()])
     agents = world.caller(lin)
     await _drain(await _handle(agents, svc), "hi")
     assert len(seen) == 1
@@ -264,7 +264,7 @@ async def test_the_host_interceptor_sees_envelope_sender_subject_and_headers(
     assert ctx.subject == svc.subject.prompt
     me = await agents.self_id()
     assert ctx.sender is not None and ctx.sender.trust == "verified" and ctx.sender.id == me
-    node = served[0].scope.node if served[0].scope is not None else None
+    node = handled[0].scope.node if handled[0].scope is not None else None
     assert ctx.headers.get(NODE_HEADER) == node
     assert ctx.envelope.prompt == "hi"
     assert ctx.envelope.extras.get(NODE_FIELD) == node
@@ -275,7 +275,7 @@ async def test_a_half_pair_is_a_400_before_the_ack_and_never_reaches_the_handler
     world: World, field: str
 ) -> None:
     lin = Lineage(RECORDS)
-    svc, served = await world.host(lin, f"half-{field}")
+    svc, handled = await world.host(lin, f"half-{field}")
     frames = await _raw(world.nc, svc.subject.prompt, {"prompt": "x", field: "a" * 32})
     # Error frame, then the terminator — no ack, no chunk.
     assert len(frames) == 2
@@ -283,29 +283,29 @@ async def test_a_half_pair_is_a_400_before_the_ack_and_never_reaches_the_handler
     assert headers.get("Nats-Service-Error-Code") == "400"
     assert "must be given together" in headers.get("Nats-Service-Error", "")
     assert frames[1].data == b"" and not frames[1].headers
-    assert served == []
+    assert handled == []
 
 
 async def test_a_root_is_minted_when_the_envelope_carries_no_pair(world: World) -> None:
     lin = Lineage(RECORDS)
-    svc, served = await world.host(lin, "mint")
+    svc, handled = await world.host(lin, "mint")
     plain = world.caller(None, signed=False)
     await _drain(await _handle(plain, svc), "plain")
-    scope = served[0].scope
+    scope = handled[0].scope
     assert scope is not None and len(scope.node) == 32 and scope.root == scope.node
-    assert served[0].envelope.extras == {}
+    assert handled[0].envelope.extras == {}
     assert (lin.counts.adopted, lin.counts.minted) == (0, 1)
 
 
 async def test_a_client_used_inside_the_handler_inherits_the_scope(world: World) -> None:
     lin = Lineage(RECORDS)
-    inner_svc, inner_served = await world.host(lin, "inner")
+    inner_svc, inner_handled = await world.host(lin, "inner")
     inner_client = world.caller(lin)
 
-    async def nested(_served: Served) -> None:
+    async def nested(_handled: Handled) -> None:
         await _drain(await _handle(inner_client, inner_svc), "nested")
 
-    outer_svc, outer_served = await world.host(lin, "outer", on_prompt=nested)
+    outer_svc, outer_handled = await world.host(lin, "outer", on_prompt=nested)
     outer_client = world.caller(lin)
     records, stop = await _capture(world.observer, RECORDS)
     try:
@@ -315,18 +315,18 @@ async def test_a_client_used_inside_the_handler_inherits_the_scope(world: World)
         await stop()
     top, child = (_record(m) for m in records)
     world.evidence.write_jsonl("records.jsonl", [top, child])
-    outer_scope = outer_served[0].scope
+    outer_scope = outer_handled[0].scope
     assert outer_scope is not None
     # The nested prompt is a child of the outer execution, in its tree.
     assert top["node"] == outer_scope.node
     assert child["parent"] == outer_scope.node
     assert child["root"] == outer_scope.root
-    assert inner_served[0].scope == LineageScope(node=child["node"], root=outer_scope.root)
+    assert inner_handled[0].scope == LineageScope(node=child["node"], root=outer_scope.root)
 
 
 async def test_it_runs_in_the_context_prompt_was_called_in(world: World) -> None:
     lin = Lineage(RECORDS)
-    svc, served = await world.host(lin, "context")
+    svc, handled = await world.host(lin, "context")
     agents = world.caller(lin)
     agent = await _handle(agents, svc)
     records, stop = await _capture(world.observer, RECORDS)
@@ -344,12 +344,12 @@ async def test_it_runs_in_the_context_prompt_was_called_in(world: World) -> None
     record = _record(records[0])
     assert record["parent"] == parent.node
     assert record["root"] == parent.root
-    assert served[0].scope == LineageScope(node=record["node"], root=parent.root)
+    assert handled[0].scope == LineageScope(node=record["node"], root=parent.root)
 
 
 async def test_a_prompt_that_is_never_iterated_runs_no_interceptor(world: World) -> None:
     lin = Lineage(RECORDS)
-    svc, served = await world.host(lin, "idle")
+    svc, handled = await world.host(lin, "idle")
     agents = world.caller(lin)
     records, stop = await _capture(world.observer, RECORDS)
     try:
@@ -359,7 +359,7 @@ async def test_a_prompt_that_is_never_iterated_runs_no_interceptor(world: World)
     finally:
         await stop()
     assert records == []
-    assert served == []
+    assert handled == []
     assert (lin.counts.published, lin.counts.dropped) == (0, 0)
 
 
@@ -367,11 +367,11 @@ async def test_without_a_signer_the_record_is_dropped_and_the_pair_still_sent(
     world: World,
 ) -> None:
     lin = Lineage(RECORDS)
-    svc, served = await world.host(lin, "unsigned")
+    svc, handled = await world.host(lin, "unsigned")
     agents = world.caller(lin, signed=False)
     await _drain(await _handle(agents, svc), "unsigned")
     assert (lin.counts.published, lin.counts.dropped, lin.counts.adopted) == (0, 1, 1)
-    assert served[0].scope is not None
+    assert handled[0].scope is not None
 
 
 async def test_the_counts_ride_every_heartbeat_and_status_reply(world: World) -> None:
@@ -416,7 +416,7 @@ async def test_an_interceptor_that_raises_fails_the_prompt_and_nothing_is_sent(
     world: World,
 ) -> None:
     lin = Lineage(RECORDS)
-    svc, served = await world.host(lin, "raises")
+    svc, handled = await world.host(lin, "raises")
 
     class Failing:
         async def before_prompt(self, ctx: PromptInterceptorContext) -> PromptExtras | None:
@@ -426,7 +426,7 @@ async def test_an_interceptor_that_raises_fails_the_prompt_and_nothing_is_sent(
     with pytest.raises(RuntimeError, match="interceptor says no"):
         await _drain(await _handle(agents, svc), "x")
     await asyncio.sleep(0.2)
-    assert served == []
+    assert handled == []
 
 
 async def test_a_protocol_field_or_the_agent_sender_header_is_refused(world: World) -> None:
@@ -451,7 +451,7 @@ async def test_several_interceptors_merge_in_order_the_later_one_winning_a_key(
     world: World,
 ) -> None:
     lin = Lineage(RECORDS)
-    svc, served = await world.host(lin, "merge")
+    svc, handled = await world.host(lin, "merge")
 
     class Adds:
         def __init__(self, fields: dict[str, object] | None) -> None:
@@ -467,7 +467,7 @@ async def test_several_interceptors_merge_in_order_the_later_one_winning_a_key(
     )
     await _drain(await _handle(agents, svc), "x")
     # The host minted: the fields are unknown to the lineage pair.
-    assert served[0].envelope.extras == {"a": 1, "b": 2, "shared": "second"}
+    assert handled[0].envelope.extras == {"a": 1, "b": 2, "shared": "second"}
 
 
 async def test_a_request_rejected_error_answers_its_code(world: World) -> None:
@@ -477,8 +477,8 @@ async def test_a_request_rejected_error_answers_its_code(world: World) -> None:
         async def around_request(self, ctx: RequestInterceptorContext, call_next: CallNext) -> None:
             raise RequestRejectedError(403, "not you")
 
-    svc, served = await world.host(lin, "deny", extra=[Deny()])
+    svc, handled = await world.host(lin, "deny", extra=[Deny()])
     agents = world.caller(lin)
     with pytest.raises(ProtocolError, match="service error 403: not you"):
         await _drain(await _handle(agents, svc), "x")
-    assert served == []
+    assert handled == []

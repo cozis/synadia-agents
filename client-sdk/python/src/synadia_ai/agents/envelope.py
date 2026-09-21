@@ -26,10 +26,9 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .errors import ProtocolError
-from .trace import THREAD_ID_HEX_LEN, is_thread_id
 
 
 class Attachment(BaseModel):
@@ -76,9 +75,6 @@ class Envelope(BaseModel):
     non-compliant peer rides this unknown-field bag instead of surfacing
     as a first-class attribute.
 
-    The thread_id and root_id fields are NOT part of v0.3 but are part
-    of the SDK's tracing extension.
-
     An extension adds fields of its own the same way: construct with them
     as keyword arguments (``Envelope(prompt="hi", my_field=1)``) and
     :func:`encode` writes them next to the protocol's; :attr:`extras` reads
@@ -89,27 +85,6 @@ class Envelope(BaseModel):
 
     prompt: str
     attachments: list[Attachment] | None = None
-
-    thread_id: str | None = None
-    root_id: str | None = None
-
-    @field_validator("thread_id", "root_id")
-    @classmethod
-    def _empty_lineage_is_absent(cls, value: str | None) -> str | None:
-        # An empty id names nothing. Treating it as absent keeps a
-        # receiver from adopting "" as a thread and filing every child
-        # under it — and keeps both SDKs reading the same wire the same
-        # way.
-        if not value:
-            return None
-        # Untrusted, bounded input: the id is adopted verbatim and later
-        # stamped on the agent's model requests as a header value, so
-        # anything not shaped like a minted id (a CRLF, a megabyte of
-        # garbage) is malformed — a 400 at the receiver, like any other
-        # wrongly-shaped field.
-        if not is_thread_id(value):
-            raise ValueError(f"must be {THREAD_ID_HEX_LEN} lowercase hex characters")
-        return value
 
     @property
     def extras(self) -> dict[str, object]:
@@ -153,17 +128,6 @@ def decode(payload: bytes) -> Envelope:
             envelope = Envelope.model_validate_json(payload)
         except ValidationError as exc:
             raise ProtocolError(f"malformed envelope: {exc}") from exc
-        # The pair travels together: a caller that traces sends both, one
-        # that does not sends neither. Exactly one names a broken or
-        # hand-written caller, and adopting the lone field would file this
-        # execution under a tree the caller never named, or root a thread
-        # the caller meant as a child — so it is a malformed envelope, the
-        # same 400 as a wrongly shaped id. Checked on the wire and not on
-        # the model: a caller may still hand ``prompt()`` an explicit
-        # ``Envelope`` naming one field, which ``prompt()`` completes. The
-        # TypeScript SDK reads the wire the same way.
-        if (envelope.thread_id is None) != (envelope.root_id is None):
-            raise ProtocolError("malformed envelope: thread_id and root_id must be given together")
         return envelope
 
     try:

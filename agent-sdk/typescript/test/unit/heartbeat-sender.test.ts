@@ -96,7 +96,7 @@ describe("signHeartbeat — a live frame", () => {
 
   function frame(): { payload: ReturnType<typeof buildHeartbeatPayload>; data: Uint8Array } {
     const payload = buildHeartbeatPayload(subject, 30, "demo-agent-example-1", {
-      extras: { records_published: 3, records_dropped: 0 },
+      extras: { requests_handled: 3, requests_failed: 0 },
     });
     return { payload, data: encodeHeartbeatPayload(payload) };
   }
@@ -138,7 +138,7 @@ describe("signHeartbeat — a live frame", () => {
     expect(verified?.trust).toBe("verified");
 
     const tampered = enc.encode(
-      dec.decode(data).replace('"records_dropped":0', '"records_dropped":1'),
+      dec.decode(data).replace('"requests_failed":0', '"requests_failed":1'),
     );
     expect(tampered).not.toEqual(data);
     await expect(

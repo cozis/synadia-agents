@@ -114,7 +114,7 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
     await server.stop();
   });
 
-  interface Served {
+  interface Handled {
     readonly scope: LineageScope | undefined;
     readonly envelope: RequestEnvelope;
   }
@@ -125,10 +125,10 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
     name: string,
     opts: {
       readonly extra?: ReadonlyArray<RequestInterceptor>;
-      readonly onPrompt?: (served: Served) => Promise<void>;
+      readonly onPrompt?: (handled: Handled) => Promise<void>;
     } = {},
-  ): Promise<{ svc: AgentService; served: Served[] }> {
-    const served: Served[] = [];
+  ): Promise<{ svc: AgentService; handled: Handled[] }> {
+    const handled: Handled[] = [];
     const svc = new AgentService({
       nc,
       agent: "lineage",
@@ -140,12 +140,12 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
     });
     svc.onPrompt(async (envelope, response) => {
       const entry = { scope: lin.current(), envelope };
-      served.push(entry);
+      handled.push(entry);
       await opts.onPrompt?.(entry);
       await response.send("ok");
     });
     await svc.start();
-    return { svc, served };
+    return { svc, handled };
   }
 
   function caller(
@@ -168,7 +168,7 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
 
   it("publishes one signed record before the prompt and adds the pair to the envelope", async () => {
     const lin = lineage(RECORDS);
-    const { svc, served } = await host(lin, "record");
+    const { svc, handled } = await host(lin, "record");
     const agents = caller(lin);
     const order: string[] = [];
     const records = capture(observer, RECORDS);
@@ -207,12 +207,12 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
 
       // The host adopted the pair from the envelope's unknown fields and
       // ran the handler inside it.
-      expect(served).toHaveLength(1);
-      expect(served[0]!.envelope.extras).toEqual({
+      expect(handled).toHaveLength(1);
+      expect(handled[0]!.envelope.extras).toEqual({
         [NODE_FIELD]: record.node,
         [ROOT_FIELD]: record.root,
       });
-      expect(served[0]!.scope).toEqual({ node: record.node, root: record.root });
+      expect(handled[0]!.scope).toEqual({ node: record.node, root: record.root });
       expect(lin.counts).toMatchObject({ published: 1, dropped: 0, adopted: 1, minted: 0 });
     } finally {
       records.stop();
@@ -232,7 +232,7 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
         await next();
       },
     };
-    const { svc, served } = await host(lin, "ctx", { extra: [spy] });
+    const { svc, handled } = await host(lin, "ctx", { extra: [spy] });
     const agents = caller(lin);
     try {
       await drain(await (await handle(agents, svc)).prompt("hi"));
@@ -240,9 +240,9 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
       const ctx = seen[0]!;
       expect(ctx.subject).toBe(svc.subject.prompt);
       expect(ctx.sender).toMatchObject({ trust: "verified", id: await agents.selfId() });
-      expect(ctx.headers?.get(NODE_HEADER)).toBe(served[0]!.scope?.node);
+      expect(ctx.headers?.get(NODE_HEADER)).toBe(handled[0]!.scope?.node);
       expect(ctx.envelope.prompt).toBe("hi");
-      expect(ctx.envelope.extras?.[NODE_FIELD]).toBe(served[0]!.scope?.node);
+      expect(ctx.envelope.extras?.[NODE_FIELD]).toBe(handled[0]!.scope?.node);
     } finally {
       await agents.close();
       await svc.stop();
@@ -251,7 +251,7 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
 
   it("refuses a half pair with 400 before the ack, and never runs the handler", async () => {
     const lin = lineage(RECORDS);
-    const { svc, served } = await host(lin, "half");
+    const { svc, handled } = await host(lin, "half");
     try {
       const node = "a".repeat(32);
       const msgs = await rawStream(
@@ -264,7 +264,7 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
       expect(msgs[0]!.headers?.get("Nats-Service-Error-Code")).toBe("400");
       expect(msgs[0]!.headers?.get("Nats-Service-Error")).toContain("must be given together");
       expect(msgs[1]!.data.length).toBe(0);
-      expect(served).toHaveLength(0);
+      expect(handled).toHaveLength(0);
     } finally {
       await svc.stop();
     }
@@ -272,15 +272,15 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
 
   it("mints a root when the envelope carries no pair", async () => {
     const lin = lineage(RECORDS);
-    const { svc, served } = await host(lin, "mint");
+    const { svc, handled } = await host(lin, "mint");
     const plain = caller(undefined, false);
     try {
       await drain(await (await handle(plain, svc)).prompt("plain"));
-      expect(served).toHaveLength(1);
-      const scope = served[0]!.scope;
+      expect(handled).toHaveLength(1);
+      const scope = handled[0]!.scope;
       expect(scope?.node).toMatch(/^[0-9a-f]{32}$/);
       expect(scope?.root).toBe(scope?.node);
-      expect(served[0]!.envelope.extras).toBeUndefined();
+      expect(handled[0]!.envelope.extras).toBeUndefined();
       expect(lin.counts).toMatchObject({ adopted: 0, minted: 1 });
     } finally {
       await plain.close();
@@ -306,8 +306,8 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
       const [top, nested] = records.msgs.map(
         (m) => JSON.parse(dec.decode(m.data)) as LineageRecord,
       );
-      const outerScope = outer.served[0]!.scope!;
-      const innerScope = inner.served[0]!.scope!;
+      const outerScope = outer.handled[0]!.scope!;
+      const innerScope = inner.handled[0]!.scope!;
       // The nested prompt is a child of the outer execution, in its tree.
       expect(top!.node).toBe(outerScope.node);
       expect(nested!.parent).toBe(outerScope.node);
@@ -324,7 +324,7 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
 
   it("runs in the context prompt() was called in, not the one the stream is iterated in", async () => {
     const lin = lineage(RECORDS);
-    const { svc, served } = await host(lin, "context");
+    const { svc, handled } = await host(lin, "context");
     const agents = caller(lin);
     const records = capture(observer, RECORDS);
     await observer.flush();
@@ -338,7 +338,7 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
       const record = JSON.parse(dec.decode(records.msgs[0]!.data)) as LineageRecord;
       expect(record.parent).toBe(parent.node);
       expect(record.root).toBe(parent.root);
-      expect(served[0]!.scope).toEqual({ node: record.node, root: parent.root });
+      expect(handled[0]!.scope).toEqual({ node: record.node, root: parent.root });
     } finally {
       records.stop();
       await agents.close();
@@ -348,7 +348,7 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
 
   it("runs no interceptor for a prompt that is never iterated", async () => {
     const lin = lineage(RECORDS);
-    const { svc, served } = await host(lin, "idle");
+    const { svc, handled } = await host(lin, "idle");
     const agents = caller(lin);
     const records = capture(observer, RECORDS);
     await observer.flush();
@@ -356,7 +356,7 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
       await (await handle(agents, svc)).prompt("never sent");
       await new Promise((r) => setTimeout(r, 300));
       expect(records.msgs).toHaveLength(0);
-      expect(served).toHaveLength(0);
+      expect(handled).toHaveLength(0);
       expect(lin.counts).toMatchObject({ published: 0, dropped: 0 });
     } finally {
       records.stop();
@@ -367,12 +367,12 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
 
   it("drops the record without a signer, and still sends the pair", async () => {
     const lin = lineage(RECORDS);
-    const { svc, served } = await host(lin, "unsigned");
+    const { svc, handled } = await host(lin, "unsigned");
     const agents = caller(lin, false);
     try {
       await drain(await (await handle(agents, svc)).prompt("unsigned"));
       expect(lin.counts).toMatchObject({ published: 0, dropped: 1, adopted: 1 });
-      expect(served[0]!.scope?.node).toMatch(/^[0-9a-f]{32}$/);
+      expect(handled[0]!.scope?.node).toMatch(/^[0-9a-f]{32}$/);
     } finally {
       await agents.close();
       await svc.stop();
@@ -418,7 +418,7 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
 
   it("fails the prompt, and sends nothing, when an interceptor throws", async () => {
     const lin = lineage(RECORDS);
-    const { svc, served } = await host(lin, "throws");
+    const { svc, handled } = await host(lin, "throws");
     const failing: PromptInterceptor = {
       beforePrompt() {
         throw new Error("interceptor says no");
@@ -429,7 +429,7 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
       const stream = await (await handle(agents, svc)).prompt("x");
       await expect(drain(stream)).rejects.toThrow("interceptor says no");
       await new Promise((r) => setTimeout(r, 200));
-      expect(served).toHaveLength(0);
+      expect(handled).toHaveLength(0);
     } finally {
       await agents.close();
       await svc.stop();
@@ -459,7 +459,7 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
 
   it("merges several interceptors in order, the later one winning a key", async () => {
     const lin = lineage(RECORDS);
-    const { svc, served } = await host(lin, "merge");
+    const { svc, handled } = await host(lin, "merge");
     const first: PromptInterceptor = {
       beforePrompt: () => ({ fields: { a: 1, shared: "first" } }),
     };
@@ -472,7 +472,7 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
     try {
       await drain(await (await handle(agents, svc)).prompt("x"));
       // The host minted: the fields are unknown to the lineage pair.
-      expect(served[0]!.envelope.extras).toEqual({ a: 1, b: 2, shared: "second" });
+      expect(handled[0]!.envelope.extras).toEqual({ a: 1, b: 2, shared: "second" });
     } finally {
       await agents.close();
       await svc.stop();

@@ -49,8 +49,10 @@ Two halves per language. The **caller** SDK (`client-sdk/`) discovers and prompt
 Both languages stay in lockstep on the wire format, validated by a cross-SDK interop test ([`tests/test_interop_e2e.py`](client-sdk/python/tests/test_interop_e2e.py)) that runs the TS reference agent against the Python client.
 
 The active [SDK release rollout roadmap](docs/sdk-release-rollout-roadmap.md) tracks sender
-identity, optional tracing, compatibility, integration adoption, dependency controls, and release
-promotion.
+identity, the extension hooks, compatibility, integration adoption, dependency controls, and release
+promotion. Tracing is not part of this release: the SDKs carry generic extension hooks (prompt and
+request interceptors, extra envelope fields, heartbeat extras), and extensions such as tracing build
+on them in separate packages.
 
 ## Examples
 

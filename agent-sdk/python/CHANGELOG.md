@@ -42,30 +42,12 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
   `sender=HeartbeatSigner(id, signer)`; `sign_heartbeat` builds the header
   for hand-rolled publishers; the shared fixtures gain the
   `signed-heartbeat` vector.
-- **Heartbeat trace record counts.** A service that opted in to tracing
-  puts `records_published` and `records_dropped` — two counters since
-  process start, read fresh on every beat from `trace_record_counts()` —
-  on the heartbeat and on the `status` reply, so whoever consumes the
-  heartbeat knows how many records the process failed to publish. Only
-  drops the SDK itself observed are counted; a record lost after it left
-  the process is not. An untraced or propagate-only service reports
-  neither; its heartbeat is unchanged. A provider that raises, or an extra the payload cannot
-  carry (a §8.3 field name — a `ValueError` from `build_heartbeat_payload`
-  — or an unserialisable value), costs that beat its extras and never
-  the heartbeat itself.
-  `build_heartbeat_payload` / `publish_one` take an `extras` mapping and
-  `run_publisher` an `extras` provider, the Python encoder's counterpart
-  of the TypeScript `extras` slot.
-- **Observability tracing (opt-in).** `AgentService(trace=TraceOptions())`
-  hands tracing down to every `synadia_ai.agents` client used inside a
-  prompt handler. The service adopts the caller's `thread_id` / `root_id`
-  (or mints a root when it opted in) and binds them as the ambient trace
-  for the handler; `PromptStream.trace_headers()` returns the
-  `X-Synadia-Thread-ID` / `X-Synadia-Root-ID` headers to stamp on each
-  model request (`{}` when untraced). The service itself writes no trace
-  record. A malformed lineage id on the envelope is a `400`; a
-  `TraceOptions` whose `edge_subject` can never be published to raises
-  `ValueError`.
+- **Heartbeat extras slot.** `build_heartbeat_payload` / `publish_one` take
+  an `extras` mapping and `run_publisher` an `extras` provider, the Python
+  encoder's counterpart of the TypeScript `extras` slot. A provider that
+  raises, or an extra the payload cannot carry (a §8.3 field name — a
+  `ValueError` from `build_heartbeat_payload` — or an unserialisable
+  value), costs that beat its extras and never the heartbeat itself.
 - `AgentService(extra_metadata=…)` merges harness-specific keys into the
   service registration metadata (`$SRV.INFO.metadata`), matching the
   TypeScript host's `extraMetadata`. The required keys (`agent`, `owner`,
@@ -79,13 +61,6 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Changed
 
-- **A half lineage pair is rejected, not completed.** An envelope
-  carrying exactly one of `thread_id` and `root_id` is a malformed
-  envelope: the `400` frame and the terminator, no ack, and the handler
-  never runs — where the service used to fill in `root_id = thread_id`
-  or mint a thread under the given root. Both present are adopted
-  verbatim; neither makes a service that opted in mint a root; unchanged.
-  The TypeScript host behaves the same.
 - Host identity registration is now opt-in: omitting `identity` performs no
   self lookup and emits no `user_nkey`, `account`, or `id_sig` metadata;
   incoming sender classification and the default `min_sender_trust="any"`

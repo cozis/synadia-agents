@@ -169,14 +169,14 @@ import {
 } from "@synadia-ai/agent-service";
 
 const requestIds = new AsyncLocalStorage<string>();
-let served = 0;
+let handled = 0;
 const tagging: RequestInterceptor = {
   async aroundRequest(ctx, next) {
     // ctx.envelope (unknown fields in ctx.envelope.extras), ctx.sender, ctx.subject, ctx.headers
     const id = ctx.envelope.extras?.["x_request"];
     if (id !== undefined && typeof id !== "string")
       throw new RequestRejectedError(400, "bad x_request");
-    served += 1;
+    handled += 1;
     await requestIds.run(id ?? "none", next); // the handler sees requestIds.getStore()
   },
 };
@@ -187,7 +187,7 @@ const service = new AgentService({
   owner: "me",
   name: "demo",
   interceptors: [tagging],
-  heartbeatExtras: () => ({ served }),
+  heartbeatExtras: () => ({ handled }),
 });
 ```
 

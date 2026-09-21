@@ -27,7 +27,7 @@ Every SDK call mapped to its Synadia Agent Protocol for NATS section, for implem
 | Pre-publish `max_payload`            | Throws `PayloadTooLargeError` on serialized UTF-8 byte length. Effective limit is `min(endpoint.maxPayloadBytes, nc.info?.max_payload)` — caller's broker cap binds when smaller. | §5.4       |
 | Empty prompt                         | Throws `PromptEmptyError` locally.                                                                                                                                                | §5.1, §5.3 |
 | Endpoint subject resolution          | Always `endpoints[].subject` from the discovery record - never constructed.                                                                                                       | §4.3, §12  |
-| Unknown envelope fields              | Preserved by decoders; the SDK's reference agent passes them through.                                                                                                             | §5.6       |
+| Unknown envelope fields              | Kept by `decodeEnvelope` on `RequestEnvelope.extras` and written back by `encodeEnvelope`; prompt interceptors add them, request interceptors read them.                          | §5.6       |
 
 ## Response streaming (§6)
 
@@ -69,7 +69,7 @@ Every SDK call mapped to its Synadia Agent Protocol for NATS section, for implem
 | Subject                  | `agents.*.*.*.heartbeat` (fixed wildcard). Callers filter via `discover({ filter })`. | §8.1, §8.5 |
 | Payload required fields  | `agent`, `owner`, `instance_id`, `ts`, `interval_s`. `session` when present.          | §8.3       |
 | Unknown heartbeat fields | Preserved on `HeartbeatPayload.extras`.                                               | §8.3, §12  |
-| Trace record counts      | Traced services add `records_published` / `records_dropped` (local drops only).       | extension  |
+| Heartbeat extras         | `AgentServiceOptions.heartbeatExtras` fields, read per beat; absent without one.      | §8.3       |
 | Tracker keying           | `instance_id` (from the payload), NOT the subject. Multi-instance safe.               | §3.3, §8.3 |
 | Liveness                 | `isOnline === (age < 3 × interval_s)`.                                                | §8.2       |
 | Start timing             | Tracker SUB established + flushed before first `$SRV.PING`.                           | §8.5       |

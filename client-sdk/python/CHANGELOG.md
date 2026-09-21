@@ -10,6 +10,26 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Added
 
+- **`save_attachments(attachments, directory, *, max_total_bytes=...)`.**
+  The receiving counterpart of `Attachment.from_path`, synchronous like it:
+  writes the attachments of a reply (§6.3), a mid-stream query (§7.1) or an
+  inbound envelope into `directory`, created if missing, so a caller can
+  hand its model paths instead of base64. One `SavedAttachment` per input,
+  in order: `filename` as sent, `size_bytes`, and the absolute `path`, or
+  `path=None` with `skipped="over_limit" | "invalid_content"`. The sender's
+  name is untrusted and reduced to a safe base name, the same on every OS:
+  no path, no control characters, no characters that change text
+  direction, no leading or trailing dots or whitespace, `< > : " | ? *`
+  replaced by `_`, a Windows device name (`CON`, `nul.txt`, `CONIN$`)
+  prefixed with `_`, at most 200 UTF-8 bytes. Files are created with
+  `open(..., "xb")` and mode 0600: nothing is overwritten, no symlink is
+  followed, a taken name becomes `name (2).ext`. A directory the call
+  creates gets mode 0700; one that exists keeps its mode. Content that is
+  not strict RFC 4648 §4 base64 is never written; the decoded bytes per
+  call stop at `DEFAULT_SAVE_ATTACHMENTS_MAX_TOTAL_BYTES` (64 MiB; `None`
+  disables it). Real I/O errors raise `OSError`. The TypeScript SDK's
+  `saveAttachments` behaves the same, on the shared cases in
+  `test-fixtures/attachments/`. Nothing on the wire changes.
 - **Trace record counts.** The SDK counts the trace records it handed to
   the connection and the ones it could not — no identity to sign with, or
   a publish that raised — process-wide, counted from process start. These

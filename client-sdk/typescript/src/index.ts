@@ -101,6 +101,12 @@ export {
   normalizeAttachments,
 } from "./prompt/attachments.js";
 export {
+  type SaveAttachmentsOptions,
+  type SavedAttachment,
+  DEFAULT_SAVE_ATTACHMENTS_MAX_TOTAL_BYTES,
+  saveAttachments,
+} from "./prompt/save-attachments.js";
+export {
   type PromptOptions,
   type StatusOptions,
   DEFAULT_PROMPT_MAX_WAIT_MS,

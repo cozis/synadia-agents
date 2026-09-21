@@ -43,6 +43,11 @@ from .agent import (
     StreamMessage,
 )
 from .agents import DEFAULT_REQUEST_SIGNED_TIMEOUT_S, NATS_MSG_ID_HEADER, Agents
+from .attachments import (
+    DEFAULT_SAVE_ATTACHMENTS_MAX_TOTAL_BYTES,
+    SavedAttachment,
+    save_attachments,
+)
 from .connection_bundle import (
     CredentialSource,
     IdentityMode,
@@ -181,6 +186,7 @@ __all__ = [
     "DEFAULT_REPLAY_WINDOW_S",
     "DEFAULT_REQUEST_SIGNED_TIMEOUT_S",
     "DEFAULT_RESOLVE_TTL_S",
+    "DEFAULT_SAVE_ATTACHMENTS_MAX_TOTAL_BYTES",
     "DEFAULT_STATUS_TIMEOUT_S",
     "DEFAULT_STREAM_INACTIVITY_TIMEOUT_S",
     "EDGE_RECORD_VERSION",
@@ -242,6 +248,7 @@ __all__ = [
     "QueryChunk",
     "QueryTimeout",
     "ResponseChunk",
+    "SavedAttachment",
     "SenderClaim",
     "SenderInfo",
     "SenderResolver",
@@ -288,6 +295,7 @@ __all__ = [
     "refresh_self_id",
     "resolve_nats_connection_bundle",
     "resolve_sender",
+    "save_attachments",
     "self_id",
     "serialize_sender_header",
     "sign_agent_id",

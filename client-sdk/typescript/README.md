@@ -78,6 +78,7 @@ Both error types extend `ValidationError` → `NatsAgentError`. See [Error handl
 | `new Agents({ nc, ... })`                                                                                          | Construct from a caller-owned `NatsConnection`.                                          |
 | `agents.discover({filter?, timeoutMs?})`                                                                           | Return a live `Agent[]`; auto subscribe-before-ping (§8.5).                              |
 | `agent.prompt(text, {attachments, signal, inactivityTimeoutMs})`                                                   | Return a `PromptStream`.                                                                 |
+| `saveAttachments(msg.attachments, dir, { maxTotalBytes? })`                                                        | Save a reply's files to disk: safe names, never overwrites; returns the absolute paths.  |
 | `agents.liveness(id)` / `onHeartbeat(id, cb)` / `ping(id)`                                                         | Heartbeat tracking and on-demand ping.                                                   |
 | `agent.status({ subject?, sub?, timeoutMs? })`                                                                     | §8.7 status probe; returns the agent's heartbeat payload.                                |
 | `agents.close()`                                                                                                   | Tear down SDK state; aborts all in-flight streams.                                       |

@@ -236,10 +236,13 @@ the gap is, **why** it matters, and a hint at the **next step**.
    PI and Claude Code stage base64-decoded attachments to disk under
    `ATTACHMENT_DIR/{requestId}` so handlers can pass file paths to
    tools (shell-outs, MCP servers, etc.). Python keeps attachments
-   in-memory on `Envelope.attachments` and leaves staging to the
-   developer. Next step: an `Attachment.stage_to(path)` helper that
-   handles tempdir creation, RFC 4648 base64 decode, and safe filename
-   sanitisation in one call.
+   in-memory on `Envelope.attachments`. **Partly addressed:**
+   `save_attachments(attachments, directory)` (TypeScript:
+   `saveAttachments`) creates the directory, decodes strict RFC 4648
+   base64, sanitises each name the same way on every OS and never
+   overwrites, in one call — for a reply's attachments as well as an
+   inbound envelope's. Choosing a per-request directory stays with the
+   developer.
 
 ### Behavioural divergences (both spec-valid, different shape)
 

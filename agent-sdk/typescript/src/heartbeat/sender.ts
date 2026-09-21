@@ -1,15 +1,15 @@
 // The `Agent-Sender` header on a heartbeat.
 //
-// An agent's presence on the fabric is its signed heartbeat: the host sets
-// the same `Agent-Sender` header the SDK puts on its edge records on every
-// heartbeat it publishes — `sub` the heartbeat subject as published, `ts`
-// the heartbeat's own `ts`, a fresh nonce per beat, `sig` over
-// subject · ts · nonce · sha256(the exact payload bytes published). No new
-// payload field, no new signing format: the header of the sender-identity
-// extension, unchanged, signed with the same signer that signs `id_sig`.
-// A host without a signer beats unsigned, exactly as plain protocol 0.3 —
-// a claim, never proof of presence — and a 0.3 subscriber ignores headers
-// either way.
+// To a receiver that requires signed heartbeats, an agent's presence is its
+// signed heartbeat: the host sets the same `Agent-Sender` header the SDK
+// puts on its edge records on every heartbeat it publishes — `sub` the
+// heartbeat subject as published, `ts` the heartbeat's own `ts`, a fresh
+// nonce per beat, `sig` over subject · ts · nonce · sha256(the exact
+// payload bytes published). No new payload field, no new signing format:
+// the header of the sender-identity extension, unchanged, signed with the
+// same signer that signs `id_sig`. A host without a signer beats unsigned,
+// exactly as plain protocol 0.3 — a claim, never proof of presence — and a
+// 0.3 subscriber ignores headers either way.
 
 import { headers, type MsgHdrs } from "@nats-io/nats-core";
 import {

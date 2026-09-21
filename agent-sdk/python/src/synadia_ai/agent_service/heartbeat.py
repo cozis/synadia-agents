@@ -9,16 +9,17 @@ side and the ``build_heartbeat_payload`` helper that the
 to ensure heartbeat and status responses share the exact same payload
 construction path.
 
-An agent's presence on the fabric is its signed heartbeat: with a
-:class:`HeartbeatSigner` the publisher sets the same ``Agent-Sender``
-header the SDK puts on its edge records on every heartbeat — ``sub`` the
-heartbeat subject as published, ``ts`` the heartbeat's own ``ts``, a
-fresh nonce per beat, ``sig`` over subject · ts · nonce · sha256 of the
-exact payload bytes published. No new payload field, no new signing
-format: the header of the sender-identity extension, unchanged, signed
-with the same signer that signs ``id_sig``. Without a signer the agent
-beats unsigned, exactly as plain protocol 0.3 — a claim, never proof of
-presence — and a 0.3 subscriber ignores headers either way.
+To a receiver that requires signed heartbeats, an agent's presence is its
+signed heartbeat: with a :class:`HeartbeatSigner` the publisher sets the
+same ``Agent-Sender`` header the SDK puts on its edge records on every
+heartbeat — ``sub`` the heartbeat subject as published, ``ts`` the
+heartbeat's own ``ts``, a fresh nonce per beat, ``sig`` over subject ·
+ts · nonce · sha256 of the exact payload bytes published. No new payload
+field, no new signing format: the header of the sender-identity
+extension, unchanged, signed with the same signer that signs ``id_sig``.
+Without a signer the agent beats unsigned, exactly as plain protocol 0.3
+— a claim, never proof of presence — and a 0.3 subscriber ignores
+headers either way.
 """
 
 from __future__ import annotations
@@ -138,9 +139,10 @@ async def publish_one(
     With ``sender`` the frame carries its signed ``Agent-Sender`` header
     (see :func:`sign_heartbeat`); without one it goes out bare, as plain
     protocol 0.3. A signer that fails mid-life (a wiped key) costs the beat
-    its signature, never the beat: 0.3 callers keep seeing liveness, and
-    the fabric — which counts an unsigned beat as a claim — shows the agent
-    as down until signing works again. Logged on every beat.
+    its signature, never the beat: 0.3 callers keep seeing liveness, and a
+    receiver that requires signed heartbeats counts an unsigned beat as a
+    claim and shows the agent as down until signing works again. Logged on
+    every beat.
     """
     payload = build_heartbeat_payload(subject, interval_s, instance_id, extras)
     data = payload.model_dump_json().encode("utf-8")

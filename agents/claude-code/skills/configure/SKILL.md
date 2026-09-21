@@ -1,6 +1,6 @@
 ---
 name: configure
-description: Configure NATS channel - select context, set owner/session, sender identity, inbound trust, tracing, and permissions. Use when user asks to set up NATS, connect to NATS, change context, identity, trust, tracing, or permissions.
+description: Configure NATS channel - select context, set owner/session, sender identity, inbound trust, and permissions. Use when user asks to set up NATS, connect to NATS, change context, identity, trust, or permissions.
 user-invocable: true
 allowed-tools:
   - Read
@@ -16,8 +16,8 @@ effort: low
 # /nats-channel:configure - NATS Channel Configuration
 
 Configures the NATS channel plugin: connection context, session name, sender
-identity, inbound sender trust, tracing, and permission handling. State lives
-in `~/.claude/channels/nats/config.json`.
+identity, inbound sender trust, and permission handling. State lives in
+`~/.claude/channels/nats/config.json`.
 
 Arguments passed: `$ARGUMENTS`
 
@@ -35,7 +35,6 @@ Read state and give the user a complete picture, then ask:
    - Session name override (if set)
    - Sender identity mode (`off` or `signed`; default `off`)
    - Minimum sender trust (`any` or `signed`; default `any`)
-   - Tracing (`off` or `on`; default `off`)
    - Connection URL and description from the context file
    - Permission mode (`terminal` or `query`) and whether permission prompts
      will be relayed as NATS query chunks or handled in the local terminal
@@ -133,31 +132,6 @@ Set `minSenderTrust` to `"signed"`. Headerless, claimed, malformed, stale, and
 replayed requests are rejected before an acknowledgement and before Claude sees
 the prompt. `NATS_MIN_SENDER_TRUST` overrides this config field.
 
-### `tracing off` - publish no trace records
-
-Set `tracing` to `"off"`. The channel adopts no thread for its prompts and
-publishes nothing on `TRACE.edges`. This is the default.
-
-### `tracing on` - trace prompts with served records
-
-Set `tracing` to `"on"`. The channel adopts a traced caller's thread (or mints
-one for a prompt without lineage) and publishes two signed `served` records per
-prompt on `TRACE.edges`, binding the thread to the Claude Code session id
-(`harness: claude`, `harness_thread_id: <session id>`) with the turn's outcome, so the session's model calls
-between the two records can be attributed to the caller's thread. The records
-are signed with the host identity: if `senderIdentity` is not `"signed"`, say
-so and offer to set it, because with identity off nothing is published.
-`NATS_TRACING` overrides this config field.
-
-1. Read existing `config.json` (or start fresh). Set `tracing` to `"on"`.
-2. Write back and confirm; a plugin reload or Claude Code restart is required.
-
-### `tracing off` steps
-
-1. Read existing `config.json` (or start fresh). Set `tracing` to `"off"`, or
-   remove the field.
-2. Write back and confirm.
-
 ### `permissions terminal` - use terminal for permission prompts
 
 Set `permissions.mode` to `terminal`. Permission prompts will appear in the
@@ -210,9 +184,6 @@ Delete `~/.claude/channels/nats/config.json`.
 - Do not modify NATS CLI context files - only read them.
 - `senderIdentity` and `minSenderTrust` are independent. Do not enable strict
   inbound policy merely because signed host identity was enabled.
-- `tracing` needs `senderIdentity: "signed"` to publish anything, but do not
-  change identity without asking: switching it on changes how the channel
-  authenticates and registers.
 - Legacy configs with `"mode": "nats"` are still accepted and treated as
   the new `"query"` mode; they do not need to be rewritten.
 - Legacy configs with `permissions.subject` are silently ignored - query

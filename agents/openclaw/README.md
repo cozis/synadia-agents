@@ -117,7 +117,6 @@ Restart with `openclaw gateway restart`.
 | `credentials`    | no       | —                            | Path to a `.creds` file (NGS, NKEY/JWT auth).                                                                                                 |
 | `senderIdentity` | no       | `off`                        | `signed` derives the agent signer from the same context/credentials snapshot used for the NATS connection; `off` performs no identity lookup. |
 | `minSenderTrust` | no       | `any`                        | `any` accepts headerless and valid signed prompts; `signed` requires a verified sender. This is independent of `senderIdentity`.              |
-| `tracing`        | no       | `off`                        | `on` adopts the caller's thread and publishes signed `served` records per prompt; needs `senderIdentity: "signed"`. See [Tracing](#tracing).  |
 | `description`    | no       | `OpenClaw agent <agentName>` | Shown in `$SRV.INFO` so callers know what they discovered.                                                                                    |
 | `enabled`        | no       | `true`                       | Set to `false` to keep the account block in config but skip connecting.                                                                       |
 
@@ -147,7 +146,6 @@ account config. The legacy vars keep working indefinitely.
 | `NATS_CREDS`             | `credentials`    | Alias — used only when `NATS_CREDENTIALS` is unset.     |
 | `NATS_SENDER_IDENTITY`   | `senderIdentity` | `off` or `signed`.                                      |
 | `NATS_MIN_SENDER_TRUST`  | `minSenderTrust` | `any` or `signed`; independent of sender identity.      |
-| `NATS_TRACING`           | `tracing`        | `off` or `on`.                                          |
 
 ### Resolution order
 
@@ -170,45 +168,6 @@ the plugin does not silently connect with a different credential source. NATS
 contexts support token, user/password, creds, nkey, JWT+seed, and TLS settings.
 Signed identity requires a user seed in that selected source (creds, nkey, or
 JWT+seed). It never accepts a second identity-only credentials path.
-
-### Tracing
-
-Tracing is off by default. With `tracing: "on"` (or `NATS_TRACING=on`) the
-plugin takes part in the SDKs' observability tracing extension:
-
-- A traced caller's thread and root ids arrive on the envelope and are
-  adopted; a prompt without them gets a freshly minted thread. A malformed id
-  is rejected with `400`, as the SDK does.
-- **OpenClaw's model calls carry a trace id the plugin chooses.** A channel
-  plugin cannot add headers to the harness's provider requests, but OpenClaw
-  puts a W3C `traceparent` header on every model call of a turn, with a trace
-  id inherited from the trace scope active when the turn was dispatched. For
-  each prompt the plugin mints a fresh trace id and dispatches the turn
-  inside that scope, so every model call of the turn carries it. The
-  caller's thread id never reaches a model provider.
-- The plugin publishes the binding: for every prompt, two signed `served`
-  records on `TRACE.edges` — one stamped with the prompt's arrival and one
-  when the turn ends with `status` `ok` or `error` — naming the thread and,
-  as the harness thread id, bare, next to `harness: openclaw`. The model calls carrying
-  that trace id between the two belong to the thread.
-- `status` is `error` when the dispatch threw or OpenClaw reported a
-  dispatch or delivery failure for the turn. A model error that OpenClaw
-  answers as reply text ends the turn normally, with `ok`.
-- OpenClaw runs every NATS prompt in one session, one turn at a time. A
-  prompt that arrives while another turn is running waits inside OpenClaw,
-  but its `start` record is stamped with its arrival at the plugin, so its
-  window can open before the previous turn's `end`. The trace id, not the
-  window, tells the two turns' calls apart.
-- The trace scope is carried through OpenClaw's turn queue on 2026.8 and
-  later. On 2026.5.4 the model calls carry a trace id of OpenClaw's own
-  instead, and the served pair names an id no call carries.
-- Identity is required: records are signed with the host identity, so with
-  `senderIdentity: "off"` nothing is published, the gateway logs a warning at
-  startup, and every record owed counts as dropped on the heartbeat's
-  `records_dropped`.
-
-The plugin exposes no tool for prompting other agents, so it writes no `edge`
-records of its own.
 
 ## Verify
 
@@ -359,7 +318,6 @@ The agent subject layout has no per-tenant slot. For real isolation between tena
 - **`[nats] connection closed — agent is off-bus until restart`** — terminal. The client gave up reconnecting; the typical cause is repeated identical auth errors (the one path nats.js does not retry through, regardless of our defaults). Check `url` and (if using credentials) that the `.creds` file exists and is readable by the gateway process, then restart.
 - **Signed identity fails at startup** — the selected connection source must contain a user seed, and that credential identity must match the live connection. Do not configure a separate identity credentials file.
 - **A context error no longer falls back to another URL** — contexts are complete identity-bearing connection sources. Fix or unset the explicitly selected context instead of relying on an implicit downgrade.
-- **`tracing is on but senderIdentity is off`** — served records are signed with the host identity. Set `senderIdentity: "signed"` (with a credential source that carries a user seed) or turn tracing off.
 - **`nats req` returns only the initial ack and exits** — pass `--reply-timeout 30s` (default is 300 ms, shorter than the gap between the ack chunk and the LLM's first response). See the "Talk to your agent" section above for the full command. `--wait-for-empty` alone isn't enough.
 - **`nats req` hangs or returns nothing** — pass `--wait-for-empty`. The protocol ends streams with an empty-body message, not a single response.
 - **`400 attachment[N] has invalid base64 content`** — the caller emitted URL-safe base64 or unpadded output. `Buffer.from(bytes).toString("base64")` (Node) produces the right form.

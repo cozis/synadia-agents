@@ -247,21 +247,6 @@ export const natsPlugin = createChatChannelPlugin<ResolvedNatsAccount>({
               : 'Minimum sender trust must be "any" or "signed"';
           },
         },
-        {
-          inputKey: "tracing",
-          message:
-            "Observability tracing (off or on; default off — on needs sender identity signed)",
-          placeholder: "off",
-          required: false,
-          currentValue: ({ cfg, accountId }: Record<string, unknown>) =>
-            rawAccountString(cfg, accountId, "tracing"),
-          validate: (input: unknown) => {
-            const value = inputValue(input).trim();
-            return !value || value === "off" || value === "on"
-              ? null
-              : 'Tracing must be "off" or "on"';
-          },
-        },
       ],
       completionNote: {
         title: "NATS Agent Ready",

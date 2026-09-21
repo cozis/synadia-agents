@@ -1,11 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { AsyncLocalStorage } from "node:async_hooks";
-import { activeTrace, bindActiveTrace } from "@synadia-ai/agents";
-import {
-	injectInScope,
-	resolveConnectionSettings,
-	traceOptionsFor,
-} from "../extensions/nats-channel.ts";
+import { resolveConnectionSettings } from "../extensions/nats-channel.ts";
 
 describe("PI connection settings", () => {
 	test("identity-free and permissive are independent defaults", () => {
@@ -14,35 +8,7 @@ describe("PI connection settings", () => {
 			contextLabel: "default",
 			senderIdentity: "off",
 			minSenderTrust: "any",
-			tracing: "off",
 		});
-	});
-
-	test("tracing is off by default; env beats config; other values are rejected", () => {
-		expect(resolveConnectionSettings({ tracing: "on" }, {})).toMatchObject({ tracing: "on" });
-		expect(resolveConnectionSettings({ tracing: "on" }, { NATS_TRACING: "off" })).toMatchObject({
-			tracing: "off",
-		});
-		expect(() => resolveConnectionSettings({}, { NATS_TRACING: "yes" })).toThrow(
-			"NATS_TRACING/tracing must be one of off, on",
-		);
-	});
-
-	test("trace options are propagate-only when tracing is on", () => {
-		expect(traceOptionsFor({ tracing: "off" })).toBeUndefined();
-		expect(traceOptionsFor({ tracing: "on" })).toEqual({ edgeSubject: null });
-	});
-
-	test("a prompt is handed to PI in its own trace scope, never the injecting caller's", () => {
-		const a = { threadId: "a".repeat(32), rootId: "a".repeat(32), turnCountHint: 0 };
-		const b = { threadId: "b".repeat(32), rootId: "b".repeat(32), turnCountHint: 0 };
-		// Injected from inside A's handler (the common case): PI sees B.
-		expect(bindActiveTrace(a, () => injectInScope(b, () => activeTrace()))).toBe(b);
-		// An untraced prompt injected from inside A's handler sees no scope,
-		// where the runtime can snapshot the extension's own context.
-		const neutral = bindActiveTrace(a, () => injectInScope(undefined, () => activeTrace()));
-		if (typeof AsyncLocalStorage.snapshot === "function") expect(neutral).toBeUndefined();
-		else expect(neutral).toBe(a);
 	});
 
 	test("context wins over URL and is passed to the shared bundle helper", () => {

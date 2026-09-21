@@ -11,23 +11,8 @@ describe('resolveRuntimeSettings', () => {
       connectionLabel: 'default: demo.nats.io',
       senderIdentity: 'off',
       minSenderTrust: 'any',
-      tracing: 'off',
       permissionMode: 'terminal',
     })
-  })
-
-  test('tracing is off by default and independent of identity', () => {
-    expect(resolveRuntimeSettings({ tracing: 'on' }, {})).toMatchObject({
-      senderIdentity: 'off',
-      tracing: 'on',
-    })
-    expect(resolveRuntimeSettings({ tracing: 'off' }, { NATS_TRACING: 'on' })).toMatchObject({
-      tracing: 'on',
-    })
-    expect(resolveRuntimeSettings({ tracing: 'on' }, { NATS_TRACING: 'off' })).toMatchObject({
-      tracing: 'off',
-    })
-    expect(() => resolveRuntimeSettings({}, { NATS_TRACING: 'yes' })).toThrow('invalid tracing')
   })
 
   test('keeps identity and inbound trust independent', () => {
@@ -59,7 +44,6 @@ describe('resolveRuntimeSettings', () => {
       connectionLabel: 'context: production',
       senderIdentity: 'signed',
       minSenderTrust: 'signed',
-      tracing: 'off',
       permissionMode: 'terminal',
     })
   })
@@ -88,9 +72,6 @@ describe('resolveRuntimeSettings', () => {
 
       writeFileSync(path, JSON.stringify({ senderIdentity: 42 }))
       expect(() => loadConfig(path)).toThrow('invalid senderIdentity')
-
-      writeFileSync(path, JSON.stringify({ tracing: true }))
-      expect(() => loadConfig(path)).toThrow('invalid tracing')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

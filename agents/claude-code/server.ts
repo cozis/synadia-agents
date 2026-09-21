@@ -10,10 +10,8 @@ import {
 import { connect, type NatsConnection } from "@nats-io/transport-node";
 import {
   Agents,
-  DEFAULT_EDGE_SUBJECT,
   IdentityError,
   NatsContextError,
-  activeTrace,
   formatSender,
   parseHumanBytes,
   resolveNatsConnectionBundle,
@@ -38,18 +36,6 @@ import {
   type NatsChannelConfig,
 } from "./src/config.js";
 import { loadPluginVersion } from "./src/plugin-version.js";
-import {
-  ServedPublisher,
-  type ServedStatus,
-  type ServedTurn,
-} from "./src/served.js";
-import {
-  claudePid,
-  resolveClaudeSessionId,
-  sweepDeadSessions,
-  type SessionIdSource,
-} from "./src/session-id.js";
-import { turnStopWaiter, type TurnStopWaiter } from "./src/turn-stop.js";
 
 const AGENT_ID = "claude-code";
 const AGENT_SUBJECT_TOKEN = "cc";
@@ -76,10 +62,6 @@ type PendingRequest = {
   readonly completion: Deferred;
   readonly handlerClosed: Deferred;
   readonly attachmentDir?: string;
-  /** This prompt's served pair when tracing is on; `end` carries `outcome`. */
-  readonly served?: ServedTurn;
-  /** How the turn ended, for the served pair; `ok` until something else happens. */
-  outcome: ServedStatus;
 };
 
 type StagedAttachment = { readonly filename: string; readonly path: string };
@@ -300,17 +282,6 @@ async function run(): Promise<void> {
 
   const config = loadConfig(join(stateDir, "config.json"));
   const settings = resolveRuntimeSettings(config, process.env);
-  // Tracing: where the Claude Code session id comes from — the SessionStart
-  // hook's file for the Claude Code process that spawned this server, then
-  // the environment that process handed down. Files of Claude Code
-  // processes that are gone are swept now; a live one keeps its files
-  // across a restart of this server.
-  const sessionSource: SessionIdSource = {
-    env: process.env,
-    stateDir,
-    parentPid: claudePid(process.env, process.ppid),
-  };
-  if (settings.tracing === "on") sweepDeadSessions(stateDir);
   let bundle: NatsConnectionBundle | undefined;
   let nc: NatsConnection | undefined;
   let service: AgentService | undefined;
@@ -325,13 +296,7 @@ async function run(): Promise<void> {
       source: settings.connectionLabel,
       senderIdentity: settings.senderIdentity,
       minSenderTrust: settings.minSenderTrust,
-      tracing: settings.tracing,
     });
-    if (settings.tracing === "on" && settings.senderIdentity !== "signed") {
-      logEvent(
-        "warning: tracing is on but senderIdentity is off; trace records are signed, so none will be published",
-      );
-    }
     nc = await connect(withAgentReconnectDefaults(bundle.connectionOptions));
 
     const owner = resolveOwner(config);
@@ -342,9 +307,6 @@ async function run(): Promise<void> {
     );
     const maxPayloadBytes = nc.info?.max_payload ?? DEFAULT_MAX_PAYLOAD_BYTES;
     const pendingRequests = new Map<string, PendingRequest>();
-    // Tracing: served pairs of answered prompts waiting for the turn's Stop,
-    // each with the promise that settles its pair.
-    const stopWaiters = new Map<TurnStopWaiter, Promise<void>>();
     let requestCounter = 0;
     let lastActiveRequestId: string | undefined;
     let shuttingDown = false;
@@ -402,46 +364,16 @@ async function run(): Promise<void> {
       ...(settings.senderIdentity === "signed"
         ? { identity: { signer: bundle.signer! } }
         : {}),
-      // Tracing: adopt the caller's thread and root, or mint them for an
-      // envelope that carries none, exactly as an SDK-built agent does. The
-      // channel exposes no tool that prompts other agents, so it writes no
-      // edge record; the served pair below is its own record, and the
-      // service reports the process-wide record counts on its heartbeat.
-      ...(settings.tracing === "on" ? { trace: {} } : {}),
     });
-
-    // Tracing: the served pair per prompt binds the caller's thread to the
-    // Claude Code session whose model calls answer it. It is signed with
-    // the host identity, which the service only knows once it has started,
-    // hence the getter.
-    const served =
-      settings.tracing === "on"
-        ? new ServedPublisher({
-            nc,
-            subject: DEFAULT_EDGE_SUBJECT,
-            signer: bundle.signer,
-            identity: () => service?.identity,
-            logger: protocolLogger,
-          })
-        : undefined;
 
     service.onPrompt(async (envelope, response) => {
       if (shuttingDown) throw new Error("channel shutting down");
-      // Tracing: open this prompt's served pair on arrival. The service
-      // bound the prompt's trace scope as the ambient one for this handler;
-      // the session id is read now, so a `/clear` during the turn does not
-      // move the binding, and `start` goes out at once.
-      const servedTurn = served?.beginTurn(activeTrace());
-      servedTurn?.bind(resolveClaudeSessionId(sessionSource));
       const requestId = String(++requestCounter);
-      let staged: StagedAttachment[];
-      try {
-        staged = stageAttachments(attachmentRoot, requestId, envelope.attachments);
-      } catch (error) {
-        // The prompt fails before it is pending: close its window here.
-        servedTurn?.settle("error");
-        throw error;
-      }
+      const staged = stageAttachments(
+        attachmentRoot,
+        requestId,
+        envelope.attachments,
+      );
       const completion = deferred();
       const handlerClosed = deferred();
       const pending: PendingRequest = {
@@ -453,8 +385,6 @@ async function run(): Promise<void> {
         ...(staged.length > 0
           ? { attachmentDir: join(attachmentRoot, requestId) }
           : {}),
-        ...(servedTurn ? { served: servedTurn } : {}),
-        outcome: "ok",
       };
       pendingRequests.set(requestId, pending);
       lastActiveRequestId = requestId;
@@ -485,36 +415,9 @@ async function run(): Promise<void> {
           throw new Error("channel delivery failed");
         }
         await completion.promise;
-      } catch (error) {
-        // Expiry marks the outcome itself; anything else that ends the turn
-        // without an answer is an error.
-        if (pending.outcome === "ok") pending.outcome = "error";
-        throw error;
       } finally {
         removePending(requestId);
         handlerClosed.resolve();
-        // Tracing: `end` carries the outcome. An answered prompt's turn
-        // goes on past the reply — Claude Code still writes its closing
-        // text — so `end` waits for the Stop hook (bounded) and takes its
-        // time; a failed or expired turn ends now.
-        if (pending.served !== undefined) {
-          if (pending.outcome === "ok" && !shuttingDown) {
-            const repliedAtMs = Date.now();
-            const waiter = turnStopWaiter(sessionSource, repliedAtMs);
-            const turn = pending.served;
-            stopWaiters.set(
-              waiter,
-              waiter.wait().then((stoppedAt) => {
-                stopWaiters.delete(waiter);
-                // No Stop (hooks off, none within the limit, shutdown): the
-                // reply is the turn end, not the moment the wait gave up.
-                turn.settle("ok", stoppedAt ?? Math.floor(repliedAtMs / 1000));
-              }),
-            );
-          } else {
-            pending.served.settle(pending.outcome);
-          }
-        }
       }
     });
 
@@ -655,7 +558,6 @@ async function run(): Promise<void> {
         if (pending.createdAt >= cutoff || pending.completion.settled())
           continue;
         logEvent("request expired", { requestId, sender: pending.sender });
-        pending.outcome = "timeout";
         pending.completion.reject(new Error("request expired"));
       }
     }, 60_000);
@@ -670,10 +572,6 @@ async function run(): Promise<void> {
       subject: service.subject.prompt,
       identity: service.identity ?? "off",
       minSenderTrust: service.minSenderTrust,
-      tracing: settings.tracing,
-      ...(settings.tracing === "on"
-        ? { claudeSession: resolveClaudeSessionId(sessionSource) ?? "unknown" }
-        : {}),
     });
 
     let shutdownPromise: Promise<void> | undefined;
@@ -696,13 +594,6 @@ async function run(): Promise<void> {
         // Let AgentService turn rejected handlers into their error frame + terminator.
         await Promise.resolve();
         await Promise.resolve();
-        // Prompts answered but still waiting for their turn's Stop end now;
-        // their `end` records, and those of the requests just failed, are
-        // signed asynchronously, so let them reach the connection before
-        // it flushes.
-        for (const waiter of stopWaiters.keys()) waiter.cancel();
-        await Promise.allSettled(stopWaiters.values());
-        await served?.flush();
         await nc!.flush().catch(() => undefined);
         await mcp!.close().catch(() => undefined);
         if (!(await closeConnectionBeforeWipe(nc, bundle!, true))) {

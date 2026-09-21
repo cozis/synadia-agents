@@ -224,6 +224,10 @@ publishes the child `edge` record using the host identity.
 | `wait_for_prompt`      | Waits for the first supplied `prompt_id` to finish or for required `timeout_ms` to elapse. Returns exactly one non-consuming result; use `timeout_ms: 0` to poll.                              |
 | `cancel_prompts`       | Cancels one or more pending prompts.                                                                                                                                                           |
 
+Only the latest successful discovery is cached, for five seconds. A call with
+different filters, or one made after the cache expires, replaces that result.
+`timeout_ms` does not affect cache matching.
+
 Each OpenClaw session retains up to 256 prompts independently. At the limit,
 the oldest terminal result is evicted; a new prompt is rejected if every
 retained prompt is still pending. Response attachments are written to private

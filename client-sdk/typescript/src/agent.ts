@@ -20,6 +20,7 @@ import {
   serializeSenderHeader,
 } from "./identity/sender-header.js";
 import { combineAbortSignals } from "./internal/abort.js";
+import { type Logger, SILENT_LOGGER } from "./internal/logger.js";
 import {
   activeTrace,
   assertValidTraceOptions,
@@ -78,6 +79,7 @@ export class Agent {
   readonly #closeSignal: AbortSignal | undefined;
   readonly #identity: IdentityContext | undefined;
   readonly #trace: TraceOptions | undefined;
+  readonly #logger: Logger;
 
   constructor(
     nc: NatsConnection,
@@ -86,6 +88,7 @@ export class Agent {
     closeSignal: AbortSignal | undefined = undefined,
     identity: IdentityContext | undefined = undefined,
     trace: TraceOptions | undefined = undefined,
+    logger: Logger = SILENT_LOGGER,
   ) {
     this.#nc = nc;
     this.#defaultInactivityTimeoutMs = defaultInactivityTimeoutMs;
@@ -93,6 +96,7 @@ export class Agent {
     this.#identity = identity;
     assertValidTraceOptions(trace);
     this.#trace = trace;
+    this.#logger = logger;
     this.instanceId = info.instanceId;
     this.agent = info.agent;
     this.owner = info.owner;
@@ -214,7 +218,7 @@ export class Agent {
       // envelope lineage need no identity and still happen, so downstream
       // agents that do have one keep tracing.
       if (edgeSubject !== null && !identity?.signer) {
-        warnEdgesUnsigned(this.#nc);
+        warnEdgesUnsigned(this.#nc, this.#logger);
         // The record is due once the prompt goes out, and cannot go out:
         // a drop, counted where the signed path would have published —
         // immediately before the prompt — so a prompt that is never sent
@@ -392,7 +396,10 @@ export class Agent {
       countTraceRecordPublished();
     } catch (err) {
       countTraceRecordDropped();
-      console.warn(`@synadia-ai/agents: failed to publish edge record on ${subject}`, err);
+      this.#logger.warn("failed to publish edge record", {
+        subject,
+        error: String(err),
+      });
     }
   }
 
@@ -421,13 +428,13 @@ export class Agent {
 const MSG_ID_HEADER = "Nats-Msg-Id";
 const warnedUnsigned = new WeakSet<NatsConnection>();
 
-function warnEdgesUnsigned(nc: NatsConnection): void {
+function warnEdgesUnsigned(nc: NatsConnection, logger: Logger): void {
   if (warnedUnsigned.has(nc)) return;
   warnedUnsigned.add(nc);
-  console.warn(
-    "@synadia-ai/agents: tracing is enabled but no identity signer is configured; " +
-      "edge records are not published (consumers ignore unsigned records). " +
-      "Pass identity: { signer } to sign them.",
+  logger.warn(
+    "tracing is enabled but no identity signer is configured; " +
+      "edge records are not published (consumers ignore unsigned records). Pass identity: " +
+      "{ signer } to sign them.",
   );
 }
 

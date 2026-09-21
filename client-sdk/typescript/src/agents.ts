@@ -187,6 +187,7 @@ export class Agents {
       opts,
       this.#identity,
       this.#trace,
+      this.#logger,
     );
   }
 
@@ -257,6 +258,7 @@ export class Agents {
       opts,
       this.#identity,
       this.#trace,
+      this.#logger,
     );
   }
 

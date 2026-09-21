@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { readFile } from "node:fs/promises";
 import { connect, nkeyAuthenticator } from "@nats-io/transport-node";
 import type { NatsConnection } from "@nats-io/nats-core";
-import { Agent, signerFromSeed, traceRecordCounts } from "../../src/index.js";
+import { Agent, type Logger, signerFromSeed, traceRecordCounts } from "../../src/index.js";
 import { IdentityContext } from "../../src/identity/context.js";
 import { buildAgentInfo } from "../../src/discovery/agent-info.js";
 import {
@@ -68,7 +68,11 @@ describe.skipIf(!bin)("trace record counts", () => {
     vi.restoreAllMocks();
   });
 
-  function agent(identity: IdentityContext | undefined, edgeSubject?: string | null): Agent {
+  function agent(
+    identity: IdentityContext | undefined,
+    edgeSubject?: string | null,
+    logger?: Logger,
+  ): Agent {
     return new Agent(
       nc,
       info,
@@ -76,6 +80,7 @@ describe.skipIf(!bin)("trace record counts", () => {
       undefined,
       identity,
       edgeSubject === undefined ? {} : { edgeSubject },
+      logger,
     );
   }
 
@@ -95,7 +100,6 @@ describe.skipIf(!bin)("trace record counts", () => {
   });
 
   it("counts a record due without an identity to sign it as dropped", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const before = traceRecordCounts();
     await drain(agent(undefined));
     const after = traceRecordCounts();
@@ -104,7 +108,6 @@ describe.skipIf(!bin)("trace record counts", () => {
   });
 
   it("counts nothing for an unsigned prompt that never goes out", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const before = traceRecordCounts();
     await agent(undefined).prompt("hi"); // returned, never iterated
     await new Promise((r) => setTimeout(r, 100));
@@ -112,17 +115,34 @@ describe.skipIf(!bin)("trace record counts", () => {
   });
 
   it("counts a record whose publish threw as dropped, and the prompt still goes out", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const warnings: Array<{
+      message: string;
+      context: Record<string, unknown> | undefined;
+    }> = [];
+    const logger: Logger = {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: (message, context) => warnings.push({ message, context }),
+      error: () => undefined,
+    };
     const realPublish = nc.publish.bind(nc);
     vi.spyOn(nc, "publish").mockImplementation((subject, data, opts) => {
       if (subject === "TRACE.edges") throw new Error("connection draining");
       return realPublish(subject, data, opts);
     });
     const before = traceRecordCounts();
-    await drain(agent(new IdentityContext(nc, { signer: signerFromSeed(ALICE.seed) })));
+    await drain(
+      agent(new IdentityContext(nc, { signer: signerFromSeed(ALICE.seed) }), undefined, logger),
+    );
     const after = traceRecordCounts();
     expect(after.published - before.published).toBe(0);
     expect(after.dropped - before.dropped).toBe(1);
+    expect(warnings).toEqual([
+      {
+        message: "failed to publish edge record",
+        context: { subject: "TRACE.edges", error: "Error: connection draining" },
+      },
+    ]);
   });
 
   it("counts nothing in propagate-only mode, where no record is due", async () => {

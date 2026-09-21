@@ -155,7 +155,17 @@ interface TraceBinding {
   readonly options: TraceOptions | undefined;
 }
 
-const storage = new AsyncLocalStorage<TraceBinding>();
+// Hosts that bundle both `@synadia-ai/agent-service` and
+// `@synadia-ai/agents` can legitimately contain more than one physical copy
+// of this module. Keep one process-wide store so a service copy and a client
+// copy still observe the same active request scope.
+const TRACE_BINDING_STORAGE = Symbol.for("@synadia-ai/agents:active-trace-binding");
+const storage = (() => {
+  const root = globalThis as typeof globalThis & {
+    [TRACE_BINDING_STORAGE]?: AsyncLocalStorage<TraceBinding>;
+  };
+  return (root[TRACE_BINDING_STORAGE] ??= new AsyncLocalStorage<TraceBinding>());
+})();
 
 /**
  * Run `fn` with `scope` as the ambient execution (used by the agent

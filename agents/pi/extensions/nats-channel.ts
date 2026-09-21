@@ -34,6 +34,7 @@ import { connect, type NatsConnection } from "@nats-io/transport-node";
 import { Svcm } from "@nats-io/services";
 
 import {
+  Agents,
   AgentSubject,
   SDK_PROTOCOL_VERSION,
   SERVICE_NAME,
@@ -59,7 +60,9 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
+import { discoverAgents, promptAgent } from "./agent-tools.ts";
 import { PiPromptQueue, type QueuedPiPrompt } from "./prompt-queue.ts";
 import { resolveOwner, sanitizeSubjectToken } from "./subject.ts";
 
@@ -129,9 +132,9 @@ export type PiConnectionSettings = {
 
 /**
  * The SDK trace options for the resolved settings; `undefined` when off.
- * Propagate-only: PI adopts or mints the thread and stamps it on its model
- * calls, but publishes no edge records — the extension exposes no tool
- * that prompts other agents, so there is nothing to record.
+ * Propagate-only on the service side: PI adopts or mints the thread and
+ * stamps it on its model calls. The separate Agents client used by
+ * `prompt_agent` publishes child edges with its normal trace configuration.
  */
 export function traceOptionsFor(
   settings: Pick<PiConnectionSettings, "tracing">,
@@ -154,7 +157,10 @@ const neutralContext: (<T>(fn: () => T) => T) | undefined =
  * any SDK client a PI tool might use inside it — sees this request's
  * thread and nothing else's. Exported for tests.
  */
-export function injectInScope<T>(scope: TraceScope | undefined, fn: () => T): T {
+export function injectInScope<T>(
+  scope: TraceScope | undefined,
+  fn: () => T,
+): T {
   const run = scope === undefined ? fn : () => bindActiveTrace(scope, fn);
   return neutralContext === undefined ? run() : neutralContext(run);
 }
@@ -269,6 +275,7 @@ async function resolveSessionName(
 
 export default function (pi: ExtensionAPI) {
   let nc: NatsConnection | undefined;
+  let agentClient: Agents | undefined;
   let service: AgentService | undefined;
   let connectionBundle: NatsConnectionBundle | undefined;
   let promptSubject: string | undefined;
@@ -490,6 +497,8 @@ export default function (pi: ExtensionAPI) {
       await connectTask?.catch(() => undefined);
     }
     promptQueue.failAll("PI session shut down before the prompt completed");
+    await agentClient?.close().catch(() => undefined);
+    agentClient = undefined;
     // Let AgentService observe every rejected deferred handler and publish
     // its error + terminator before the endpoint and connection disappear.
     await Promise.resolve();
@@ -655,6 +664,13 @@ export default function (pi: ExtensionAPI) {
           "signed sender identity resolved without a connection-bound signer",
         );
       }
+      agentClient = new Agents({
+        nc: conn,
+        ...(signer ? { identity: { signer } } : {}),
+        // The service uses propagate-only tracing. The caller side publishes
+        // an edge for prompt_agent, inheriting the request scope bound below.
+        ...(traceOptions ? { trace: {} } : {}),
+      });
       const agentService = new AgentService({
         nc: conn,
         agent: AGENT_ID,
@@ -840,6 +856,65 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ───────────────────────────────────────────────────────────────────────
+  // Agent-network tools
+  // ───────────────────────────────────────────────────────────────────────
+
+  pi.registerTool({
+    name: "discover_agents",
+    label: "Discover agents",
+    description:
+      "Discover agents reachable on NATS. Returns instance_id values for prompt_agent. All filters are optional and AND-matched.",
+    parameters: Type.Object({
+      agent: Type.Optional(Type.String({ minLength: 1 })),
+      owner: Type.Optional(Type.String({ minLength: 1 })),
+      name: Type.Optional(Type.String({ minLength: 1 })),
+      session: Type.Optional(Type.String({ minLength: 1 })),
+      timeout_ms: Type.Optional(Type.Integer({ minimum: 1, maximum: 30_000 })),
+    }),
+    async execute(_toolCallId, params) {
+      const client = agentClient;
+      if (!client) throw new Error("NATS is not connected");
+      const result = await discoverAgents(client, params);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        details: result,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "prompt_agent",
+    label: "Prompt agent",
+    description:
+      "Prompt one agent instance returned by discover_agents and collect its streamed response. Interactive queries receive query_response, or a conservative denial when omitted.",
+    parameters: Type.Object({
+      instance_id: Type.String({ minLength: 1 }),
+      prompt: Type.String({ minLength: 1 }),
+      max_wait_ms: Type.Optional(
+        Type.Integer({ minimum: 1, maximum: 3_600_000 }),
+      ),
+      query_response: Type.Optional(Type.String()),
+    }),
+    async execute(toolCallId, params, signal) {
+      const client = agentClient;
+      if (!client) throw new Error("NATS is not connected");
+      // PI normally preserves the scope seeded by injectInScope(). The queue
+      // fallback makes the handoff explicit if a host release schedules tool
+      // execution from a neutral async context.
+      const scope = activeTrace() ?? promptQueue.active?.trace;
+      const result = await promptAgent(client, params, {
+        signal,
+        toolCallId,
+        ...(scope ? { traceScope: scope } : {}),
+      });
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        details: result,
+      };
+    },
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
   // Commands
   // ───────────────────────────────────────────────────────────────────────
 
@@ -936,7 +1011,7 @@ export default function (pi: ExtensionAPI) {
             "senderIdentity",
             tokens[1],
             "off",
-            ["off", "signed"],
+            ["off", "signed"] as const,
           );
           changed = true;
         } catch (e) {
@@ -953,7 +1028,7 @@ export default function (pi: ExtensionAPI) {
             "minSenderTrust",
             tokens[1],
             "any",
-            ["any", "signed"],
+            ["any", "signed"] as const,
           );
           changed = true;
         } catch (e) {

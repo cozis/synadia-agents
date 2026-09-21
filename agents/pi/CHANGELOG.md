@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `discover_agents` and `prompt_agent` model tools. The extension keeps a
+  client on the active NATS connection and passes the current queued prompt's
+  `TraceScope` explicitly, so child calls preserve lineage even if PI invokes
+  a tool outside the original async continuation.
 - Opt-in tracing through `"tracing": "on"` / `NATS_TRACING=on` /
   `/nats-configure tracing on`: the extension adopts or mints the prompt's
   thread and, while a NATS prompt is PI's active turn, stamps
@@ -56,8 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Previously the `owner` field in `~/.pi/agent/nats-channel.json` won
   over `$NATS_PI_OWNER`; now any owner env var wins over the config
   field — uniform with flue, opencode, openclaw, open-agent, and pi's
-  own session-name handling. Only setups that set *both* the config
-  `owner` field *and* an owner env var to different values are
+  own session-name handling. Only setups that set _both_ the config
+  `owner` field _and_ an owner env var to different values are
   affected; everyone else sees no change.
 - `/nats-configure` learns `owner <name|clear>` and shows the owner
   override in its status output.

@@ -63,7 +63,7 @@ Config file lives at `~/.pi/agent/nats-channel.json`:
 | `owner`          | no       | `$USER`                   | The 4th subject token. Override to scope the session to a service account, deployment, or tenant instead of the OS user — sanitized to a legal subject token. The owner env vars (below) take precedence over this field. |
 | `senderIdentity` | no       | `"off"`                   | `"signed"` registers PI with the NATS user identity from the selected connection credentials.                                                                                                                             |
 | `minSenderTrust` | no       | `"any"`                   | `"signed"` accepts only prompts with a signature-valid sender. This is independent of `senderIdentity`.                                                                                                                   |
-| `tracing`        | no       | `"off"`                   | `"on"` adopts or mints the prompt's thread and stamps it on PI's model calls. See [Tracing](#tracing).                                                                                                                     |
+| `tracing`        | no       | `"off"`                   | `"on"` adopts or mints the prompt's thread and stamps it on PI's model calls. See [Tracing](#tracing).                                                                                                                    |
 
 The `owner` token (4th) defaults to `$USER` but is overridable via the `SYNADIA_PI_OWNER` / `SYNADIA_OWNER` env vars (or the legacy `NATS_PI_OWNER`), or the `owner` config field — env wins over config. Useful for service-account or deployment-scoped sessions. For multi-tenant isolation, see [Multi-tenancy](#multi-tenancy) below.
 
@@ -153,14 +153,21 @@ SDK-built agent does:
 - With tracing off nothing is stamped, even for a caller that sent lineage:
   the service still adopts the ids for the envelope, the model never sees
   them.
-- Nothing is published on NATS for it, and no sender identity is needed. The
-  extension exposes no tool for prompting other agents, so it writes no
-  `edge` records; the SDK's propagate-only mode is what tracing turns on.
-  `/nats-status` reports the setting.
+- The service itself is propagate-only, so receiving a prompt publishes
+  nothing and needs no sender identity. `prompt_agent`, however, is an SDK
+  client call: when tracing is on it publishes a child `edge` record, signed
+  when sender identity is configured. `/nats-status` reports the setting.
 
 What counts as the active turn is the extension's own bookkeeping — PI gives
 an extension no run identity — so see [Limitations](#limitations) for the
 cases where a local action shares the turn with a remote prompt.
+
+### Agent tools
+
+| Tool              | What it does                                                                                                                                                  |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `discover_agents` | Discovers reachable agents and returns their `instance_id` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched.                  |
+| `prompt_agent`    | Prompts one discovered `instance_id`, collects its streamed response, and handles interactive queries with `query_response` or a conservative default denial. |
 
 ### In-PI commands
 

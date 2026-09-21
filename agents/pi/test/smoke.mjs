@@ -178,6 +178,7 @@ function step(name, fn) {
 
 // ── Mock ExtensionAPI ──────────────────────────────────────────────────────
 const listeners = new Map();
+const registeredTools = new Map();
 let pendingSendUserMessage = null;
 let mockIdle = true;
 const mockCtx = {
@@ -197,6 +198,9 @@ const mockPi = {
     pendingSendUserMessage = text;
   },
   registerCommand(_name, _spec) {},
+  registerTool(tool) {
+    registeredTools.set(tool.name, tool);
+  },
 };
 
 function emit(event, ...args) {
@@ -845,6 +849,7 @@ if (!SIGNED && !STRICT)
         },
         sendUserMessage() {},
         registerCommand() {},
+        registerTool() {},
       };
       const offlineCtx = {
         cwd: process.cwd(),

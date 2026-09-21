@@ -15,6 +15,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- The active trace binding now uses a process-global async store. A bundled
+  host containing separate physical copies of `@synadia-ai/agents` for its
+  service and client no longer splits the active scope between those copies.
 - **Trace record counts.** The SDK counts the trace records it handed to
   the connection and the ones it could not — no identity to sign with, or
   a publish that threw — process-wide, counted from process start. These

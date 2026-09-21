@@ -8,7 +8,8 @@
 // attach an `Agent-Sender` header only when identity was explicitly enabled.
 //
 // Prompt interceptors: the handle also carries its client's interceptors,
-// which `prompt()` runs at publish time (see `prompt/interceptor.ts`).
+// which `prompt()` runs at publish time, in two phases (see
+// `prompt/interceptor.ts`).
 
 import { AsyncResource } from "node:async_hooks";
 import { Empty, headers, type MsgHdrs, type NatsConnection } from "@nats-io/nats-core";
@@ -26,6 +27,7 @@ import {
 } from "./identity/sender-header.js";
 import { signedPublishHeaders, toBytes } from "./identity/signed-publish.js";
 import { combineAbortSignals } from "./internal/abort.js";
+import { type Logger, SILENT_LOGGER } from "./internal/logger.js";
 import { STATUS_ENDPOINT_NAME } from "./internal/service-name.js";
 import { normalizeAttachments } from "./prompt/attachments.js";
 import {
@@ -87,6 +89,7 @@ export class Agent {
   readonly #closeSignal: AbortSignal | undefined;
   readonly #identity: IdentityContext | undefined;
   readonly #interceptors: ReadonlyArray<PromptInterceptor>;
+  readonly #logger: Logger;
 
   constructor(
     nc: NatsConnection,
@@ -95,12 +98,14 @@ export class Agent {
     closeSignal: AbortSignal | undefined = undefined,
     identity: IdentityContext | undefined = undefined,
     interceptors: ReadonlyArray<PromptInterceptor> = [],
+    logger: Logger = SILENT_LOGGER,
   ) {
     this.#nc = nc;
     this.#defaultInactivityTimeoutMs = defaultInactivityTimeoutMs;
     this.#closeSignal = closeSignal;
     this.#identity = identity;
     this.#interceptors = Object.freeze([...interceptors]);
+    this.#logger = logger;
     this.instanceId = info.instanceId;
     this.agent = info.agent;
     this.owner = info.owner;
@@ -180,20 +185,7 @@ export class Agent {
     const subject = opts.subject ?? this.promptEndpoint.subject;
     const sub = opts.sub ?? subject;
     const requireSigned = this.promptEndpoint.minSenderTrust === "signed";
-    // Bound here, while the async context is still the caller's: the
-    // interceptors run at publish time, when it may be another one.
-    const intercept =
-      this.#interceptors.length > 0
-        ? AsyncResource.bind((): Promise<CollectedExtras> =>
-            collectExtras(this.#interceptors, {
-              agent: this,
-              prompt: text,
-              context: opts.context ?? EMPTY_CONTEXT,
-              connection: this.#nc,
-              identity: this.#signing(),
-            }),
-          )
-        : undefined;
+    const intercept = this.#interception(text, opts.context ?? EMPTY_CONTEXT, subject);
     const identity = this.#identity;
     if (requireSigned && !identity?.signer) {
       throw new SenderSignatureRequiredError(subject);
@@ -241,7 +233,7 @@ export class Agent {
     sub: string,
     requireSigned: boolean,
     opts: PromptOptions,
-    intercept: (() => Promise<CollectedExtras>) | undefined,
+    intercept: Interception | undefined,
   ): Promise<PromptStream> {
     // Encode once; the header (when signed) covers exactly these bytes —
     // unless an interceptor adds fields, when the envelope is encoded again
@@ -289,11 +281,12 @@ export class Agent {
    *
    * The sender identity is planned again first — a reconnect after
    * `prompt()` may invalidate the initial one, and a captured plan must
-   * never survive it — so an identity that cannot be had fails the prompt
-   * before any interceptor publishes. The interceptors run next; their
+   * never survive it. The interceptors' first phase runs next; their
    * fields make the envelope be encoded again, and the exact `max_payload`
    * check covers the bytes that go out. The `Agent-Sender` header is
-   * signed last, over those bytes.
+   * signed over those bytes. Only then, with nothing left that can refuse
+   * the prompt, does their second phase run — immediately before the
+   * stream publishes what this returns.
    */
   async #prepareAtPublish(
     envelope: RequestEnvelope,
@@ -301,13 +294,14 @@ export class Agent {
     sub: string,
     requireSigned: boolean,
     identityEnabled: boolean,
-    intercept: (() => Promise<CollectedExtras>) | undefined,
+    intercept: Interception | undefined,
   ): Promise<PreparedRequest> {
     const plan = identityEnabled ? await this.#planHeader(sub, requireSigned) : undefined;
     let payload = planned;
     let hdrs: MsgHdrs | undefined;
+    let collected: CollectedExtras | undefined;
     if (intercept) {
-      const extras = await intercept();
+      const extras = (collected = await intercept.extend());
       if (extras.fields !== undefined) {
         payload = encodeEnvelope({ ...envelope, extras: extras.fields });
         if (!plan) {
@@ -329,7 +323,37 @@ export class Agent {
       hdrs ??= headers();
       hdrs.set(AGENT_SENDER_HEADER, serializeSenderHeader(await plan.build(payload)));
     }
+    if (intercept && collected) await intercept.publish(collected.results);
     return hdrs !== undefined ? { payload, headers: hdrs } : { payload };
+  }
+
+  /**
+   * Both interceptor phases for one prompt, or `undefined` without
+   * interceptors. Bound here, while the async context is still the
+   * caller's: they run at publish time, when it may be another one. Both
+   * phases get the same context object.
+   */
+  #interception(
+    prompt: string,
+    context: Readonly<Record<string, unknown>>,
+    subject: string,
+  ): Interception | undefined {
+    const interceptors = this.#interceptors;
+    if (interceptors.length === 0) return undefined;
+    const ctx: PromptInterceptorContext = {
+      agent: this,
+      prompt,
+      context,
+      connection: this.#nc,
+      identity: this.#signing(),
+    };
+    const logger = this.#logger;
+    return {
+      extend: AsyncResource.bind(() => collectExtras(interceptors, ctx)),
+      publish: AsyncResource.bind((results: ReadonlyArray<PromptExtras | undefined>) =>
+        runBeforePublish(interceptors, ctx, results, logger, subject),
+      ),
+    };
   }
 
   /** Signing with this handle's identity, for its prompt interceptors. */
@@ -395,10 +419,18 @@ export class Agent {
 
 const EMPTY_CONTEXT: Readonly<Record<string, unknown>> = Object.freeze({});
 
-/** The interceptors' additions to one prompt, merged. */
+/** The interceptors' additions to one prompt, merged, and what each returned. */
 interface CollectedExtras {
   readonly fields?: Readonly<Record<string, unknown>>;
   readonly headers?: Readonly<Record<string, string>>;
+  /** Each interceptor's `beforePrompt` result, in order, for its `beforePublish`. */
+  readonly results: ReadonlyArray<PromptExtras | undefined>;
+}
+
+/** The two interceptor phases of one prompt, bound to the caller's context. */
+interface Interception {
+  readonly extend: () => Promise<CollectedExtras>;
+  readonly publish: (results: ReadonlyArray<PromptExtras | undefined>) => Promise<void>;
 }
 
 /**
@@ -415,8 +447,10 @@ async function collectExtras(
   // key as an own property — a field named `__proto__` included.
   const fields = new Map<string, unknown>();
   const hdrs = new Map<string, string>();
+  const results: Array<PromptExtras | undefined> = [];
   for (const interceptor of interceptors) {
     const extras = (await interceptor.beforePrompt(ctx)) as PromptExtras | undefined;
+    results.push(extras);
     if (extras === undefined) continue;
     for (const [key, value] of Object.entries(extras.fields ?? {})) {
       if (isEnvelopeField(key)) {
@@ -436,5 +470,33 @@ async function collectExtras(
   return {
     ...(fields.size > 0 ? { fields: Object.fromEntries(fields) } : {}),
     ...(hdrs.size > 0 ? { headers: Object.fromEntries(hdrs) } : {}),
+    results,
   };
+}
+
+/**
+ * The interceptors' second phase, in order, each with what its own first
+ * phase returned. The prompt is due to go out by now, so a throw does not
+ * stop it — nor the interceptors after the one that threw: it is logged
+ * (the interceptor is application code, so its exception is not).
+ */
+async function runBeforePublish(
+  interceptors: ReadonlyArray<PromptInterceptor>,
+  ctx: PromptInterceptorContext,
+  results: ReadonlyArray<PromptExtras | undefined>,
+  logger: Logger,
+  subject: string,
+): Promise<void> {
+  for (const [index, interceptor] of interceptors.entries()) {
+    if (interceptor.beforePublish === undefined) continue;
+    try {
+      await interceptor.beforePublish(ctx, results[index]);
+    } catch {
+      logger.error("prompt interceptor beforePublish failed; publishing the prompt", {
+        subject,
+        interceptor: index,
+        error: "exception",
+      });
+    }
+  }
 }

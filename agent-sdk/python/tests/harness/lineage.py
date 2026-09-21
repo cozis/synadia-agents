@@ -4,11 +4,12 @@ Test support, not SDK code — the Python twin of the TypeScript suite's
 ``test/support/lineage.ts``. It exists to prove the hooks can carry an
 extension that needs every one of them:
 
-- the caller side (a ``PromptInterceptor``) mints a node id per prompt,
-  inherits root and parent from the ambient scope, publishes one signed
-  record about the prompt before it goes out — the record's id is the
-  header's nonce and the ``Nats-Msg-Id`` — and adds the node and root to
-  the envelope as two extra fields;
+- the caller side (a ``PromptInterceptor``) mints a node id per prompt and
+  inherits root and parent from the ambient scope in its first phase,
+  which adds the node and root to the envelope as two extra fields; its
+  second phase — once the prompt is signed and certain to go out —
+  publishes one signed record about it, whose id is the header's nonce and
+  the ``Nats-Msg-Id``;
 - the host side (a ``RequestInterceptor``) reads those fields back,
   refuses a half pair with ``400``, mints a root when there is none, and
   runs the handler inside the scope, so a client used inside the handler
@@ -62,41 +63,68 @@ class LineageCounts:
     minted: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _PlannedRecord:
+    """What phase one decides about the record phase two publishes."""
+
+    node: str
+    parent: str | None
+    root: str
+    label: str | None
+
+
 class _Caller:
     def __init__(self, lineage: Lineage) -> None:
         self._lineage = lineage
 
     async def before_prompt(self, ctx: PromptInterceptorContext) -> PromptExtras | None:
-        lin = self._lineage
-        ambient = lin.current()
+        # Phase one decides everything and publishes nothing: the prompt
+        # may still fail its size check or its identity at publish time.
+        ambient = self._lineage.current()
         node = _new_id()
         root = ambient.root if ambient is not None else node
         label = ctx.context.get("label")
-        if not ctx.identity.can_sign:
-            # Readers ignore unsigned records: the record is owed and dropped.
-            lin.counts.dropped += 1
-        else:
-            try:
-                record_id = _new_id()
-                record = {
-                    "record_id": record_id,
-                    "agent": str(await ctx.identity.self_id()),
-                    "node": node,
-                    "parent": ambient.node if ambient is not None else None,
-                    "root": root,
-                    "target": ctx.agent.instance_id,
-                    "label": label if isinstance(label, str) else None,
-                }
-                await ctx.identity.publish_signed(
-                    lin.record_subject, json.dumps(record), nonce=record_id
-                )
-                lin.counts.published += 1
-            except Exception:
-                lin.counts.dropped += 1
+        planned = _PlannedRecord(
+            node=node,
+            parent=ambient.node if ambient is not None else None,
+            root=root,
+            label=label if isinstance(label, str) else None,
+        )
         return PromptExtras(
             fields={NODE_FIELD: node, ROOT_FIELD: root},
             headers={NODE_HEADER: node},
+            state=planned,
         )
+
+    async def before_publish(
+        self, ctx: PromptInterceptorContext, extras: PromptExtras | None
+    ) -> None:
+        # Phase two runs only for a prompt that goes out, immediately
+        # before it: the record describes a prompt that was sent.
+        lin = self._lineage
+        assert extras is not None and isinstance(extras.state, _PlannedRecord)
+        planned = extras.state
+        if not ctx.identity.can_sign:
+            # Readers ignore unsigned records: the record is owed and dropped.
+            lin.counts.dropped += 1
+            return
+        try:
+            record_id = _new_id()
+            record = {
+                "record_id": record_id,
+                "agent": str(await ctx.identity.self_id()),
+                "node": planned.node,
+                "parent": planned.parent,
+                "root": planned.root,
+                "target": ctx.agent.instance_id,
+                "label": planned.label,
+            }
+            await ctx.identity.publish_signed(
+                lin.record_subject, json.dumps(record), nonce=record_id
+            )
+            lin.counts.published += 1
+        except Exception:
+            lin.counts.dropped += 1
 
 
 class _Host:

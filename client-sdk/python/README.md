@@ -209,32 +209,52 @@ What to know:
 ## Prompt interceptors
 
 An extension that needs to see or add to every prompt — extra envelope
-fields, extra headers, a signed message of its own published first —
-plugs in as a `PromptInterceptor`:
+fields, extra headers, a signed message of its own about the prompt —
+plugs in as a `PromptInterceptor`, in two phases:
 
 ```python
 import json
 from synadia_ai.agents import Agents, PromptExtras, PromptInterceptorContext
 
 class Tagging:
+    # Phase one: what the prompt carries. No side effects.
     async def before_prompt(self, ctx: PromptInterceptorContext) -> PromptExtras | None:
         # ctx.agent, ctx.prompt, ctx.context (prompt(context=...)), ctx.connection
-        if ctx.identity.can_sign:
-            body = json.dumps({"to": ctx.agent.instance_id})
+        request_id = str(ctx.context.get("request_id", "none"))
+        return PromptExtras(
+            fields={"x_request": request_id},
+            headers={"X-Request": request_id},
+            state=request_id,
+        )
+
+    # Phase two (optional): the prompt is signed and checked, and goes out right after.
+    async def before_publish(
+        self, ctx: PromptInterceptorContext, extras: PromptExtras | None
+    ) -> None:
+        if ctx.identity.can_sign and extras is not None:
+            body = json.dumps({"request": extras.state, "to": ctx.agent.instance_id})
             await ctx.identity.publish_signed("audit.prompts", body)
-        return PromptExtras(fields={"x_request": "r-1"}, headers={"X-Request": "r-1"})
 
 agents = Agents(nc=nc, identity=identity, interceptors=[Tagging()])
 async for msg in agent.prompt("hi", context={"request_id": "r-1"}):
     ...
 ```
 
-- Interceptors run in order at publish time — on the stream's first
-  `__anext__`, after the sender identity is resolved and before the
-  `Agent-Sender` header is signed over the final envelope — in a copy of
-  the `contextvars` context `prompt()` was called in. A prompt that is
-  never iterated runs none; an exception fails the prompt before it is
-  sent.
+- Both phases run at publish time — on the stream's first `__anext__` —
+  in one copy of the `contextvars` context `prompt()` was called in, and
+  get the same `ctx`. A prompt that is never iterated, or that `prompt()`
+  itself rejects, runs neither.
+- `before_prompt` runs after the sender identity is resolved and has no
+  side effects: the prompt can still fail after it (the size of the
+  envelope its fields make, its identity). An exception fails the prompt
+  before anything is sent. Several interceptors are merged in order, the
+  later winning a key.
+- `before_publish` (optional; `PublishingPromptInterceptor` types it) runs
+  after the `Agent-Sender` header is signed and the size checked,
+  immediately before the prompt is published, with what the same
+  interceptor's `before_prompt` returned (`state` included). Messages
+  published there describe a prompt that goes out, barring a transport
+  failure. An exception is logged and does not stop the prompt.
 - `fields` are written as top-level envelope fields next to the
   protocol's (§5.6 obliges receivers to tolerate them); a host reads them
   back from `Envelope.extras`. A field the envelope defines and the

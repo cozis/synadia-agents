@@ -180,21 +180,25 @@ What to know:
 
 ### Prompt interceptors
 
-An extension that needs to see or add to every prompt — extra envelope fields, extra headers, a signed message of its own published first — plugs in as a `PromptInterceptor`:
+An extension that needs to see or add to every prompt — extra envelope fields, extra headers, a signed message of its own about the prompt — plugs in as a `PromptInterceptor`, in two phases:
 
 ```ts
 import { Agents, type PromptInterceptor } from "@synadia-ai/agents";
 
 const tagging: PromptInterceptor = {
-  async beforePrompt(ctx) {
+  // Phase one: what the prompt carries. No side effects.
+  beforePrompt(ctx) {
     // ctx.agent, ctx.prompt, ctx.context (PromptOptions.context), ctx.connection
-    if (ctx.identity.canSign) {
-      await ctx.identity.publishSigned(
-        "audit.prompts",
-        JSON.stringify({ to: ctx.agent.instanceId }),
-      );
-    }
-    return { fields: { x_request: "r-1" }, headers: { "X-Request": "r-1" } };
+    const id = String(ctx.context["requestId"] ?? "none");
+    return { fields: { x_request: id }, headers: { "X-Request": id }, state: id };
+  },
+  // Phase two: the prompt is signed and checked, and goes out right after.
+  async beforePublish(ctx, extras) {
+    if (!ctx.identity.canSign) return;
+    await ctx.identity.publishSigned(
+      "audit.prompts",
+      JSON.stringify({ request: extras?.state, to: ctx.agent.instanceId }),
+    );
   },
 };
 
@@ -202,7 +206,9 @@ const agents = new Agents({ nc, identity: { signer }, interceptors: [tagging] })
 await agent.prompt("hi", { context: { requestId: "r-1" } });
 ```
 
-- Interceptors run in order at publish time — on the stream's first iteration, after the sender identity is resolved and before the `Agent-Sender` header is signed over the final envelope — in the async context `prompt()` was called in. A prompt that is never iterated runs none; a throw fails the prompt before it is sent.
+- Both phases run at publish time — on the stream's first iteration — in the async context `prompt()` was called in, and get the same `ctx`. A prompt that is never iterated, or that `prompt()` itself rejects, runs neither.
+- `beforePrompt` runs after the sender identity is resolved and has no side effects: the prompt can still fail after it (the size of the envelope its fields make, its identity). A throw fails the prompt before anything is sent. Several interceptors are merged in order, the later winning a key.
+- `beforePublish` (optional) runs after the `Agent-Sender` header is signed and the size checked, immediately before the prompt is published, with what the same interceptor's `beforePrompt` returned (`state` included). Messages published there describe a prompt that goes out, barring a transport failure. A throw is logged (`new Agents({ logger })`) and does not stop the prompt.
 - `fields` are written as top-level envelope fields next to the protocol's (§5.6 obliges receivers to tolerate them); a host reads them back from `RequestEnvelope.extras`. `prompt`, `attachments` and the `Agent-Sender` header are refused.
 - `ctx.identity.publishSigned(subject, payload, { nonce })` signs with the prompting client's identity; pass `nonce` when the body carries its own id, and it is the header's nonce and the `Nats-Msg-Id` too (also on `agents.publishSigned`).
 - Without interceptors nothing changes on the wire.

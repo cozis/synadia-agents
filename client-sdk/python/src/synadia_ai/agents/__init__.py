@@ -162,6 +162,7 @@ from .interceptor import (
     PromptInterceptor,
     PromptInterceptorContext,
     PromptSigning,
+    PublishingPromptInterceptor,
 )
 from .messages import Chunk, QueryChunk, ResponseChunk, StatusChunk
 from .subjects import AgentSubject
@@ -236,6 +237,7 @@ __all__ = [
     "PromptInterceptorContext",
     "PromptSigning",
     "ProtocolError",
+    "PublishingPromptInterceptor",
     "Query",
     "QueryChunk",
     "QueryTimeout",

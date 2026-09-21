@@ -16,20 +16,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - **Prompt interceptors.** `new Agents({ nc, interceptors: [...] })` — every
-  `Agent` it hands out inherits them; `new Agent(...)` takes them as its last
-  argument. A `PromptInterceptor`'s `beforePrompt(ctx)` runs before each
-  prompt is published: on the stream's first iteration, after the sender
-  identity is resolved and before the `Agent-Sender` header is signed, in
-  the async context `prompt()` was called in. `ctx` carries the target
-  `agent`, the `prompt` text, the opaque `context` from the new
-  `PromptOptions.context`, the `connection`, and `identity` (`PromptSigning`:
-  `canSign`, `selfId()`, `publishSigned()`) to publish signed messages of
-  its own first. It returns `PromptExtras` — extra envelope `fields` and
-  `headers` — or nothing; several are merged in order, the later winning a
-  key. A protocol field (`prompt`, `attachments`) or the `Agent-Sender`
-  header is refused with `NatsAgentError`; a throw fails the prompt before
-  it is sent; a prompt never iterated runs none. Without interceptors
-  nothing changes on the wire.
+  `Agent` it hands out inherits them; `new Agent(...)` takes them (and the
+  client's `logger`) as its last arguments. A `PromptInterceptor` runs at
+  publish time — on the stream's first iteration, in the async context
+  `prompt()` was called in — in two phases that see the same per-prompt
+  `ctx`: the target `agent`, the `prompt` text, the opaque `context` from
+  the new `PromptOptions.context`, the `connection`, and `identity`
+  (`PromptSigning`: `canSign`, `selfId()`, `publishSigned()`).
+  - `beforePrompt(ctx)`, after the sender identity is resolved, returns
+    `PromptExtras` — extra envelope `fields` and `headers`, and a `state`
+    the SDK hands back — or nothing, and has no side effects. Several are
+    merged in order, the later winning a key. A protocol field (`prompt`,
+    `attachments`) or the `Agent-Sender` header is refused with
+    `NatsAgentError`; a throw fails the prompt before anything is sent.
+  - `beforePublish(ctx, extras)`, optional, runs only after the
+    `Agent-Sender` header is signed and the size checked, immediately
+    before the prompt is published, with what that interceptor's
+    `beforePrompt` returned. That is where an interceptor publishes its own
+    messages, so they describe a prompt that goes out; a throw is logged
+    and does not stop the prompt.
+
+  A prompt never iterated, or one `prompt()` itself rejects, runs neither
+  phase.
+  Without interceptors nothing changes on the wire.
+
 - **Envelope extras (§5.6).** `RequestEnvelope.extras`: `encodeEnvelope`
   writes them as top-level fields after the protocol's own (which win a
   clash), and `decodeEnvelope` keeps every top-level field it does not

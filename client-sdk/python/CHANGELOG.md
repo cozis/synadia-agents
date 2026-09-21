@@ -12,21 +12,32 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 - **Prompt interceptors.** `Agents(nc=nc, interceptors=[...])` — every
   `Agent` it hands out inherits them; `Agent(..., interceptors=...)` takes
-  them directly. A `PromptInterceptor`'s `async before_prompt(ctx)` runs
-  before each prompt is published: on the stream's first `__anext__`,
-  after the sender identity is resolved and before the `Agent-Sender`
-  header is signed, in a copy of the `contextvars` context `prompt()` was
-  called in. `ctx` (`PromptInterceptorContext`) carries the target
-  `agent`, the `prompt` text, the opaque `context` from the new
-  `prompt(..., context=...)`, the `connection`, and `identity`
-  (`PromptSigning`: `can_sign`, `self_id()`, `publish_signed()`) to publish
-  signed messages of its own first. It returns `PromptExtras` — extra
-  envelope `fields` and `headers` — or `None`; several are merged in
-  order, the later winning a key. A field the envelope defines or the
-  `Agent-Sender` header is refused with `NatsAgentError`; an exception fails
-  the prompt before it is sent; a prompt never iterated runs none. Without
-  interceptors nothing changes on the wire. The TypeScript SDK has the
-  same hook.
+  them directly. A `PromptInterceptor` runs at publish time — on the
+  stream's first `__anext__`, in a copy of the `contextvars` context
+  `prompt()` was called in — in two phases that see the same per-prompt
+  `ctx` (`PromptInterceptorContext`): the target `agent`, the `prompt`
+  text, the opaque `context` from the new `prompt(..., context=...)`, the
+  `connection`, and `identity` (`PromptSigning`: `can_sign`, `self_id()`,
+  `publish_signed()`).
+  - `async before_prompt(ctx)`, after the sender identity is resolved,
+    returns `PromptExtras` — extra envelope `fields` and `headers`, and a
+    `state` the SDK hands back — or `None`, and has no side effects.
+    Several are merged in order, the later winning a key. A field the
+    envelope defines or the `Agent-Sender` header is refused with
+    `NatsAgentError`; an exception fails the prompt before anything is
+    sent.
+  - `async before_publish(ctx, extras)`, optional
+    (`PublishingPromptInterceptor`), runs only after the `Agent-Sender`
+    header is signed and the size checked, immediately before the prompt
+    is published, with what that interceptor's `before_prompt` returned.
+    That is where an interceptor publishes its own messages, so they
+    describe a prompt that goes out; an exception is logged and does not
+    stop the prompt.
+
+  A prompt never iterated, or one `prompt()` itself rejects, runs neither
+  phase.
+  Without interceptors nothing changes on the wire. The TypeScript SDK has
+  the same hook.
 - **`Envelope.extras` (§5.6).** The top-level fields an envelope does not
   define, verbatim; `encode()` now writes a `null` among them too, so a
   decode → encode round trip keeps what a peer sent. `is_envelope_field`

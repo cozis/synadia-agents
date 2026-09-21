@@ -21,12 +21,16 @@ import {
   IdentityError,
   NatsAgentError,
   parseSenderHeader,
+  PayloadTooLargeError,
   readSenderHeaderValue,
   ServiceError,
   signerFromSeed,
   verifySender,
   type Agent,
+  type Logger,
+  type PromptExtras,
   type PromptInterceptor,
+  type PromptInterceptorContext,
   type RequestEnvelope,
 } from "../../src/index.js";
 import {
@@ -126,6 +130,7 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
     opts: {
       readonly extra?: ReadonlyArray<RequestInterceptor>;
       readonly onPrompt?: (handled: Handled) => Promise<void>;
+      readonly maxPayload?: string;
     } = {},
   ): Promise<{ svc: AgentService; handled: Handled[] }> {
     const handled: Handled[] = [];
@@ -135,6 +140,7 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
       owner: "o",
       name,
       keepaliveIntervalS: null,
+      ...(opts.maxPayload !== undefined ? { maxPayload: opts.maxPayload } : {}),
       interceptors: [lin.host, ...(opts.extra ?? [])],
       heartbeatExtras: lin.heartbeatExtras,
     });
@@ -453,6 +459,111 @@ describe.skipIf(!bin)("prompt and request interceptors", () => {
     } finally {
       await a.close();
       await b.close();
+      await svc.stop();
+    }
+  });
+
+  it("publishes nothing for a prompt that fails the size check", async () => {
+    const lin = lineage(RECORDS);
+    // 1 KB: the prompt alone fits with room for its header; with a bulky
+    // extra field it no longer does, which only the check made at publish
+    // time — after the first phase, before the second — can see.
+    const { svc, handled } = await host(lin, "too-big", { maxPayload: "1KB" });
+    const bulky: PromptInterceptor = {
+      beforePrompt: () => ({ fields: { x_bulk: "b".repeat(2_000) } }),
+    };
+    const agents = caller(lin, true, [bulky]);
+    const records = capture(observer, RECORDS);
+    const prompts = capture(observer, svc.subject.prompt);
+    await observer.flush();
+    try {
+      const stream = await (await handle(agents, svc)).prompt("hi");
+      await expect(drain(stream)).rejects.toThrow(PayloadTooLargeError);
+      await new Promise((r) => setTimeout(r, 300));
+      expect(records.msgs).toHaveLength(0);
+      expect(prompts.msgs).toHaveLength(0);
+      expect(handled).toHaveLength(0);
+      expect(lin.counts).toMatchObject({ published: 0, dropped: 0 });
+    } finally {
+      records.stop();
+      prompts.stop();
+      await agents.close();
+      await svc.stop();
+    }
+  });
+
+  it("hands beforePublish the same context and what beforePrompt returned", async () => {
+    const lin = lineage(RECORDS);
+    const { svc } = await host(lin, "phases");
+    const seen: Array<{ phase: string; ctx: PromptInterceptorContext; extras?: unknown }> = [];
+    const state = { planned: "by phase one" };
+    const returned: PromptExtras = { fields: { x_phase: 1 }, state };
+    const phases: PromptInterceptor = {
+      beforePrompt(ctx) {
+        seen.push({ phase: "beforePrompt", ctx });
+        return returned;
+      },
+      beforePublish(ctx, extras) {
+        seen.push({ phase: "beforePublish", ctx, extras });
+      },
+    };
+    // No first-phase result: the second phase gets `undefined`.
+    const silent: PromptInterceptor = {
+      beforePrompt: () => undefined,
+      beforePublish(ctx, extras) {
+        seen.push({ phase: "silent", ctx, extras });
+      },
+    };
+    const agents = caller(undefined, true, [phases, silent]);
+    try {
+      await drain(await (await handle(agents, svc)).prompt("hi", { context: { k: "v" } }));
+      expect(seen.map((s) => s.phase)).toEqual(["beforePrompt", "beforePublish", "silent"]);
+      expect(seen[1]!.ctx).toBe(seen[0]!.ctx);
+      expect(seen[2]!.ctx).toBe(seen[0]!.ctx);
+      expect(seen[1]!.extras).toBe(returned);
+      expect((seen[1]!.extras as PromptExtras).state).toBe(state);
+      expect(seen[2]!.extras).toBeUndefined();
+      expect(seen[0]!.ctx.context).toEqual({ k: "v" });
+    } finally {
+      await agents.close();
+      await svc.stop();
+    }
+  });
+
+  it("logs a beforePublish failure and still publishes the prompt", async () => {
+    const lin = lineage(RECORDS);
+    const { svc, handled } = await host(lin, "phase-two-throws");
+    const errors: Array<{ msg: string; ctx?: Record<string, unknown> }> = [];
+    const logger: Logger = {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: () => undefined,
+      error: (msg, ctx) => {
+        errors.push({ msg, ...(ctx !== undefined ? { ctx } : {}) });
+      },
+    };
+    const failing: PromptInterceptor = {
+      beforePrompt: () => undefined,
+      beforePublish() {
+        throw new Error("secret detail");
+      },
+    };
+    const agents = new Agents({
+      nc,
+      identity: { signer },
+      logger,
+      interceptors: [failing, lin.caller],
+    });
+    try {
+      await drain(await (await handle(agents, svc)).prompt("still sent"));
+      // The prompt went out, and the interceptor after the failing one ran.
+      expect(handled).toHaveLength(1);
+      expect(lin.counts).toMatchObject({ published: 1, dropped: 0 });
+      expect(errors).toHaveLength(1);
+      expect(errors[0]!.msg).toContain("beforePublish failed");
+      expect(JSON.stringify(errors)).not.toContain("secret detail");
+    } finally {
+      await agents.close();
       await svc.stop();
     }
   });

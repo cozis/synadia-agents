@@ -1,11 +1,23 @@
-"""Prompt interceptors — the caller-side hook around :meth:`Agent.prompt`.
+"""Prompt interceptors — the caller-side hook around :meth:`Agent.prompt`, in two phases.
 
-An interceptor runs before a prompt is published, once per prompt, in the
-order the client lists them. It sees the target agent, the prompt text and
-the opaque ``context`` the caller passed to :meth:`Agent.prompt`, and may
-publish messages of its own first — signed with the prompting client's
-identity, through ``ctx.identity`` — before it returns extra envelope
-fields and extra headers for the prompt to carry, or ``None``.
+Both phases run once per prompt, in the order the client lists the
+interceptors, and see the same per-prompt context: the target agent, the
+prompt text, the opaque ``context`` the caller passed to
+:meth:`Agent.prompt`, the connection, and signing with the prompting
+client's identity.
+
+1. ``before_prompt(ctx)`` decides what the prompt carries: it returns extra
+   envelope fields and extra headers, or ``None``, and has no side effects
+   — the prompt may still fail after it (its identity at publish time, the
+   size of the envelope its fields make).
+2. ``before_publish(ctx, extras)``, optional, runs only once the prompt is
+   certain to go out: after its ``Agent-Sender`` header is signed and its
+   size checked, immediately before it is published. This is where an
+   interceptor publishes messages of its own — signed through
+   ``ctx.identity`` — so a message about a prompt describes one that went
+   out, barring a transport failure. It receives what its own
+   ``before_prompt`` returned, ``state`` included, so an interceptor keeps
+   nothing between the phases itself.
 
 The SDK gives those fields and headers no meaning. §5.6 obliges a receiver
 to tolerate unknown top-level envelope fields; a host built on
@@ -13,14 +25,13 @@ to tolerate unknown top-level envelope fields; a host built on
 :attr:`Envelope.extras` and the request's headers in its own request
 interceptors.
 
-When it runs: at publish time — on the stream's first ``__anext__``, after
-the prompt's sender identity is resolved and before its ``Agent-Sender``
-header is signed over the final envelope — so a prompt that is never
-iterated, or that fails validation, runs no interceptor. It runs in a copy
-of the :mod:`contextvars` context :meth:`Agent.prompt` was called in, not
-the one the stream happens to be iterated in, so an interceptor that reads
-a ``ContextVar`` sees the caller's value. The TypeScript SDK's
-``PromptInterceptor`` is the same hook.
+When they run: at publish time, on the stream's first ``__anext__``, so a
+prompt that is never iterated, or that :meth:`Agent.prompt` itself
+rejects, runs neither phase. Both run in one copy of the :mod:`contextvars` context
+:meth:`Agent.prompt` was called in, not the one the stream happens to be
+iterated in, so an interceptor that reads a ``ContextVar`` sees the
+caller's value. The TypeScript SDK's ``PromptInterceptor`` is the same
+hook.
 """
 
 from __future__ import annotations
@@ -30,6 +41,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol
 
+from ._logging import get_logger
 from .errors import NatsAgentError
 from .identity.options import Identity, self_id_for
 from .identity.sender_header import AGENT_SENDER_HEADER
@@ -40,6 +52,8 @@ if TYPE_CHECKING:
 
     from .agent import Agent
     from .identity.agent_id import AgentId
+
+log = get_logger(__name__)
 
 
 class PromptSigning:
@@ -102,37 +116,68 @@ class PromptInterceptorContext:
 
 @dataclass(frozen=True, slots=True)
 class PromptExtras:
-    """What a :class:`PromptInterceptor` adds to the prompt.
+    """What a :class:`PromptInterceptor` adds to the prompt, from its first phase.
 
     ``fields`` are extra top-level envelope fields, by wire name — a field
     the envelope defines (``prompt``, ``attachments``) is refused.
     ``headers`` are extra message headers — ``Agent-Sender`` belongs to the
-    SDK and is refused.
+    SDK and is refused. ``state`` is anything the interceptor wants back in
+    its second phase: opaque to the SDK, never sent, handed to
+    ``before_publish`` as returned.
     """
 
     fields: Mapping[str, object] = field(default_factory=dict)
     headers: Mapping[str, str] = field(default_factory=dict)
+    state: object = None
 
 
 class PromptInterceptor(Protocol):
-    """A caller-side hook that runs before each prompt is published.
+    """A caller-side hook around each prompt, in two phases (see the module docstring).
 
-    An exception fails the prompt: it surfaces from the stream's first
-    ``__anext__``, and the prompt is not sent.
+    ``before_prompt`` is phase one: what the prompt carries, no side
+    effects. An exception fails the prompt: it surfaces from the stream's
+    first ``__anext__``, and nothing is sent.
+
+    Phase two is an optional method, ``async def before_publish(self, ctx,
+    extras) -> None``, looked up on the interceptor: it runs after the
+    prompt's header is signed and its size checked, immediately before it
+    is published — the place to publish messages of the interceptor's own.
+    ``extras`` is what this interceptor's ``before_prompt`` returned for the
+    same ``ctx``. An exception is logged and does not stop the prompt, which
+    by then is due to go out. :class:`PublishingPromptInterceptor` types an
+    interceptor that has it.
     """
 
     async def before_prompt(self, ctx: PromptInterceptorContext) -> PromptExtras | None: ...
 
 
+class PublishingPromptInterceptor(PromptInterceptor, Protocol):
+    """A :class:`PromptInterceptor` with the optional second phase."""
+
+    async def before_publish(
+        self, ctx: PromptInterceptorContext, extras: PromptExtras | None
+    ) -> None: ...
+
+
 EMPTY_CONTEXT: Mapping[str, object] = MappingProxyType({})
+
+
+@dataclass(frozen=True, slots=True)
+class CollectedExtras:
+    """The interceptors' first-phase additions, merged, and what each returned."""
+
+    fields: Mapping[str, object]
+    headers: Mapping[str, str]
+    #: Each interceptor's ``before_prompt`` result, in order, for its ``before_publish``.
+    results: tuple[PromptExtras | None, ...]
 
 
 async def collect_extras(
     interceptors: tuple[PromptInterceptor, ...],
     ctx: PromptInterceptorContext,
     envelope_fields: frozenset[str],
-) -> PromptExtras:
-    """Run ``interceptors`` in order and merge what they add.
+) -> CollectedExtras:
+    """Phase one: run ``interceptors`` in order and merge what they add.
 
     A later one wins a key an earlier one also set. A field in
     ``envelope_fields`` (the ones the envelope codec owns), or the
@@ -141,8 +186,10 @@ async def collect_extras(
     """
     fields: dict[str, object] = {}
     headers: dict[str, str] = {}
+    results: list[PromptExtras | None] = []
     for interceptor in interceptors:
         extras = await interceptor.before_prompt(ctx)
+        results.append(extras)
         if extras is None:
             continue
         for key, value in extras.fields.items():
@@ -155,7 +202,33 @@ async def collect_extras(
                     f"prompt interceptor: the {AGENT_SENDER_HEADER} header is the SDK's"
                 )
             headers[key] = value
-    return PromptExtras(fields=fields, headers=headers)
+    return CollectedExtras(fields=fields, headers=headers, results=tuple(results))
+
+
+async def run_before_publish(
+    interceptors: tuple[PromptInterceptor, ...],
+    ctx: PromptInterceptorContext,
+    results: tuple[PromptExtras | None, ...],
+    subject: str,
+) -> None:
+    """Phase two: each interceptor's ``before_publish``, with what its phase one returned.
+
+    The prompt is due to go out by now, so an exception stops neither it
+    nor the interceptors after the one that raised: it is logged (the
+    interceptor is application code, so its exception is not).
+    """
+    for index, (interceptor, extras) in enumerate(zip(interceptors, results, strict=True)):
+        hook = getattr(interceptor, "before_publish", None)
+        if hook is None:
+            continue
+        try:
+            await hook(ctx, extras)
+        except Exception:
+            log.error(
+                "prompt interceptor %d before_publish failed on %s; publishing the prompt",
+                index,
+                subject,
+            )
 
 
 __all__ = [
@@ -163,4 +236,5 @@ __all__ = [
     "PromptInterceptor",
     "PromptInterceptorContext",
     "PromptSigning",
+    "PublishingPromptInterceptor",
 ]

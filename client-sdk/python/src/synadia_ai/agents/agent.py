@@ -12,7 +12,7 @@ then attach a live-bound signed header or an explicitly requested unsigned
 claim; omission attaches nothing and performs no identity lookup.
 
 Prompt interceptors: a handle also carries its client's interceptors,
-which ``prompt()`` runs at publish time (see
+which ``prompt()`` runs at publish time, in two phases (see
 :mod:`synadia_ai.agents.interceptor`).
 
 The server-side counterpart (``AgentService``) ships in the sibling
@@ -24,9 +24,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
 import pydantic
 
@@ -53,11 +53,12 @@ from .identity.options import (
 )
 from .interceptor import (
     EMPTY_CONTEXT,
-    PromptExtras,
+    CollectedExtras,
     PromptInterceptor,
     PromptInterceptorContext,
     PromptSigning,
     collect_extras,
+    run_before_publish,
 )
 from .messages import QueryChunk, ResponseChunk, StatusChunk, decode_chunk
 from .validation import (
@@ -126,6 +127,8 @@ class Query:
         await self._nc.publish(self.reply_subject, payload)
 
 
+_T = TypeVar("_T")
+
 StreamMessage: TypeAlias = ResponseChunk | StatusChunk | Query
 """One item yielded by :meth:`Agent.prompt`'s async iterator."""
 
@@ -139,6 +142,20 @@ class _Interception:
     ctx: PromptInterceptorContext
     #: The envelope before the interceptors' fields are added.
     envelope: Envelope
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedRequest:
+    """The request as it will be published, before its header is signed."""
+
+    encoded: bytes
+    plan: SenderHeaderPlan | None
+    #: The interceptors' first phase, merged; ``None`` without interceptors.
+    collected: CollectedExtras | None
+
+    @property
+    def extra_headers(self) -> dict[str, str]:
+        return dict(self.collected.headers) if self.collected is not None else {}
 
 
 #: The wire fields the envelope codec owns — never an interceptor's extra.
@@ -329,9 +346,11 @@ class Agent:
         reads them. A caller that knows which interceptors it runs passes
         what they need here (the ID of the model tool call a prompt
         serves, say). The interceptors run at publish time, in a copy of
-        the context this call was made in (see
-        :mod:`synadia_ai.agents.interceptor`); one that raises fails the
-        prompt on the first ``__anext__``, before it is sent.
+        the context this call was made in, in two phases (see
+        :mod:`synadia_ai.agents.interceptor`): a ``before_prompt`` that
+        raises fails the prompt on the first ``__anext__``, before it is
+        sent; ``before_publish`` runs once the prompt is signed and checked,
+        immediately before it is published.
 
         §5.4 pre-publish validation runs synchronously before any wire I/O.
         Failures raise:
@@ -632,8 +651,8 @@ class Agent:
         sub: str,
         require_signed: bool,
         intercept: _Interception | None,
-    ) -> tuple[bytes, SenderHeaderPlan | None, dict[str, str]]:
-        """The request bytes as published, their header plan and the interceptors' headers.
+    ) -> _PreparedRequest:
+        """The request bytes as published, their header plan and the interceptors' part.
 
         Resolves the live identity as late as nats-py allows and re-checks
         ``max_payload`` with the exact header size. nats-py exposes no
@@ -641,35 +660,40 @@ class Agent:
         publish cannot yet be detected; adopting one when available is the
         remaining target. The header is signed at publish time.
 
-        The prompt interceptors run once the identity is known — an
-        identity that cannot be had fails the prompt before any of them
-        publishes — and before the header is signed, over the envelope as
-        their fields leave it.
+        The interceptors' first phase runs once the identity is known, and
+        before the header is signed, over the envelope as their fields leave
+        it. Their second phase is not run here: it waits until the header is
+        signed (see :meth:`_stream_prompt`).
         """
         plan = await plan_sender_header(
             self._sender_identity, self._nc, sub, require_signed=require_signed
         )
-        extra_headers: dict[str, str] = {}
+        collected: CollectedExtras | None = None
         if intercept is not None:
-            extras = await self._run_interceptors(intercept)
-            if extras.fields:
-                encoded = encode(intercept.envelope.model_copy(update=dict(extras.fields)))
-            extra_headers = dict(extras.headers)
+            collected = await self._in_caller_context(
+                intercept, collect_extras(self._interceptors, intercept.ctx, _ENVELOPE_FIELDS)
+            )
+            if collected.fields:
+                encoded = encode(intercept.envelope.model_copy(update=dict(collected.fields)))
         if plan is not None or intercept is not None:
             ep = self._info.prompt_endpoint
             conn_limit = getattr(self._nc, "max_payload", 0) or None
             header_bytes = plan.wire_bytes if plan is not None else 0
             assert_within_max_payload(len(encoded), ep.max_payload_bytes, conn_limit, header_bytes)
-        return encoded, plan, extra_headers
+        return _PreparedRequest(encoded=encoded, plan=plan, collected=collected)
 
-    async def _run_interceptors(self, intercept: _Interception) -> PromptExtras:
-        """Run the prompt interceptors in the context ``prompt()`` was called in.
+    async def _in_caller_context(
+        self, intercept: _Interception, work: Coroutine[Any, Any, _T]
+    ) -> _T:
+        """Run ``work`` in the context ``prompt()`` was called in.
 
         A task carries a context of its own; awaiting it here keeps
         cancellation and exceptions flowing as a plain ``await`` would.
+        Both interceptor phases of one prompt run in the same captured
+        context.
         """
         task = asyncio.get_running_loop().create_task(
-            collect_extras(self._interceptors, intercept.ctx, _ENVELOPE_FIELDS),
+            work,
             name=f"agents-prompt-interceptors:{self.instance_id}",
             context=intercept.context,
         )
@@ -699,9 +723,10 @@ class Agent:
         await mux.start()
         self._raise_if_closed()
 
-        encoded, plan, extra_headers = await self._prepare_request(
+        prepared = await self._prepare_request(
             encoded, sub=sub, require_signed=require_signed, intercept=intercept
         )
+        encoded, plan = prepared.encoded, prepared.plan
 
         # `max_wait_s > 0` is enforced at the public boundary (Agent.prompt
         # and the constructors), so we treat it as an invariant here.
@@ -725,7 +750,19 @@ class Agent:
             # Signed at publish time so `ts` / nonce are fresh even when the
             # caller iterates late; the signature covers exactly `encoded`.
             signed = await plan.build_headers(encoded) if plan is not None else {}
-            headers = {**extra_headers, **signed} or None
+            headers = {**prepared.extra_headers, **signed} or None
+
+            # The prompt is signed and checked: nothing left can refuse it.
+            # The interceptors' second phase runs now, immediately before
+            # the publish, so what they publish describes a prompt that goes
+            # out.
+            if intercept is not None and prepared.collected is not None:
+                await self._in_caller_context(
+                    intercept,
+                    run_before_publish(
+                        self._interceptors, intercept.ctx, prepared.collected.results, subject
+                    ),
+                )
 
             await self._nc.publish(subject, encoded, reply=reply, headers=headers)
 

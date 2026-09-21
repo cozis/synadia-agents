@@ -2,11 +2,12 @@
 // hooks — test support, not SDK code. It exists to prove the hooks can
 // carry an extension that needs every one of them:
 //
-//   - the caller side (a `PromptInterceptor`) mints a node id per prompt,
-//     inherits root and parent from the ambient scope, publishes one
-//     signed record about the prompt before it goes out — the record's id
-//     is the header's nonce and the `Nats-Msg-Id` — and adds the node and
-//     root to the envelope as two extra fields;
+//   - the caller side (a `PromptInterceptor`) mints a node id per prompt
+//     and inherits root and parent from the ambient scope in its first
+//     phase, which adds the node and root to the envelope as two extra
+//     fields; its second phase — once the prompt is signed and certain to
+//     go out — publishes one signed record about it, whose id is the
+//     header's nonce and the `Nats-Msg-Id`;
 //   - the host side (a `RequestInterceptor`) reads those fields back,
 //     refuses a half pair with `400`, mints a root when there is none, and
 //     runs the handler inside the scope, so a client used inside the
@@ -44,6 +45,14 @@ export interface LineageRecord {
   readonly label: string | null;
 }
 
+/** What phase one decides about the record phase two publishes. */
+interface PlannedRecord {
+  readonly node: string;
+  readonly parent: string | null;
+  readonly root: string;
+  readonly label: string | null;
+}
+
 export interface LineageCounts {
   published: number;
   dropped: number;
@@ -74,38 +83,49 @@ export function lineage(recordSubject: string): Lineage {
   const counts: LineageCounts = { published: 0, dropped: 0, adopted: 0, minted: 0 };
 
   const caller: PromptInterceptor = {
-    async beforePrompt(ctx) {
+    // Phase one decides everything and publishes nothing: the prompt may
+    // still fail its size check or its identity at publish time.
+    beforePrompt(ctx) {
       const ambient = storage.getStore();
       const node = newId();
       const root = ambient?.root ?? node;
       const label = ctx.context["label"];
-      if (!ctx.identity.canSign) {
-        // Readers ignore unsigned records: the record is owed and dropped.
-        counts.dropped += 1;
-      } else {
-        try {
-          const recordId = newId();
-          const record: LineageRecord = {
-            record_id: recordId,
-            agent: await ctx.identity.selfId(),
-            node,
-            parent: ambient?.node ?? null,
-            root,
-            target: ctx.agent.instanceId,
-            label: typeof label === "string" ? label : null,
-          };
-          await ctx.identity.publishSigned(recordSubject, JSON.stringify(record), {
-            nonce: recordId,
-          });
-          counts.published += 1;
-        } catch {
-          counts.dropped += 1;
-        }
-      }
+      const planned: PlannedRecord = {
+        node,
+        parent: ambient?.node ?? null,
+        root,
+        label: typeof label === "string" ? label : null,
+      };
       return {
         fields: { [NODE_FIELD]: node, [ROOT_FIELD]: root },
         headers: { [NODE_HEADER]: node },
+        state: planned,
       };
+    },
+    // Phase two runs only for a prompt that goes out, immediately before
+    // it: the record describes a prompt that was sent.
+    async beforePublish(ctx, extras) {
+      const planned = extras?.state as PlannedRecord;
+      if (!ctx.identity.canSign) {
+        // Readers ignore unsigned records: the record is owed and dropped.
+        counts.dropped += 1;
+        return;
+      }
+      try {
+        const recordId = newId();
+        const record: LineageRecord = {
+          record_id: recordId,
+          agent: await ctx.identity.selfId(),
+          ...planned,
+          target: ctx.agent.instanceId,
+        };
+        await ctx.identity.publishSigned(recordSubject, JSON.stringify(record), {
+          nonce: recordId,
+        });
+        counts.published += 1;
+      } catch {
+        counts.dropped += 1;
+      }
     },
   };
 

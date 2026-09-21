@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -26,6 +27,7 @@ from synadia_ai.agents import (
     HeartbeatPayload,
     Identity,
     NatsAgentError,
+    PayloadTooLargeError,
     PromptExtras,
     PromptInterceptor,
     PromptInterceptorContext,
@@ -80,6 +82,7 @@ class World:
         *,
         extra: Sequence[RequestInterceptor] = (),
         on_prompt: Callable[[Handled], Awaitable[None]] | None = None,
+        max_payload: str = "1MB",
     ) -> tuple[AgentService, list[Handled]]:
         handled: list[Handled] = []
         svc = AgentService(
@@ -89,6 +92,7 @@ class World:
             session_name=name,
             heartbeat_interval_s=3600,
             keepalive_interval_s=None,
+            max_payload=max_payload,
             interceptors=[lin.host, *extra],
             heartbeat_extras=lin.heartbeat_extras,
         )
@@ -482,3 +486,100 @@ async def test_a_request_rejected_error_answers_its_code(world: World) -> None:
     with pytest.raises(ProtocolError, match="service error 403: not you"):
         await _drain(await _handle(agents, svc), "x")
     assert handled == []
+
+
+async def test_a_prompt_that_fails_the_size_check_publishes_nothing(world: World) -> None:
+    lin = Lineage(RECORDS)
+    # 1 KB: the prompt alone fits with room for its header; with a bulky
+    # extra field it no longer does, which only the check made at publish
+    # time — after the first phase, before the second — can see.
+    svc, handled = await world.host(lin, "too-big", max_payload="1KB")
+
+    class Bulky:
+        async def before_prompt(self, ctx: PromptInterceptorContext) -> PromptExtras | None:
+            return PromptExtras(fields={"x_bulk": "b" * 2_000})
+
+    agents = world.caller(lin, extra=[Bulky()])
+    records, stop_records = await _capture(world.observer, RECORDS)
+    prompts, stop_prompts = await _capture(world.observer, svc.subject.prompt)
+    try:
+        with pytest.raises(PayloadTooLargeError):
+            await _drain(await _handle(agents, svc), "hi")
+        await asyncio.sleep(0.3)
+    finally:
+        await stop_records()
+        await stop_prompts()
+    assert records == []
+    assert prompts == []
+    assert handled == []
+    assert (lin.counts.published, lin.counts.dropped) == (0, 0)
+
+
+async def test_before_publish_gets_the_same_context_and_what_before_prompt_returned(
+    world: World,
+) -> None:
+    lin = Lineage(RECORDS)
+    svc, _ = await world.host(lin, "phases")
+    seen: list[tuple[str, PromptInterceptorContext, PromptExtras | None]] = []
+    state = {"planned": "by phase one"}
+    returned = PromptExtras(fields={"x_phase": 1}, state=state)
+
+    class Phases:
+        async def before_prompt(self, ctx: PromptInterceptorContext) -> PromptExtras | None:
+            seen.append(("before_prompt", ctx, None))
+            return returned
+
+        async def before_publish(
+            self, ctx: PromptInterceptorContext, extras: PromptExtras | None
+        ) -> None:
+            seen.append(("before_publish", ctx, extras))
+
+    class Silent:
+        async def before_prompt(self, ctx: PromptInterceptorContext) -> PromptExtras | None:
+            return None
+
+        async def before_publish(
+            self, ctx: PromptInterceptorContext, extras: PromptExtras | None
+        ) -> None:
+            seen.append(("silent", ctx, extras))
+
+    agents = world.caller(None, extra=[Phases(), Silent()])
+    await _drain(await _handle(agents, svc), "hi", context={"k": "v"})
+    assert [phase for phase, _, _ in seen] == ["before_prompt", "before_publish", "silent"]
+    assert seen[1][1] is seen[0][1]
+    assert seen[2][1] is seen[0][1]
+    assert seen[1][2] is returned
+    assert seen[1][2] is not None and seen[1][2].state is state
+    assert seen[2][2] is None
+    assert dict(seen[0][1].context) == {"k": "v"}
+
+
+async def test_a_before_publish_failure_is_logged_and_the_prompt_still_goes_out(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    lin = Lineage(RECORDS)
+    svc, handled = await world.host(lin, "phase-two-raises")
+
+    class Failing:
+        async def before_prompt(self, ctx: PromptInterceptorContext) -> PromptExtras | None:
+            return None
+
+        async def before_publish(
+            self, ctx: PromptInterceptorContext, extras: PromptExtras | None
+        ) -> None:
+            raise RuntimeError("secret detail")
+
+    agents = Agents(
+        nc=world.nc,
+        identity=Identity(signer=signer_from_seed(world.alice.seed)),
+        interceptors=[Failing(), lin.caller],
+    )
+    world.clients.append(agents)
+    with caplog.at_level(logging.ERROR, logger="synadia_ai.agents"):
+        await _drain(await _handle(agents, svc), "still sent")
+    # The prompt went out, and the interceptor after the failing one ran.
+    assert len(handled) == 1
+    assert (lin.counts.published, lin.counts.dropped) == (1, 0)
+    failures = [r for r in caplog.records if "before_publish failed" in r.getMessage()]
+    assert len(failures) == 1
+    assert "secret detail" not in caplog.text

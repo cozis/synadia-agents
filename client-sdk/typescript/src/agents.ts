@@ -180,6 +180,7 @@ export class Agents {
       opts,
       this.#identity,
       this.#interceptors,
+      this.#logger,
     );
   }
 
@@ -250,6 +251,7 @@ export class Agents {
       opts,
       this.#identity,
       this.#interceptors,
+      this.#logger,
     );
   }
 

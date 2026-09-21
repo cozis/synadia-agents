@@ -224,6 +224,33 @@ describe("saveAttachments — behaviour", () => {
     expect(await readlink(join(dir, "b.txt"))).toBe(dangling);
   });
 
+  it.skipIf(process.platform === "win32")(
+    "creates files 0600 and the directories it makes 0700; an existing one keeps its mode",
+    async () => {
+      const mode = async (path: string): Promise<number> => (await lstat(path)).mode & 0o777;
+      await chmod(tmp, 0o755);
+      const dir = join(tmp, "a", "b");
+      const result = await saveAttachments(
+        [
+          { filename: "f.txt", content: b64("f") },
+          { filename: "f.txt", content: b64("g") },
+        ],
+        dir,
+      );
+      expect(await Promise.all(result.map((r) => mode(r.path!)))).toEqual([0o600, 0o600]);
+      expect(await mode(join(tmp, "a"))).toBe(0o700);
+      expect(await mode(dir)).toBe(0o700);
+      expect(await mode(tmp)).toBe(0o755);
+
+      const existing = join(tmp, "existing");
+      await mkdir(existing);
+      await chmod(existing, 0o755);
+      const [entry] = await saveAttachments([{ filename: "e.txt", content: b64("e") }], existing);
+      expect(await mode(entry!.path!)).toBe(0o600);
+      expect(await mode(existing)).toBe(0o755);
+    },
+  );
+
   it("skips an attachment over the limit and still saves a later smaller one", async () => {
     const result = await saveAttachments(
       [

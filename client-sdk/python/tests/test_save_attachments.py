@@ -171,6 +171,29 @@ def test_never_follows_a_symlink_live_or_dangling(tmp_path: Path) -> None:
     assert os.readlink(directory / "b.txt") == str(dangling)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
+def test_files_are_0600_and_created_directories_0700(tmp_path: Path) -> None:
+    def mode(path: Path) -> int:
+        return path.lstat().st_mode & 0o777
+
+    tmp_path.chmod(0o755)
+    directory = tmp_path / "a" / "b"
+    result = save_attachments([att("f.txt", "f"), att("f.txt", "g")], directory)
+    assert [mode(r.path) for r in result if r.path] == [0o600, 0o600]
+    assert mode(tmp_path / "a") == 0o700
+    assert mode(directory) == 0o700
+    assert mode(tmp_path) == 0o755
+
+    # An existing directory keeps its mode.
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    existing.chmod(0o755)
+    (entry,) = save_attachments([att("e.txt", "e")], existing)
+    assert entry.path is not None
+    assert mode(entry.path) == 0o600
+    assert mode(existing) == 0o755
+
+
 def test_skips_over_the_limit_and_still_saves_a_later_smaller_one(tmp_path: Path) -> None:
     result = save_attachments(
         [att("six.bin", "123456"), att("five.bin", "12345"), att("four.bin", "1234")],

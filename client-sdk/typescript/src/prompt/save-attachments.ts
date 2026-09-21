@@ -66,10 +66,15 @@ const REPLACEMENT_CHARACTER = "\ufffd";
 // name comes out the same wherever it is saved.
 const WINDOWS_FORBIDDEN = '<>:"|?*';
 // A Windows device name (Microsoft's list: CON, PRN, AUX, NUL, COM1 to COM9,
-// LPT1 to LPT9, COM and LPT with a superscript ¹ ² ³), any case, alone or
-// before a dot: `NUL.tar.gz` is the device too. Spaces before the dot are
-// ignored, on the side of caution, as Python's `os.path.isreserved` does.
-const WINDOWS_DEVICE_NAME_RE = /^(?:CON|PRN|AUX|NUL|(?:COM|LPT)[1-9\u00b9\u00b2\u00b3]) *(?:\.|$)/i;
+// LPT1 to LPT9, COM and LPT with a superscript ¹ ² ³; and the console's
+// CONIN$ and CONOUT$), any case, alone or before a dot: `NUL.tar.gz` is the
+// device too. Spaces before the dot are ignored, on the side of caution, as
+// Python's `os.path.isreserved` does.
+const WINDOWS_DEVICE_NAME_RE =
+  /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9\u00b9\u00b2\u00b3]) *(?:\.|$)/i;
+// On POSIX: the mode of a saved file, and of a directory this module creates.
+const FILE_MODE = 0o600;
+const DIRECTORY_MODE = 0o700;
 
 /**
  * Decode received attachments and write each into `dir` (created if
@@ -79,15 +84,19 @@ const WINDOWS_DEVICE_NAME_RE = /^(?:CON|PRN|AUX|NUL|(?:COM|LPT)[1-9\u00b9\u00b2\
  * - **Content** must be strict RFC 4648 §4 base64 (§5.2: standard alphabet,
  *   padded, no whitespace). Anything else is not written:
  *   `skipped: "invalid_content"`. Bad content never throws.
- * - **Name**: the part after the last `/` or `\`, control characters
- *   removed, `< > : " | ? *` replaced by `_`, leading and trailing dots and
- *   whitespace stripped, `attachment-<n>` (1-based position) when nothing
+ * - **Name**: the part after the last `/` or `\`, control characters and
+ *   the characters that change text direction (U+200E, U+200F,
+ *   U+202A–U+202E, U+2066–U+2069) removed, `< > : " | ? *` replaced by `_`,
+ *   leading and trailing dots and whitespace stripped, `attachment-<n>` (1-based position) when nothing
  *   is left, shortened to 200 UTF-8 bytes keeping an extension of up to 16
  *   characters, and a Windows device name (`CON`, `nul.txt`, `COM1.log`)
  *   prefixed with `_`. The same on every OS.
  * - **Never overwrites, never follows a link**: each file is created
  *   exclusively; on a clash (an earlier attachment, a file or a symlink
  *   already there) the next free `<stem> (2)<ext>`, `(3)`, … is used.
+ * - **Private**: on POSIX a file is created with mode 0600 and a directory
+ *   this call creates, `dir` or a missing parent, with 0700; a directory
+ *   that already exists keeps its mode.
  * - **Limit**: see {@link SaveAttachmentsOptions.maxTotalBytes}.
  *
  * Real I/O errors (permissions, disk full) reject the promise; a file this
@@ -105,7 +114,8 @@ export async function saveAttachments(
     );
   }
   const root = resolve(dir);
-  await mkdir(root, { recursive: true });
+  // Every directory a recursive `mkdir` creates gets the mode, parents included.
+  await mkdir(root, { recursive: true, mode: DIRECTORY_MODE });
 
   const saved: SavedAttachment[] = [];
   let total = 0;
@@ -161,6 +171,10 @@ export function safeAttachmentName(name: string, position: number): string {
     const cp = ch.codePointAt(0)!;
     // C0, DEL and C1: U+009B, for one, starts a terminal escape sequence.
     if (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) continue;
+    // Direction marks, embeddings, overrides and isolates: they let a shown
+    // name be spoofed (`evil<U+202E>txt.exe` shows as `evilexe.txt`).
+    if (cp === 0x200e || cp === 0x200f) continue;
+    if ((cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069)) continue;
     if (cp >= 0xd800 && cp <= 0xdfff) out += REPLACEMENT_CHARACTER;
     else out += WINDOWS_FORBIDDEN.includes(ch) ? "_" : ch;
   }
@@ -217,9 +231,9 @@ function utf8Length(s: string): number {
 }
 
 /**
- * Create `name` in `root` with `O_CREAT | O_EXCL` — which fails on any
- * existing entry, a symlink included, without following it — trying
- * `<stem> (n)<ext>` on a clash. Returns the absolute path written.
+ * Create `name` in `root` with mode 0600 and `O_CREAT | O_EXCL` — which
+ * fails on any existing entry, a symlink included, without following it —
+ * trying `<stem> (n)<ext>` on a clash. Returns the absolute path written.
  */
 async function createExclusive(root: string, name: string, bytes: Uint8Array): Promise<string> {
   const [stem, ext] = splitExtension(name);
@@ -227,7 +241,7 @@ async function createExclusive(root: string, name: string, bytes: Uint8Array): P
     const path = join(root, attempt === 1 ? name : `${stem} (${attempt})${ext}`);
     let handle: FileHandle;
     try {
-      handle = await open(path, "wx");
+      handle = await open(path, "wx", FILE_MODE);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
       throw err;

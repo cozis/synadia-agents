@@ -83,6 +83,36 @@
       "note": "C1 controls are removed (U+009B starts a terminal escape)"
     },
     {
+      "input": "evil\u202etxt.exe",
+      "expected": "eviltxt.exe",
+      "note": "a right-to-left override is removed, so the shown name cannot be spoofed"
+    },
+    {
+      "input": "\u200ea\u200fb\u202ac\u202bd\u202ce\u202df\u2066g\u2067h\u2068i\u2069.txt",
+      "expected": "abcdefghi.txt",
+      "note": "every direction mark, embedding, override and isolate is removed"
+    },
+    {
+      "input": "a\u200db\u2010c\u2029d\u202fe\u206af.txt",
+      "expected": "a\u200db\u2010c\u2029d\u202fe\u206af.txt",
+      "note": "the neighbours of those ranges are kept (U+200D, U+2010, U+2029, U+202F, U+206A)"
+    },
+    {
+      "input": "\u202e",
+      "expected": "attachment-1",
+      "note": "only a direction character: fallback"
+    },
+    {
+      "input": ".\u202e.hidden",
+      "expected": "hidden",
+      "note": "a direction character cannot shield a leading dot"
+    },
+    {
+      "input": "\u2066CON\u2069.txt",
+      "expected": "_CON.txt",
+      "note": "a direction character cannot hide a device name"
+    },
+    {
       "input": "\u0000\u001f",
       "expected": "attachment-1",
       "note": "only control characters: fallback"
@@ -186,6 +216,26 @@
       "input": "LPT\u00b3",
       "expected": "_LPT\u00b3",
       "note": "LPT with a superscript digit is a device name"
+    },
+    {
+      "input": "CONIN$",
+      "expected": "_CONIN$",
+      "note": "the console's CONIN$ is a device name"
+    },
+    {
+      "input": "conout$.log",
+      "expected": "_conout$.log",
+      "note": "CONOUT$ in any case, before an extension"
+    },
+    {
+      "input": "CONIN",
+      "expected": "CONIN",
+      "note": "CONIN without the $ is not a device name"
+    },
+    {
+      "input": "CONOUT$x.txt",
+      "expected": "CONOUT$x.txt",
+      "note": "a name that only starts with CONOUT$ is kept"
     },
     {
       "input": "nul .txt",

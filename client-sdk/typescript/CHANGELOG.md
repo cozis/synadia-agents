@@ -22,11 +22,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   per input, in order: `filename` as sent, `sizeBytes`, and the absolute
   `path`, or `path: null` with `skipped: "over_limit" | "invalid_content"`.
   The sender's name is untrusted and reduced to a safe base name, the same
-  on every OS: no path, no control characters, no leading or trailing dots
-  or whitespace, `< > : " | ? *` replaced by `_`, a Windows device name
-  (`CON`, `nul.txt`) prefixed with `_`, at most 200 UTF-8 bytes. Files are
-  created exclusively: nothing is overwritten, no link is followed, a taken
-  name becomes `name (2).ext`. Content that is not strict RFC 4648 §4 base64
+  on every OS: no path, no control characters, no characters that change
+  text direction, no leading or trailing dots or whitespace, `< > : " | ? *`
+  replaced by `_`, a Windows device name (`CON`, `nul.txt`, `CONIN$`)
+  prefixed with `_`, at most 200 UTF-8 bytes. Files are created exclusively
+  with mode 0600: nothing is overwritten, no link is followed, a taken name
+  becomes `name (2).ext`. A directory the call creates gets mode 0700; one
+  that exists keeps its mode. Content that is not strict RFC 4648 §4 base64
   is never written; the decoded bytes per call stop at
   `DEFAULT_SAVE_ATTACHMENTS_MAX_TOTAL_BYTES` (64 MiB; `Infinity` disables
   it). Real I/O errors reject. The Python SDK's `save_attachments` behaves

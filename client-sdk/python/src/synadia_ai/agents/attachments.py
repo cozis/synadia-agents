@@ -39,6 +39,12 @@ _MAX_EXTENSION_CHARS = 16
 _MAX_NAME_ATTEMPTS = 1000
 """``<stem> (2)<ext>`` … ``<stem> (1000)<ext>``, then give up."""
 
+_FILE_MODE = 0o600
+"""Mode of a saved file (POSIX)."""
+
+_DIRECTORY_MODE = 0o700
+"""Mode of a directory :func:`save_attachments` creates (POSIX)."""
+
 _STRICT_BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}")
 
 # Stripped from both ends of a name: dots, and the union of what Python's
@@ -50,25 +56,29 @@ _EDGE_CHARS = (
 )
 
 # Removed from a name: C0 controls, DEL and C1 controls (U+009B, for one,
-# starts a terminal escape sequence). Replaced by U+FFFD, as in TypeScript:
+# starts a terminal escape sequence); direction marks, embeddings, overrides
+# and isolates, which let a shown name be spoofed (``evil<U+202E>txt.exe``
+# shows as ``evilexe.txt``). Replaced by U+FFFD, as in TypeScript:
 # lone surrogates, which JSON allows and no file system encodes. Replaced
 # by ``_``: the characters Windows forbids in a name, besides the
 # separators and control characters handled already — on every OS, so a
 # name comes out the same wherever it is saved.
 _NAME_TRANSLATION: dict[int, int | None] = {
     **dict.fromkeys([*range(0x20), *range(0x7F, 0xA0)]),
+    **dict.fromkeys([0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A)]),
     **dict.fromkeys(range(0xD800, 0xE000), 0xFFFD),
     **dict.fromkeys(map(ord, '<>:"|?*'), ord("_")),
 }
 
 # A Windows device name (Microsoft's list: CON, PRN, AUX, NUL, COM1 to COM9,
-# LPT1 to LPT9, COM and LPT with a superscript ¹ ² ³), any case, alone or
-# before a dot: ``NUL.tar.gz`` is the device too. Spaces before the dot are
-# ignored, on the side of caution, as ``os.path.isreserved`` does.
+# LPT1 to LPT9, COM and LPT with a superscript ¹ ² ³; and the console's
+# CONIN$ and CONOUT$), any case, alone or before a dot: ``NUL.tar.gz`` is the
+# device too. Spaces before the dot are ignored, on the side of caution, as
+# ``os.path.isreserved`` does.
 # ``re.ASCII``: only ASCII letters match case-insensitively, as in
 # TypeScript.
 _WINDOWS_DEVICE_NAME = re.compile(
-    r"(?:CON|PRN|AUX|NUL|(?:COM|LPT)[1-9\u00b9\u00b2\u00b3]) *(?:\.|\Z)",
+    r"(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9\u00b9\u00b2\u00b3]) *(?:\.|\Z)",
     re.IGNORECASE | re.ASCII,
 )
 
@@ -106,15 +116,19 @@ def save_attachments(
       alphabet, padded, no whitespace). Anything else is not written:
       ``skipped="invalid_content"``. Bad content never raises.
     - **Name**: the part after the last ``/`` or ``\\``, control characters
-      removed, ``< > : " | ? *`` replaced by ``_``, leading and trailing
-      dots and whitespace stripped, ``attachment-<n>`` (1-based position)
-      when nothing is left, shortened to 200 UTF-8 bytes keeping an
-      extension of up to 16 characters, and a Windows device name
-      (``CON``, ``nul.txt``, ``COM1.log``) prefixed with ``_``. The same on
-      every OS.
+      and the characters that change text direction (U+200E, U+200F,
+      U+202A to U+202E, U+2066 to U+2069) removed, ``< > : " | ? *``
+      replaced by ``_``, leading and trailing dots and whitespace stripped,
+      ``attachment-<n>`` (1-based position) when nothing is left, shortened
+      to 200 UTF-8 bytes keeping an extension of up to 16 characters, and a
+      Windows device name (``CON``, ``nul.txt``, ``COM1.log``) prefixed with
+      ``_``. The same on every OS.
     - **Never overwrites, never follows a link**: each file is created
       exclusively; on a clash (an earlier attachment, a file or a symlink
       already there) the next free ``<stem> (2)<ext>``, ``(3)``, … is used.
+    - **Private**: on POSIX a file is created with mode 0600 and a directory
+      this call creates, ``directory`` or a missing parent, with 0700; a
+      directory that already exists keeps its mode.
     - **Limit**: ``max_total_bytes`` bounds the decoded bytes this call
       writes, summed over the attachments it saves. An attachment that
       would push the total past it is skipped (``skipped="over_limit"``); a
@@ -130,7 +144,7 @@ def save_attachments(
             f"(got {max_total_bytes})"
         )
     root = Path(os.path.abspath(directory))
-    root.mkdir(parents=True, exist_ok=True)
+    _make_directory(root)
 
     saved: list[SavedAttachment] = []
     total = 0
@@ -203,18 +217,42 @@ def _split_extension(name: str) -> tuple[str, str]:
     return (name[:dot], name[dot:]) if dot > 0 else (name, "")
 
 
+def _make_directory(path: Path) -> None:
+    """``mkdir -p`` that gives every directory it creates mode 0700.
+
+    A directory that already exists keeps its mode. ``Path.mkdir(parents=
+    True, mode=…)`` and ``os.makedirs`` would give the mode to the last
+    directory only, the parents they create getting the default.
+    """
+    if path.is_dir():
+        return
+    if path.parent != path:
+        _make_directory(path.parent)
+    try:
+        os.mkdir(path, _DIRECTORY_MODE)
+    except FileExistsError:
+        # Created meanwhile is fine; a file in the way is not.
+        if not path.is_dir():
+            raise
+
+
+def _open_private(path: str, flags: int) -> int:
+    """``open``'s opener: the flags ``open`` chose, and mode 0600."""
+    return os.open(path, flags, _FILE_MODE)
+
+
 def _create_exclusive(root: Path, name: str, data: bytes) -> Path:
     """Create ``name`` in ``root`` exclusively, trying ``<stem> (n)<ext>`` on a clash.
 
     ``open(…, "xb")`` is ``O_CREAT | O_EXCL``, which fails on any existing
-    entry, a symlink included, without following it. Returns the absolute
-    path written.
+    entry, a symlink included, without following it; the file gets mode
+    0600. Returns the absolute path written.
     """
     stem, ext = _split_extension(name)
     for attempt in range(1, _MAX_NAME_ATTEMPTS + 1):
         path = root / (name if attempt == 1 else f"{stem} ({attempt}){ext}")
         try:
-            handle = open(path, "xb")  # noqa: SIM115 — closed below, removed on a failed write
+            handle = open(path, "xb", opener=_open_private)  # noqa: SIM115 — closed below, removed on a failed write
         except FileExistsError:
             continue
         try:

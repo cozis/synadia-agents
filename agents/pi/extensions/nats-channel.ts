@@ -65,7 +65,6 @@ import { Type } from "typebox";
 import {
   AsyncPromptManager,
   PromptToolError,
-  discoverAgents,
 } from "./agent-tools.ts";
 import { PiPromptQueue, type QueuedPiPrompt } from "./prompt-queue.ts";
 import { resolveOwner, sanitizeSubjectToken } from "./subject.ts";
@@ -879,7 +878,7 @@ export default function (pi: ExtensionAPI) {
     name: "discover_agents",
     label: "Discover agents",
     description:
-      "Discover agents reachable on NATS. Returns instance_id values for prompt_agent. All filters are optional and AND-matched.",
+      "Discover agents reachable on NATS. Returns prompt_endpoint values for prompt_agent. All filters are optional and AND-matched.",
     parameters: Type.Object({
       agent: Type.Optional(Type.String({ minLength: 1 })),
       owner: Type.Optional(Type.String({ minLength: 1 })),
@@ -895,7 +894,7 @@ export default function (pi: ExtensionAPI) {
           "NATS is not connected",
         );
       }
-      const result = await discoverAgents(client, params);
+      const result = await outboundPrompts.discoverAgents(client, params);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         details: result,
@@ -909,7 +908,7 @@ export default function (pi: ExtensionAPI) {
     description:
       "Start prompting one discovered agent and return a short, session-scoped prompt handle after the target accepts it. Use wait_for_prompt to poll or wait for its result.",
     parameters: Type.Object({
-      instance_id: Type.String({ minLength: 1 }),
+      prompt_endpoint: Type.String({ minLength: 1 }),
       label: Type.String({ minLength: 1 }),
       text: Type.String({ minLength: 1 }),
       attachments: Type.Optional(
@@ -923,7 +922,6 @@ export default function (pi: ExtensionAPI) {
       max_runtime_ms: Type.Optional(
         Type.Integer({ minimum: 1, maximum: 3_600_000 }),
       ),
-      query_response: Type.Optional(Type.String()),
     }),
     async execute(toolCallId, params) {
       const client = agentClient;
@@ -937,7 +935,7 @@ export default function (pi: ExtensionAPI) {
       // fallback makes the handoff explicit if a host release schedules tool
       // execution from a neutral async context.
       const scope = activeTrace() ?? promptQueue.active?.trace;
-      const result = await outboundPrompts.promptAgent(client, params, {
+      const result = await outboundPrompts.promptAgent(params, {
         toolCallId,
         ...(scope ? { traceScope: scope } : {}),
         onSettled: (event) => {

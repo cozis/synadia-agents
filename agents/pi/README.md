@@ -164,10 +164,11 @@ cases where a local action shares the turn with a remote prompt.
 
 ### Agent tools
 
-| Tool              | What it does                                                                                                                                                  |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `discover_agents` | Discovers reachable agents and returns their `instance_id` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched.                  |
-| `prompt_agent`    | Prompts one discovered `instance_id`, collects its streamed response, and handles interactive queries with `query_response` or a conservative default denial. |
+| Tool              | What it does |
+| ----------------- | ------------ |
+| `discover_agents` | Discovers reachable agents and returns their `instance_id` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched. |
+| `prompt_agent`    | Starts a prompt to one discovered `instance_id` and immediately returns a pending `prompt_id`. `max_wait_ms`, when set, limits the remote request's total lifetime. |
+| `wait_for_reply`  | Waits for any supplied `prompt_id` to finish or for the required `timeout_ms` to elapse. Returns only that finished result, including its `prompt_id`; a timeout returns no prompt result. Use `timeout_ms: 0` to poll. |
 
 ### In-PI commands
 

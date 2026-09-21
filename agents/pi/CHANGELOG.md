@@ -10,7 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `discover_agents` and `prompt_agent` model tools. The extension keeps a
+- `discover_agents`, asynchronous `prompt_agent`, and `wait_for_reply` model
+  tools. `prompt_agent` returns a pending handle immediately; `wait_for_reply`
+  waits until any one of the supplied handles finishes and returns only that
+  result with its `prompt_id`, with a required timeout including zero for
+  polling. The extension keeps a
   client on the active NATS connection and passes the current queued prompt's
   `TraceScope` explicitly, so child calls preserve lineage even if PI invokes
   a tool outside the original async continuation.

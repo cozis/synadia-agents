@@ -62,7 +62,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { discoverAgents, promptAgent } from "./agent-tools.ts";
+import { AsyncPromptManager, discoverAgents } from "./agent-tools.ts";
 import { PiPromptQueue, type QueuedPiPrompt } from "./prompt-queue.ts";
 import { resolveOwner, sanitizeSubjectToken } from "./subject.ts";
 
@@ -304,6 +304,7 @@ export default function (pi: ExtensionAPI) {
   let shuttingDown = false;
 
   const promptQueue = new PiPromptQueue();
+  const outboundPrompts = new AsyncPromptManager();
 
   // Expiration rejects the deferred handler. AgentService then emits the
   // error and mandatory terminator; a request is never silently forgotten.
@@ -497,6 +498,7 @@ export default function (pi: ExtensionAPI) {
       await connectTask?.catch(() => undefined);
     }
     promptQueue.failAll("PI session shut down before the prompt completed");
+    outboundPrompts.cancelAll();
     await agentClient?.close().catch(() => undefined);
     agentClient = undefined;
     // Let AgentService observe every rejected deferred handler and publish
@@ -886,7 +888,7 @@ export default function (pi: ExtensionAPI) {
     name: "prompt_agent",
     label: "Prompt agent",
     description:
-      "Prompt one agent instance returned by discover_agents and collect its streamed response. Interactive queries receive query_response, or a conservative denial when omitted.",
+      "Start prompting one discovered agent and return a pending prompt handle immediately. Use wait_for_reply to poll or wait for results.",
     parameters: Type.Object({
       instance_id: Type.String({ minLength: 1 }),
       prompt: Type.String({ minLength: 1 }),
@@ -895,18 +897,38 @@ export default function (pi: ExtensionAPI) {
       ),
       query_response: Type.Optional(Type.String()),
     }),
-    async execute(toolCallId, params, signal) {
+    async execute(toolCallId, params) {
       const client = agentClient;
       if (!client) throw new Error("NATS is not connected");
       // PI normally preserves the scope seeded by injectInScope(). The queue
       // fallback makes the handoff explicit if a host release schedules tool
       // execution from a neutral async context.
       const scope = activeTrace() ?? promptQueue.active?.trace;
-      const result = await promptAgent(client, params, {
-        signal,
+      const result = await outboundPrompts.promptAgent(client, params, {
         toolCallId,
         ...(scope ? { traceScope: scope } : {}),
       });
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        details: result,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "wait_for_reply",
+    label: "Wait for agent replies",
+    description:
+      "Wait until one supplied prompt finishes or timeout_ms elapses. Returns only the finished result, including its prompt_id. timeout_ms is required; use 0 to poll. A timeout does not cancel pending prompts.",
+    parameters: Type.Object({
+      prompt_ids: Type.Array(Type.String({ minLength: 1 }), {
+        minItems: 1,
+        uniqueItems: true,
+      }),
+      timeout_ms: Type.Integer({ minimum: 0, maximum: 3_600_000 }),
+    }),
+    async execute(_toolCallId, params) {
+      const result = await outboundPrompts.waitForReply(params);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         details: result,

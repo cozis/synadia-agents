@@ -33,7 +33,12 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { AsyncPromptManager, discoverAgents } from "./src/agent-tools.js";
+import {
+  AsyncPromptManager,
+  PromptToolError,
+  discoverAgents,
+  type PromptSettledEvent,
+} from "./src/agent-tools.js";
 import {
   loadConfig,
   resolveRuntimeSettings,
@@ -269,20 +274,27 @@ function startupDescription(error: unknown): string {
 
 function promptCompletionNotice(
   promptId: string,
-  state: "completed" | "error",
+  state: PromptSettledEvent["state"],
 ): string {
   return [
-    `Agent prompt ${promptId} ${state === "completed" ? "completed" : "finished with an error"}.`,
-    `Call wait_for_reply with prompt_ids [${JSON.stringify(promptId)}] and timeout_ms 0 to retrieve the result.`,
+    `Agent prompt ${promptId} finished with state ${state}.`,
+    `Call wait_for_prompt with prompt_ids [${JSON.stringify(promptId)}] and timeout_ms 0 to retrieve the result.`,
   ].join(" ");
 }
 
 function toolError(error: unknown) {
+  const payload =
+    error instanceof PromptToolError
+      ? error.toJSON()
+      : {
+          code: "tool_error",
+          message: error instanceof Error ? error.message : String(error),
+        };
   return {
     content: [
       {
         type: "text" as const,
-        text: error instanceof Error ? error.message : String(error),
+        text: JSON.stringify(payload),
       },
     ],
     isError: true,
@@ -658,26 +670,49 @@ async function run(): Promise<void> {
         {
           name: "prompt_agent",
           description:
-            "Start prompting one agent instance returned by discover_agents. Returns a pending prompt handle immediately; use wait_for_reply to collect the response. Interactive queries receive query_response, or a conservative denial when omitted.",
+            "Start prompting one agent instance returned by discover_agents. Returns a short, session-scoped handle after the target accepts it; use wait_for_prompt to collect the response.",
           inputSchema: {
             type: "object",
             properties: {
               instance_id: { type: "string", minLength: 1 },
-              prompt: { type: "string", minLength: 1 },
-              max_wait_ms: {
+              label: { type: "string", minLength: 1 },
+              text: { type: "string", minLength: 1 },
+              attachments: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    path: { type: "string", minLength: 1 },
+                    filename: { type: "string", minLength: 1 },
+                  },
+                  required: ["path"],
+                  additionalProperties: false,
+                },
+              },
+              max_runtime_ms: {
                 type: "integer",
                 minimum: 1,
                 maximum: 3_600_000,
               },
               query_response: { type: "string" },
             },
-            required: ["instance_id", "prompt"],
+            required: ["instance_id", "label", "text"],
           },
         },
         {
-          name: "wait_for_reply",
+          name: "list_pending_prompts",
           description:
-            "Wait for one or more prompt_agent handles until one finishes or timeout_ms elapses. Returns only the finished result, including its prompt_id. A timeout of 0 polls and does not cancel pending prompts.",
+            "List prompts started by this Claude Code session that have not reached a terminal state.",
+          inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+        {
+          name: "wait_for_prompt",
+          description:
+            "Wait until the first supplied prompt reaches a terminal state or timeout_ms elapses. Returns exactly one result and does not consume it. A timeout of 0 polls.",
           inputSchema: {
             type: "object",
             properties: {
@@ -696,6 +731,23 @@ async function run(): Promise<void> {
             required: ["prompt_ids", "timeout_ms"],
           },
         },
+        {
+          name: "cancel_prompts",
+          description:
+            "Cancel one or more prompts started by this Claude Code session. Completed prompts are left unchanged.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              prompt_ids: {
+                type: "array",
+                items: { type: "string", minLength: 1 },
+                minItems: 1,
+                uniqueItems: true,
+              },
+            },
+            required: ["prompt_ids"],
+          },
+        },
       ],
     }));
 
@@ -704,7 +756,12 @@ async function run(): Promise<void> {
 
       if (request.params.name === "discover_agents") {
         try {
-          if (!agentClient) throw new Error("NATS is not connected");
+          if (!agentClient) {
+            throw new PromptToolError(
+              "nats_not_connected",
+              "NATS is not connected",
+            );
+          }
           const result = await discoverAgents(agentClient, args);
           return {
             content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -716,7 +773,12 @@ async function run(): Promise<void> {
 
       if (request.params.name === "prompt_agent") {
         try {
-          if (!agentClient) throw new Error("NATS is not connected");
+          if (!agentClient) {
+            throw new PromptToolError(
+              "nats_not_connected",
+              "NATS is not connected",
+            );
+          }
           const active = lastActiveRequestId
             ? pendingRequests.get(lastActiveRequestId)
             : undefined;
@@ -735,7 +797,7 @@ async function run(): Promise<void> {
                         event.state,
                       ),
                       meta: {
-                        event: "agent_prompt_completed",
+                        event: event.event,
                         prompt_id: event.prompt_id,
                         state: event.state,
                       },
@@ -757,11 +819,33 @@ async function run(): Promise<void> {
         }
       }
 
-      if (request.params.name === "wait_for_reply") {
+      if (request.params.name === "list_pending_prompts") {
+        const result = outboundPrompts.listPendingPrompts();
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      if (request.params.name === "wait_for_prompt") {
         try {
-          const result = await outboundPrompts.waitForReply(
+          const result = await outboundPrompts.waitForPrompt(
             args as unknown as Parameters<
-              AsyncPromptManager["waitForReply"]
+              AsyncPromptManager["waitForPrompt"]
+            >[0],
+          );
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          };
+        } catch (error) {
+          return toolError(error);
+        }
+      }
+
+      if (request.params.name === "cancel_prompts") {
+        try {
+          const result = outboundPrompts.cancelPrompts(
+            args as unknown as Parameters<
+              AsyncPromptManager["cancelPrompts"]
             >[0],
           );
           return {

@@ -123,7 +123,7 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
     mcp.fallbackNotificationHandler = async notification => {
       if (notification.method !== 'notifications/claude/channel') return
       const params = notification.params as { content: string; meta: Record<string, unknown> }
-      if (params.meta.event === 'agent_prompt_completed') {
+      if (params.meta.event === 'agent_prompt_finished') {
         onPromptCompletion(params.content, params.meta)
         return
       }
@@ -308,7 +308,8 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
         name: 'prompt_agent',
         arguments: {
           instance_id: targetService.instanceId,
-          prompt: 'delegated prompt',
+          label: 'delegated trace prompt',
+          text: 'delegated prompt',
         },
       })
       const startedText = result.content.find(item => item.type === 'text')
@@ -319,7 +320,7 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
       expect(started.state).toBe('pending')
       promptedId = started.prompt_id
       const waited = await mcp.callTool({
-        name: 'wait_for_reply',
+        name: 'wait_for_prompt',
         arguments: {
           prompt_ids: [started.prompt_id],
           timeout_ms: 2_000,
@@ -356,11 +357,11 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
         rootId: rootEdge!.root_id,
       })
       expect(JSON.parse(prompted)).toMatchObject({
-        timed_out: false,
+        type: 'prompt_result',
         prompt_id: promptedId,
         state: 'completed',
-        response: 'target response',
-        agent: { instance_id: targetService.instanceId },
+        response_text: 'target response',
+        target_instance_id: targetService.instanceId,
       })
     } finally {
       onPrompt = previousOnPrompt
@@ -385,7 +386,8 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
         name: 'prompt_agent',
         arguments: {
           instance_id: targetService.instanceId,
-          prompt: 'background notification prompt',
+          label: 'background notification',
+          text: 'background notification prompt',
         },
       })
       const startedText = startedResult.content.find(item => item.type === 'text')
@@ -400,26 +402,28 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
           throw new Error('prompt completion notification timed out')
         }),
       ])
-      expect(notified.content).toContain(`Agent prompt ${started.prompt_id} completed`)
+      expect(notified.content).toContain(
+        `Agent prompt ${started.prompt_id} finished with state completed`,
+      )
       expect(notified.meta).toEqual({
-        event: 'agent_prompt_completed',
+        event: 'agent_prompt_finished',
         prompt_id: started.prompt_id,
         state: 'completed',
       })
       expect(Object.keys(notified.meta)).not.toContain('trace_id')
 
       const waited = await tracedPlugin.callTool({
-        name: 'wait_for_reply',
+        name: 'wait_for_prompt',
         arguments: { prompt_ids: [started.prompt_id], timeout_ms: 0 },
       })
       const waitedText = waited.content.find(item => item.type === 'text')
       expect(
         JSON.parse(waitedText?.type === 'text' ? waitedText.text : ''),
       ).toMatchObject({
-        timed_out: false,
+        type: 'prompt_result',
         prompt_id: started.prompt_id,
         state: 'completed',
-        response: 'target response',
+        response_text: 'target response',
       })
     } finally {
       onPromptCompletion = () => undefined

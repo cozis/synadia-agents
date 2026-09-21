@@ -88,6 +88,17 @@ mcp.fallbackNotificationHandler = async notification => {
 
 await mcp.connect(transport)
 
+const toolNames = new Set((await mcp.listTools()).tools.map(tool => tool.name))
+for (const expected of [
+  'discover_agents',
+  'prompt_agent',
+  'list_pending_prompts',
+  'wait_for_prompt',
+  'cancel_prompts',
+]) {
+  if (!toolNames.has(expected)) throw new Error(`missing MCP tool: ${expected}`)
+}
+
 let discovered: Awaited<ReturnType<Agents['discover']>>[number] | undefined
 for (let attempt = 0; attempt < 20 && !discovered; attempt++) {
   const found = await discovery.discover({

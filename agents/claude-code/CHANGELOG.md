@@ -6,11 +6,12 @@ All notable changes to the Claude Code NATS channel are documented here.
 
 ### Added
 
-- `discover_agents`, asynchronous `prompt_agent`, and `wait_for_reply` MCP
-  tools. `prompt_agent` returns a pending handle immediately; `wait_for_reply`
-  waits until any one of the supplied handles finishes and returns only that
-  result with its `prompt_id`, with a required timeout including zero for
-  polling. The server keeps an SDK
+- The non-SDK prompt tool contract: `discover_agents`, asynchronous
+  `prompt_agent`, `list_pending_prompts`, `wait_for_prompt`, and
+  `cancel_prompts`. Handles are short and session-scoped; waits return only
+  the first terminal result and do not consume it; tracked work is bounded;
+  and response attachments are materialized as private temporary files. The
+  server keeps an SDK
   client on its active NATS connection and stores each admitted request's
   `TraceScope`, so a delegated prompt preserves the caller's lineage even
   though MCP tool execution is a separate async request.

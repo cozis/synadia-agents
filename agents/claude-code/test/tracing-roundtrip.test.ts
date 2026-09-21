@@ -290,6 +290,7 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
   test('prompt_agent propagates the active service trace to its target', async () => {
     const previousOnPrompt = onPrompt
     let prompted = ''
+    let promptedId = ''
     onPrompt = async (mcp, requestId, content) => {
       const result = await mcp.callTool({
         name: 'prompt_agent',
@@ -298,8 +299,22 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
           prompt: 'delegated prompt',
         },
       })
-      const text = result.content.find(item => item.type === 'text')
-      prompted = text?.type === 'text' ? text.text : ''
+      const startedText = result.content.find(item => item.type === 'text')
+      const started = JSON.parse(startedText?.type === 'text' ? startedText.text : '') as {
+        prompt_id: string
+        state: string
+      }
+      expect(started.state).toBe('pending')
+      promptedId = started.prompt_id
+      const waited = await mcp.callTool({
+        name: 'wait_for_reply',
+        arguments: {
+          prompt_ids: [started.prompt_id],
+          timeout_ms: 2_000,
+        },
+      })
+      const waitedText = waited.content.find(item => item.type === 'text')
+      prompted = waitedText?.type === 'text' ? waitedText.text : ''
       await mcp.callTool({
         name: 'reply',
         arguments: { request_id: requestId, text: `echo: ${content}` },
@@ -329,6 +344,9 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
         rootId: rootEdge!.root_id,
       })
       expect(JSON.parse(prompted)).toMatchObject({
+        timed_out: false,
+        prompt_id: promptedId,
+        state: 'completed',
         response: 'target response',
         agent: { instance_id: targetService.instanceId },
       })

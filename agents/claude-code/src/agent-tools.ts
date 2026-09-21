@@ -1,6 +1,8 @@
-// Claude Code-local implementation of the discover_agents and prompt_agent tools.
-// Kept here deliberately so model-tool policy is not part of the public SDK.
+// Claude Code-local implementation of the discover_agents, prompt_agent, and
+// wait_for_reply tools. Kept here deliberately so model-tool policy is not
+// part of the public SDK.
 
+import { randomUUID } from "node:crypto";
 import {
   bindActiveTrace,
   type Agent,
@@ -10,6 +12,7 @@ import {
 
 const DEFAULT_QUERY_RESPONSE =
   "This caller cannot answer interactive queries; deny or continue without approval.";
+const MAX_RETAINED_PROMPTS = 256;
 
 export interface DiscoverAgentsInput {
   readonly agent?: string;
@@ -22,15 +25,40 @@ export interface DiscoverAgentsInput {
 export interface PromptAgentInput {
   readonly instance_id: string;
   readonly prompt: string;
+  /** Absolute lifetime of the remote request. Waiting is controlled separately. */
   readonly max_wait_ms?: number;
   readonly query_response?: string;
 }
 
+export interface WaitForReplyInput {
+  readonly prompt_ids: readonly string[];
+  /** Required. Zero performs a non-blocking poll. */
+  readonly timeout_ms: number;
+}
+
 export interface PromptAgentOptions {
-  readonly signal?: AbortSignal;
   readonly toolCallId?: string;
   readonly traceScope?: TraceScope;
 }
+
+type PromptState = "pending" | "completed" | "error";
+type AgentDescription = ReturnType<typeof describeAgent>;
+
+type ManagedPrompt = {
+  readonly promptId: string;
+  readonly agent: AgentDescription;
+  readonly createdAt: number;
+  readonly controller: AbortController;
+  readonly completion: Promise<void>;
+  readonly finish: () => void;
+  readonly statuses: string[];
+  readonly queries: Array<{ id: string; prompt: string; response: string }>;
+  readonly attachments: Array<{ filename: string; content_base64: string }>;
+  state: PromptState;
+  response: string;
+  error?: string;
+  completedAt?: number;
+};
 
 export async function discoverAgents(
   client: Pick<Agents, "discover">,
@@ -49,79 +77,207 @@ export async function discoverAgents(
   return found.map(describeAgent);
 }
 
-export async function promptAgent(
-  client: Pick<Agents, "lookupInstance">,
-  input: PromptAgentInput,
-  options: PromptAgentOptions = {},
-) {
-  if (options.traceScope !== undefined) {
-    const { traceScope, ...promptOptions } = options;
-    return bindActiveTrace(traceScope, () =>
-      promptAgentUnbound(client, input, promptOptions),
-    );
-  }
-  return promptAgentUnbound(client, input, options);
-}
+export class AsyncPromptManager {
+  readonly #prompts = new Map<string, ManagedPrompt>();
 
-async function promptAgentUnbound(
-  client: Pick<Agents, "lookupInstance">,
-  input: PromptAgentInput,
-  options: Omit<PromptAgentOptions, "traceScope">,
-) {
-  const agent = await client.lookupInstance(input.instance_id);
-  if (!agent) {
-    throw new Error(
-      `agent instance ${JSON.stringify(input.instance_id)} was not found`,
-    );
+  async promptAgent(
+    client: Pick<Agents, "lookupInstance">,
+    input: PromptAgentInput,
+    options: PromptAgentOptions = {},
+  ) {
+    if (options.traceScope !== undefined) {
+      const { traceScope, ...promptOptions } = options;
+      return bindActiveTrace(traceScope, () =>
+        this.#promptAgentUnbound(client, input, promptOptions),
+      );
+    }
+    return this.#promptAgentUnbound(client, input, options);
   }
 
-  const statuses: string[] = [];
-  const queries: Array<{ id: string; prompt: string; response: string }> = [];
-  const attachments: Array<{ filename: string; content_base64: string }> = [];
-  let response = "";
-  const queryResponse = input.query_response ?? DEFAULT_QUERY_RESPONSE;
-  const stream = await agent.prompt(input.prompt, {
-    ...(input.max_wait_ms !== undefined
-      ? { maxWaitMs: input.max_wait_ms }
-      : {}),
-    ...(options.signal !== undefined ? { signal: options.signal } : {}),
-    ...(options.toolCallId !== undefined
-      ? { toolCallId: options.toolCallId }
-      : {}),
-  });
+  async waitForReply(input: WaitForReplyInput) {
+    if (!Number.isInteger(input.timeout_ms) || input.timeout_ms < 0) {
+      throw new Error("timeout_ms must be a non-negative integer");
+    }
+    if (!Array.isArray(input.prompt_ids) || input.prompt_ids.length === 0) {
+      throw new Error("prompt_ids must contain at least one prompt id");
+    }
+    const uniqueIds = new Set(input.prompt_ids);
+    if (uniqueIds.size !== input.prompt_ids.length) {
+      throw new Error("prompt_ids must not contain duplicates");
+    }
 
-  for await (const message of stream) {
-    switch (message.type) {
-      case "response":
-        response += message.text;
-        for (const attachment of message.attachments ?? []) {
-          attachments.push({
-            filename: attachment.filename,
-            content_base64: attachment.content,
-          });
-        }
-        break;
-      case "status":
-        statuses.push(message.status);
-        break;
-      case "query":
-        await message.reply(queryResponse);
-        queries.push({
-          id: message.id,
-          prompt: message.prompt,
-          response: queryResponse,
-        });
-        break;
+    const prompts = input.prompt_ids.map((id) => {
+      const prompt = this.#prompts.get(id);
+      if (!prompt) {
+        throw new Error(`pending prompt ${JSON.stringify(id)} was not found`);
+      }
+      return prompt;
+    });
+    const completed = prompts.find((prompt) => prompt.state !== "pending");
+    if (completed) {
+      return { timed_out: false, ...snapshotPrompt(completed) };
+    }
+    if (input.timeout_ms === 0) return { timed_out: true };
+
+    const settled = await waitUntilOneSettles(prompts, input.timeout_ms);
+    return settled
+      ? { timed_out: false, ...snapshotPrompt(settled) }
+      : { timed_out: true };
+  }
+
+  cancelAll(reason = "NATS channel shutting down"): void {
+    for (const prompt of this.#prompts.values()) {
+      if (prompt.state !== "pending") continue;
+      prompt.state = "error";
+      prompt.error = reason;
+      prompt.completedAt = Date.now();
+      prompt.controller.abort(new Error(reason));
+      prompt.finish();
     }
   }
 
+  async #promptAgentUnbound(
+    client: Pick<Agents, "lookupInstance">,
+    input: PromptAgentInput,
+    options: Omit<PromptAgentOptions, "traceScope">,
+  ) {
+    this.#makeRoom();
+    const agent = await client.lookupInstance(input.instance_id);
+    if (!agent) {
+      throw new Error(
+        `agent instance ${JSON.stringify(input.instance_id)} was not found`,
+      );
+    }
+
+    const prompt = createManagedPrompt(agent);
+    const stream = await agent.prompt(input.prompt, {
+      ...(input.max_wait_ms !== undefined
+        ? { maxWaitMs: input.max_wait_ms }
+        : {}),
+      signal: prompt.controller.signal,
+      ...(options.toolCallId !== undefined
+        ? { toolCallId: options.toolCallId }
+        : {}),
+    });
+    this.#prompts.set(prompt.promptId, prompt);
+
+    const queryResponse = input.query_response ?? DEFAULT_QUERY_RESPONSE;
+    void this.#collect(prompt, stream, queryResponse);
+    return snapshotPrompt(prompt);
+  }
+
+  async #collect(
+    prompt: ManagedPrompt,
+    stream: Awaited<ReturnType<Agent["prompt"]>>,
+    queryResponse: string,
+  ): Promise<void> {
+    try {
+      for await (const message of stream) {
+        if (prompt.state !== "pending") break;
+        switch (message.type) {
+          case "response":
+            prompt.response += message.text;
+            for (const attachment of message.attachments ?? []) {
+              prompt.attachments.push({
+                filename: attachment.filename,
+                content_base64: attachment.content,
+              });
+            }
+            break;
+          case "status":
+            prompt.statuses.push(message.status);
+            break;
+          case "query":
+            await message.reply(queryResponse);
+            prompt.queries.push({
+              id: message.id,
+              prompt: message.prompt,
+              response: queryResponse,
+            });
+            break;
+        }
+      }
+      if (prompt.state === "pending") prompt.state = "completed";
+    } catch (error) {
+      if (prompt.state === "pending") {
+        prompt.state = "error";
+        prompt.error = errorMessage(error);
+      }
+    } finally {
+      if (prompt.completedAt === undefined) prompt.completedAt = Date.now();
+      prompt.finish();
+    }
+  }
+
+  #makeRoom(): void {
+    if (this.#prompts.size < MAX_RETAINED_PROMPTS) return;
+    for (const [id, prompt] of this.#prompts) {
+      if (prompt.state === "pending") continue;
+      this.#prompts.delete(id);
+      if (this.#prompts.size < MAX_RETAINED_PROMPTS) return;
+    }
+    throw new Error(`too many active prompts (maximum ${MAX_RETAINED_PROMPTS})`);
+  }
+}
+
+function createManagedPrompt(agent: Agent): ManagedPrompt {
+  let finish!: () => void;
+  const completion = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
   return {
+    promptId: randomUUID(),
     agent: describeAgent(agent),
-    response,
-    statuses,
-    queries,
-    attachments,
+    createdAt: Date.now(),
+    controller: new AbortController(),
+    completion,
+    finish,
+    state: "pending",
+    response: "",
+    statuses: [],
+    queries: [],
+    attachments: [],
   };
+}
+
+async function waitUntilOneSettles(
+  prompts: readonly ManagedPrompt[],
+  timeoutMs: number,
+): Promise<ManagedPrompt | undefined> {
+  return new Promise<ManagedPrompt | undefined>((resolve) => {
+    let settled = false;
+    const finish = (completed?: ManagedPrompt) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(completed);
+    };
+    const timer = setTimeout(() => finish(), timeoutMs);
+    void Promise.race(
+      prompts.map((prompt) => prompt.completion.then(() => prompt)),
+    ).then(finish);
+  });
+}
+
+function snapshotPrompt(prompt: ManagedPrompt) {
+  return {
+    prompt_id: prompt.promptId,
+    state: prompt.state,
+    agent: prompt.agent,
+    response: prompt.response,
+    statuses: [...prompt.statuses],
+    queries: [...prompt.queries],
+    attachments: [...prompt.attachments],
+    created_at: prompt.createdAt,
+    ...(prompt.completedAt !== undefined
+      ? { completed_at: prompt.completedAt }
+      : {}),
+    ...(prompt.error !== undefined ? { error: prompt.error } : {}),
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function describeAgent(agent: Agent) {

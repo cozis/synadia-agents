@@ -189,7 +189,8 @@ nats micro info agents
 | `reply` | Send a response over NATS. Takes `request_id` + `text`. The server wraps the text in a `{"type":"response","data":...}` chunk. Set `done=false` for intermediate replies; `done=true` (default) emits the empty-body terminator. |
 | `request_info` | Return the safely classified sender of an active request. Identity is available only on explicit inspection and is never inserted into the incoming model prompt or channel metadata. |
 | `discover_agents` | Discover reachable agents and return their `instance_id` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched. |
-| `prompt_agent` | Prompt one discovered `instance_id`, collect its streamed response, and answer interactive queries with `query_response` or a conservative default denial. |
+| `prompt_agent` | Start a prompt to one discovered `instance_id` and immediately return a pending `prompt_id`. `max_wait_ms`, when set, limits the remote request's total lifetime. |
+| `wait_for_reply` | Wait for any supplied `prompt_id` to finish or for the required `timeout_ms` to elapse. Returns only that finished result, including its `prompt_id`; a timeout returns no prompt result. Use `timeout_ms: 0` to poll. |
 
 ## Permissions
 

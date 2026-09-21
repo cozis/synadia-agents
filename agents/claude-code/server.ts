@@ -33,7 +33,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { discoverAgents, promptAgent } from "./src/agent-tools.js";
+import { AsyncPromptManager, discoverAgents } from "./src/agent-tools.js";
 import {
   loadConfig,
   resolveRuntimeSettings,
@@ -332,6 +332,7 @@ async function run(): Promise<void> {
   let agentClient: Agents | undefined;
   let service: AgentService | undefined;
   let mcp: Server | undefined;
+  const outboundPrompts = new AsyncPromptManager();
 
   try {
     bundle = await resolveNatsConnectionBundle(settings.connectionSource, {
@@ -647,7 +648,7 @@ async function run(): Promise<void> {
         {
           name: "prompt_agent",
           description:
-            "Prompt one agent instance returned by discover_agents and collect its streamed response. Interactive queries receive query_response, or a conservative denial when omitted.",
+            "Start prompting one agent instance returned by discover_agents. Returns a pending prompt handle immediately; use wait_for_reply to collect the response. Interactive queries receive query_response, or a conservative denial when omitted.",
           inputSchema: {
             type: "object",
             properties: {
@@ -661,6 +662,28 @@ async function run(): Promise<void> {
               query_response: { type: "string" },
             },
             required: ["instance_id", "prompt"],
+          },
+        },
+        {
+          name: "wait_for_reply",
+          description:
+            "Wait for one or more prompt_agent handles until one finishes or timeout_ms elapses. Returns only the finished result, including its prompt_id. A timeout of 0 polls and does not cancel pending prompts.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              prompt_ids: {
+                type: "array",
+                items: { type: "string", minLength: 1 },
+                minItems: 1,
+                uniqueItems: true,
+              },
+              timeout_ms: {
+                type: "integer",
+                minimum: 0,
+                maximum: 3_600_000,
+              },
+            },
+            required: ["prompt_ids", "timeout_ms"],
           },
         },
       ],
@@ -687,12 +710,27 @@ async function run(): Promise<void> {
           const active = lastActiveRequestId
             ? pendingRequests.get(lastActiveRequestId)
             : undefined;
-          const result = await promptAgent(
+          const result = await outboundPrompts.promptAgent(
             agentClient,
-            args as unknown as Parameters<typeof promptAgent>[1],
+            args as unknown as Parameters<AsyncPromptManager["promptAgent"]>[1],
             {
               ...(active?.trace ? { traceScope: active.trace } : {}),
             },
+          );
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          };
+        } catch (error) {
+          return toolError(error);
+        }
+      }
+
+      if (request.params.name === "wait_for_reply") {
+        try {
+          const result = await outboundPrompts.waitForReply(
+            args as unknown as Parameters<
+              AsyncPromptManager["waitForReply"]
+            >[0],
           );
           return {
             content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -784,6 +822,7 @@ async function run(): Promise<void> {
         shuttingDown = true;
         clearInterval(ttlTimer);
         logEvent("shutting down");
+        outboundPrompts.cancelAll();
         await service!.stop().catch(() => undefined);
 
         const closed = Array.from(
@@ -838,6 +877,7 @@ async function run(): Promise<void> {
       }
     })();
   } catch (error) {
+    outboundPrompts.cancelAll();
     await service?.stop().catch(() => undefined);
     await agentClient?.close().catch(() => undefined);
     await mcp?.close().catch(() => undefined);

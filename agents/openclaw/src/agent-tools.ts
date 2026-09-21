@@ -16,6 +16,7 @@ import {
   StreamMaxWaitExceededError,
   bindActiveTrace,
   decodeStrictBase64,
+  parseAgentSubject,
   type Agent,
   type Agents,
   type AttachmentInput,
@@ -23,7 +24,7 @@ import {
   type TraceScope,
 } from "@synadia-ai/agents";
 
-const DEFAULT_QUERY_RESPONSE =
+const NON_INTERACTIVE_QUERY_RESPONSE =
   "This caller cannot answer interactive queries; deny or continue without approval.";
 export const DEFAULT_MAX_TRACKED_PROMPTS = 256;
 
@@ -41,13 +42,12 @@ export interface PromptAttachmentInput {
 }
 
 export interface PromptAgentInput {
-  readonly instance_id: string;
+  readonly prompt_endpoint: string;
   readonly label: string;
   readonly text: string;
   readonly attachments?: readonly PromptAttachmentInput[];
   /** Absolute lifetime of the remote request. Waiting is controlled separately. */
   readonly max_runtime_ms?: number;
-  readonly query_response?: string;
 }
 
 export interface WaitForPromptInput {
@@ -105,7 +105,7 @@ type PromptError = { readonly code: string; readonly message: string };
 type ManagedPrompt = {
   readonly promptId: string;
   readonly label: string;
-  readonly targetInstanceId: string;
+  readonly promptEndpoint: string;
   readonly createdAt: number;
   readonly controller: AbortController;
   readonly completion: Promise<void>;
@@ -121,25 +121,9 @@ type ManagedPrompt = {
   finishedAt?: number;
 };
 
-export async function discoverAgents(
-  client: Pick<Agents, "discover">,
-  input: DiscoverAgentsInput = {},
-) {
-  const filter = {
-    ...(input.agent !== undefined ? { agent: input.agent } : {}),
-    ...(input.owner !== undefined ? { owner: input.owner } : {}),
-    ...(input.name !== undefined ? { name: input.name } : {}),
-    ...(input.session !== undefined ? { session: input.session } : {}),
-  };
-  const found = await client.discover({
-    ...(input.timeout_ms !== undefined ? { timeoutMs: input.timeout_ms } : {}),
-    ...(Object.keys(filter).length > 0 ? { filter } : {}),
-  });
-  return found.map(describeAgent);
-}
-
 export class AsyncPromptManager {
   readonly #prompts = new Map<string, ManagedPrompt>();
+  readonly #agentsByEndpoint = new Map<string, Agent>();
   readonly #startingControllers = new Set<AbortController>();
   readonly #maxTrackedPrompts: number;
   #nextPromptNumber = 1;
@@ -155,18 +139,39 @@ export class AsyncPromptManager {
     this.#maxTrackedPrompts = maximum;
   }
 
+  async discoverAgents(
+    client: Pick<Agents, "discover">,
+    input: DiscoverAgentsInput = {},
+  ) {
+    const filter = {
+      ...(input.agent !== undefined ? { agent: input.agent } : {}),
+      ...(input.owner !== undefined ? { owner: input.owner } : {}),
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.session !== undefined ? { session: input.session } : {}),
+    };
+    const found = await client.discover({
+      ...(input.timeout_ms !== undefined
+        ? { timeoutMs: input.timeout_ms }
+        : {}),
+      ...(Object.keys(filter).length > 0 ? { filter } : {}),
+    });
+    for (const agent of found) {
+      this.#agentsByEndpoint.set(agent.promptSubject, agent);
+    }
+    return found.map(describeAgent);
+  }
+
   async promptAgent(
-    client: Pick<Agents, "lookupInstance">,
     input: PromptAgentInput,
     options: PromptAgentOptions = {},
   ) {
     if (options.traceScope !== undefined) {
       const { traceScope, ...promptOptions } = options;
       return bindActiveTrace(traceScope, () =>
-        this.#promptAgentUnbound(client, input, promptOptions),
+        this.#promptAgentUnbound(input, promptOptions),
       );
     }
-    return this.#promptAgentUnbound(client, input, options);
+    return this.#promptAgentUnbound(input, options);
   }
 
   listPendingPrompts() {
@@ -256,6 +261,7 @@ export class AsyncPromptManager {
       }
     }
     this.#prompts.clear();
+    this.#agentsByEndpoint.clear();
     if (this.#attachmentRoot) {
       rmSync(this.#attachmentRoot, { recursive: true, force: true });
       this.#attachmentRoot = undefined;
@@ -263,7 +269,6 @@ export class AsyncPromptManager {
   }
 
   async #promptAgentUnbound(
-    client: Pick<Agents, "lookupInstance">,
     input: PromptAgentInput,
     options: Omit<PromptAgentOptions, "traceScope">,
   ) {
@@ -274,11 +279,11 @@ export class AsyncPromptManager {
     let prompt: ManagedPrompt | undefined;
     let controller: AbortController | undefined;
     try {
-      const agent = await client.lookupInstance(input.instance_id);
+      const agent = this.#agentsByEndpoint.get(input.prompt_endpoint);
       if (!agent) {
         throw new PromptToolError(
           "agent_not_found",
-          `agent instance ${JSON.stringify(input.instance_id)} was not found`,
+          `prompt endpoint ${JSON.stringify(input.prompt_endpoint)} was not found in this session; call discover_agents first`,
         );
       }
 
@@ -302,7 +307,6 @@ export class AsyncPromptManager {
         controller,
         options.onSettled,
       );
-      const queryResponse = input.query_response ?? DEFAULT_QUERY_RESPONSE;
       const iterator = stream[Symbol.asyncIterator]();
 
       // The mandatory leading ack proves that the target accepted the prompt.
@@ -315,14 +319,14 @@ export class AsyncPromptManager {
         );
       }
       if (first.done) this.#settle(prompt, "completed");
-      else await this.#handleMessage(prompt, first.value, queryResponse);
+      else await this.#handleMessage(prompt, first.value);
 
       this.#startingControllers.delete(controller);
       this.#startingPrompts -= 1;
       reserved = false;
       this.#prompts.set(prompt.promptId, prompt);
       if (prompt.state === "pending") {
-        void this.#collect(prompt, iterator, queryResponse);
+        void this.#collect(prompt, iterator);
       }
       return promptDescriptor(prompt);
     } catch (error) {
@@ -340,13 +344,12 @@ export class AsyncPromptManager {
   async #collect(
     prompt: ManagedPrompt,
     iterator: AsyncIterator<StreamMessage>,
-    queryResponse: string,
   ): Promise<void> {
     try {
       for (;;) {
         const next = await iterator.next();
         if (next.done || prompt.state !== "pending") break;
-        await this.#handleMessage(prompt, next.value, queryResponse);
+        await this.#handleMessage(prompt, next.value);
       }
       if (prompt.state === "pending") this.#settle(prompt, "completed");
     } catch (error) {
@@ -368,7 +371,6 @@ export class AsyncPromptManager {
   async #handleMessage(
     prompt: ManagedPrompt,
     message: StreamMessage,
-    queryResponse: string,
   ): Promise<void> {
     switch (message.type) {
       case "response":
@@ -385,7 +387,7 @@ export class AsyncPromptManager {
         }
         break;
       case "query":
-        await message.reply(queryResponse);
+        await message.reply(NON_INTERACTIVE_QUERY_RESPONSE);
         break;
       case "status":
         break;
@@ -501,7 +503,7 @@ function createManagedPrompt(
   return {
     promptId,
     label: input.label,
-    targetInstanceId: input.instance_id,
+    promptEndpoint: input.prompt_endpoint,
     createdAt: Date.now(),
     controller,
     completion,
@@ -521,7 +523,7 @@ function promptDescriptor(prompt: ManagedPrompt) {
     prompt_id: prompt.promptId,
     label: prompt.label,
     state: prompt.state,
-    target_instance_id: prompt.targetInstanceId,
+    prompt_endpoint: prompt.promptEndpoint,
     created_at_ms: prompt.createdAt,
   };
 }
@@ -532,7 +534,7 @@ function promptResult(prompt: ManagedPrompt, requestedIds: readonly string[]) {
     prompt_id: prompt.promptId,
     label: prompt.label,
     state: prompt.state,
-    target_instance_id: prompt.targetInstanceId,
+    prompt_endpoint: prompt.promptEndpoint,
     response_text: prompt.responseText,
     attachments: [...prompt.attachments],
     created_at_ms: prompt.createdAt,
@@ -543,10 +545,19 @@ function promptResult(prompt: ManagedPrompt, requestedIds: readonly string[]) {
 }
 
 function validatePromptInput(input: PromptAgentInput): void {
-  if (typeof input.instance_id !== "string" || input.instance_id.length === 0) {
+  if (
+    typeof input.prompt_endpoint !== "string" ||
+    input.prompt_endpoint.length === 0
+  ) {
     throw new PromptToolError(
       "invalid_argument",
-      "instance_id must be a non-empty string",
+      "prompt_endpoint must be a non-empty string",
+    );
+  }
+  if (!parseAgentSubject(input.prompt_endpoint)) {
+    throw new PromptToolError(
+      "invalid_argument",
+      "prompt_endpoint must be an agents.prompt.<agent>.<owner>.<name> subject",
     );
   }
   if (typeof input.label !== "string" || input.label.length === 0) {
@@ -720,7 +731,7 @@ function describeAgent(agent: Agent) {
     description: agent.description,
     version: agent.version,
     protocol_version: agent.protocolVersion,
-    prompt_subject: agent.promptSubject,
+    prompt_endpoint: agent.promptSubject,
     ...(agent.promptEndpoint.attachmentsOk !== undefined
       ? { attachments_ok: agent.promptEndpoint.attachmentsOk }
       : {}),

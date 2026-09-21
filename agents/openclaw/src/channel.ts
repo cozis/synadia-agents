@@ -15,7 +15,6 @@ import { activeTrace } from "@synadia-ai/agents";
 import {
   AsyncPromptManager,
   PromptToolError,
-  discoverAgents,
   type PromptSettledEvent,
 } from "./agent-tools.js";
 import { outboundSubject } from "./nats/index.js";
@@ -110,7 +109,7 @@ export function createNatsAgentTools(
       name: "discover_agents",
       label: "Discover agents",
       description:
-        "Discover agents reachable on NATS. Returns instance_id values for prompt_agent. All filters are optional and AND-matched.",
+        "Discover agents reachable on NATS. Returns prompt_endpoint values for prompt_agent. All filters are optional and AND-matched.",
       parameters: Type.Object({
         agent: Type.Optional(Type.String({ minLength: 1 })),
         owner: Type.Optional(Type.String({ minLength: 1 })),
@@ -128,9 +127,9 @@ export function createNatsAgentTools(
             "NATS is not connected",
           );
         }
-        const result = await discoverAgents(
+        const result = await promptManagerFor(toolContext).discoverAgents(
           client,
-          params as Parameters<typeof discoverAgents>[1],
+          params as Parameters<AsyncPromptManager["discoverAgents"]>[1],
         );
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -142,9 +141,9 @@ export function createNatsAgentTools(
       name: "prompt_agent",
       label: "Prompt agent",
       description:
-        "Start prompting one agent instance returned by discover_agents. Returns a short, session-scoped handle after the target accepts it; use wait_for_prompt to collect the response.",
+        "Start prompting one prompt_endpoint returned by discover_agents. Returns a short, session-scoped handle after the target accepts it; use wait_for_prompt to collect the response.",
       parameters: Type.Object({
-        instance_id: Type.String({ minLength: 1 }),
+        prompt_endpoint: Type.String({ minLength: 1 }),
         label: Type.String({ minLength: 1 }),
         text: Type.String({ minLength: 1 }),
         attachments: Type.Optional(
@@ -158,7 +157,6 @@ export function createNatsAgentTools(
         max_runtime_ms: Type.Optional(
           Type.Integer({ minimum: 1, maximum: 3_600_000 }),
         ),
-        query_response: Type.Optional(Type.String()),
       }),
       async execute(toolCallId, params) {
         const client = getActiveAgentClient();
@@ -171,8 +169,7 @@ export function createNatsAgentTools(
         const outboundPrompts = promptManagerFor(toolContext);
         const scope = activeTrace() ?? activeAgentTraceScope();
         const result = await outboundPrompts.promptAgent(
-          client,
-          params as Parameters<AsyncPromptManager["promptAgent"]>[1],
+          params as Parameters<AsyncPromptManager["promptAgent"]>[0],
           {
             toolCallId,
             ...(scope ? { traceScope: scope } : {}),

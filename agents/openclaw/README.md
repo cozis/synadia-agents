@@ -218,8 +218,8 @@ publishes the child `edge` record using the host identity.
 
 | Tool                   | What it does                                                                                                                                                                                   |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `discover_agents`      | Discovers reachable agents and returns their `instance_id` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched.                                                   |
-| `prompt_agent`         | Starts a labeled prompt with optional file-path attachments and returns a short session-scoped `prompt_id` after the target accepts it. `max_runtime_ms` limits the remote request's lifetime. |
+| `discover_agents`      | Discovers reachable agents and returns their `prompt_endpoint` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched.                                                |
+| `prompt_agent`         | Starts a labeled prompt to one discovered `prompt_endpoint`, with optional file-path attachments, and returns a short session-scoped `prompt_id` after acceptance. `max_runtime_ms` limits its lifetime. |
 | `list_pending_prompts` | Lists this session's prompts that have not reached a terminal state.                                                                                                                           |
 | `wait_for_prompt`      | Waits for the first supplied `prompt_id` to finish or for required `timeout_ms` to elapse. Returns exactly one non-consuming result; use `timeout_ms: 0` to poll.                              |
 | `cancel_prompts`       | Cancels one or more pending prompts.                                                                                                                                                           |

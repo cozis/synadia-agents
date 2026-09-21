@@ -1,10 +1,18 @@
-# SDK identity and tracing release roadmap
+# SDK identity and extension-hooks release roadmap
 
-- Status: active; identity implementation complete, tracing and release execution remain
-- Last updated: 2026-09-01
+- Status: active; identity and extension-hook implementation complete, release execution remains
+- Last updated: 2026-09-21
 - Integration branch: `sdk-release-rollout`
-- Scope: TypeScript and Python caller/host SDKs, sender identity, optional tracing, provided
+- Scope: TypeScript and Python caller/host SDKs, sender identity, the extension hooks, provided
   integrations, examples, and release operations
+
+Tracing is no longer part of this release (2026-09-21). The SDKs in this rollout carry the protocol,
+sender identity (the `Agent-Sender` header and the signed heartbeat), saved reply attachments, the
+connection bundle, and generic extension hooks: prompt interceptors on the caller, request
+interceptors on the host, extra envelope fields read and written through `extras`, heartbeat
+extras, and signed publishes with a caller-chosen nonce. Extensions such as tracing build on those
+hooks in separate packages. [Workstream B](#workstream-b-optional-tracing-release-gate--moved-out)
+keeps the former tracing gate for the record.
 
 This is the persistent source of truth for the coordinated SDK rollout. Check an item only when
 the evidence is linked here or in the relevant pull request or tracking issue. This file is public:
@@ -17,24 +25,25 @@ rollback instructions are ordinary bullets because they are procedures, not inco
 
 The rollout has five non-negotiable outcomes:
 
-1. Existing agents and callers continue to work without sender identity or tracing.
+1. Existing agents and callers continue to work without sender identity or any extension.
 2. Explicitly configured signers are bound to the live NATS connection and cannot silently
    downgrade or impersonate another connection user.
 3. The dependency cooldown remains effective for external packages during the accelerated
    internal-package rollout.
 4. Public caller and AgentService documentation teaches sender identity without unreleased product
    names, private roadmap language, or unapproved specification links.
-5. Optional tracing is wire-neutral when unconfigured and cannot change authorization decisions.
+5. The extension hooks are wire-neutral when unused and cannot change authorization decisions;
+   extensions built on them, such as tracing, ship in separate packages.
 
 ## Workflow terminology
 
 - **Integration branch:** `sdk-release-rollout`, where the coordinated feature, compatibility,
   documentation, and release work is assembled. It is pushed and retained through final cutover.
-- **SDK feature PR:** an implementation change targeting the integration branch, such as tracing
-  or an identity correctness fix.
+- **SDK feature PR:** an implementation change targeting the integration branch, such as the
+  extension hooks or an identity correctness fix.
 - **SDK release PR:** the reviewed version, dependency, changelog, and package-content changes for
   an SDK release. It does not authorize publication.
-- **Integration PR:** optional-identity/tracing compatibility and dependency changes for a provided
+- **Integration PR:** optional-identity compatibility and dependency changes for a provided
   integration or example.
 - **Rollout PR:** the final integration-branch pull request to `main`, after the recorded registry
   contract and aging requirements are complete.
@@ -49,7 +58,9 @@ The rollout has five non-negotiable outcomes:
 - Review status: independent read-only audits were completed and reconciled into these gates.
 - [x] The signer/live-connection correctness blockers in this roadmap are fixed
       ([PR #188](https://github.com/synadia-ai/synadia-agents/pull/188)).
-- [ ] The optional tracing feature is merged and its release gate is complete.
+- [ ] The extension hooks are merged in both SDK languages, and tracing is out of both SDKs and
+      the Claude Code, OpenClaw and PI integrations; the tracing gate moved out
+      ([Workstream B](#workstream-b-optional-tracing-release-gate--moved-out)).
 - [ ] All intended SDK and integration artifacts are published through the recorded registry contract.
 - [x] Every provided integration and release-consuming example is assessed; in-repository identity
       plumbing is complete ([PR #190](https://github.com/synadia-ai/synadia-agents/pull/190)).
@@ -67,8 +78,8 @@ The rollout has five non-negotiable outcomes:
   downgrades.
 - Missing discovery permission or non-NKEY authentication does not prevent explicitly
   identity-free operation.
-- Tracing lands before these SDK versions are released and remains optional and wire-neutral when
-  absent.
+- Tracing is not part of these SDK versions. The extension hooks are optional and wire-neutral
+  when unused; extensions such as tracing build on them in separate packages.
 - The external dependency cooldown remains active except for a reviewed, scoped, expiring internal
   package mechanism.
 - npm publication still requires the existing explicit per-command approval. For Python, deliberately
@@ -310,14 +321,26 @@ connection.
 - [x] Reverse identity lookup that returns one of several sessions sharing a key is not an
       authorization primitive and must not be used to attribute a specific session.
 
-## Workstream B: optional tracing release gate
+## Workstream B: optional tracing release gate — moved out
 
-The SDK versions in this rollout depend on the separately developed optional tracing change. Its
-public wording must remain product-neutral.
+**Moved out of this release (2026-09-21).** The SDKs no longer carry tracing; they carry the
+extension hooks it builds on, and tracing ships in a separate package on top of them. The release
+no longer waits for tracing, and the items below are not gates for these SDK versions: they are
+kept as the record of the former gate and as requirements for whatever builds tracing on the
+hooks. What this release carries instead:
+
+- [ ] Prompt interceptors in two phases (additions without side effects; publishing only once the
+      prompt is signed and checked), request interceptors around the handler, envelope `extras`,
+      heartbeat extras, and a caller-chosen nonce for signed publishes, in both SDK languages, with
+      a generic test extension that proves them.
+- [ ] Tracing removed from both SDKs and from the Claude Code, OpenClaw and PI integrations; the
+      Claude Code runtime bundle rebuilt.
+
+The former gate, for the record:
 
 - Implementation owner: trace SDK owner (`@cozis`)
-- PR and reviewed merge SHA: _not yet recorded_
-- Fallback: none for this release. If tracing is delayed, the coordinated SDK release waits.
+- PR and reviewed merge SHA: _not recorded; moved out_
+- Fallback: superseded. The release no longer waits for tracing.
 
 - [ ] Open a reviewed feature PR targeting `sdk-release-rollout`; do not push the implementation
       directly to the shared branch.
@@ -512,8 +535,8 @@ Any artifact-byte change requires a new version and age clock.
 - [ ] Generate the pre-release dependency inventory/SBOM with names, versions, hashes, licenses,
       and source registries.
 - [x] Snapshot and freeze approved external packages and release/build inputs now.
-- [ ] After tracing lands, review only intentional additions and record the final graph; reject
-      unrelated updates.
+- [ ] Review only intentional additions since the freeze snapshot (tracing, now outside these SDKs,
+      adds none) and record the final graph; reject unrelated updates.
 - [ ] Pause dependency-update merges and preserve old locks/artifacts as rollback baseline.
 - [x] Record dependency-bot configuration and ensure it cannot bypass the rollout freeze
       through a workflow or configuration outside the expected directory.
@@ -681,11 +704,11 @@ the second remains open until the exact final registry bytes are exercised durin
 | Operator-attested user/account mismatch | prompt rejected before ack/handler | [x] | [ ] |
 | New caller -> old extension-ignoring agent | prompt/stream compatibility | [x] | [ ] |
 | Midstream query/reply | documented as unsigned; no inherited sender authorization | [x] | [ ] |
-| Trace context plus identity | trace is untrusted; combined headers bounded; auth unchanged | [ ] | [ ] |
-| No trace configuration | byte-for-byte legacy wire behavior | [ ] | [ ] |
+| Extension fields/headers plus identity | extras are untrusted and outside the signature; combined headers bounded; auth unchanged | [ ] | [ ] |
+| No interceptors or heartbeat extras configured | byte-for-byte legacy wire behavior | [ ] | [ ] |
 
 Additional parser and concurrency coverage includes unknown/duplicate headers, concurrent sessions,
-multi-instance replay boundaries, service import/account-token cases, malicious trace/baggage input,
+multi-instance replay boundaries, service import/account-token cases, malicious extension input,
 stream cancellation, and mixed TypeScript/Python clients and hosts.
 
 ## Staged release runbook
@@ -693,7 +716,7 @@ stream cancellation, and mixed TypeScript/Python clients and hosts.
 ### Before publication
 
 - [ ] Every resolved implementation contract and rollout prerequisite is complete.
-- [ ] Identity correctness fixes and tracing have merged with all required checks.
+- [ ] Identity correctness fixes and the extension hooks have merged with all required checks.
 - [ ] Full inventory scope, release DAG, versions, constraints, artifact hashes, and
       rollback baseline are approved.
 - [ ] Full-repository and exact-artifact terminology/content audits pass.
@@ -737,7 +760,8 @@ stream cancellation, and mixed TypeScript/Python clients and hosts.
 ## Rollback and incident response
 
 Triggers include identity-free regression, signer/connection-binding failure, secret disclosure,
-unexpected dependency change, provenance mismatch, partial publish/tag movement, trace data leak, or a
+unexpected dependency change, provenance mismatch, partial publish/tag movement, data leaked through
+an extension hook, or a
 material integration failure.
 
 - Stop publication, tag movement, deployment, and announcements; record the incident.
@@ -782,6 +806,7 @@ The rollout is complete only when:
 - all applicable compatibility rows have durable artifact-based evidence;
 - every in-scope integration and release consumer is complete;
 - public caller and AgentService docs teach identity-free and signed operation using approved terms;
-- tracing is optional, privacy-reviewed, and wire-neutral when absent;
+- the extension hooks are optional and wire-neutral when unused, and tracing ships outside these
+  SDKs;
 - registry/source/provenance records and tested rollback paths are archived; and
 - no unresolved release blocker remains in this roadmap or its linked pull requests.

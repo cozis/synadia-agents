@@ -206,6 +206,71 @@ What to know:
 - `scripts/whoami.py` prints what `self_id()` resolves for a connection
   (or why it resolves nothing).
 
+## Prompt interceptors
+
+An extension that needs to see or add to every prompt — extra envelope
+fields, extra headers, a signed message of its own about the prompt —
+plugs in as a `PromptInterceptor`, in two phases:
+
+```python
+import json
+from synadia_ai.agents import Agents, PromptExtras, PromptInterceptorContext
+
+class Tagging:
+    # Phase one: what the prompt carries. No side effects.
+    async def before_prompt(self, ctx: PromptInterceptorContext) -> PromptExtras | None:
+        # ctx.agent, ctx.prompt, ctx.envelope_extras, ctx.context (prompt(context=...)),
+        # ctx.connection
+        request_id = str(ctx.context.get("request_id", "none"))
+        return PromptExtras(
+            fields={"x_request": request_id},
+            headers={"X-Request": request_id},
+            state=request_id,
+        )
+
+    # Phase two (optional): the prompt is signed and checked, and goes out right after.
+    async def before_publish(
+        self, ctx: PromptInterceptorContext, extras: PromptExtras | None
+    ) -> None:
+        if ctx.identity.can_sign and extras is not None:
+            body = json.dumps({"request": extras.state, "to": ctx.agent.instance_id})
+            await ctx.identity.publish_signed("audit.prompts", body)
+
+agents = Agents(nc=nc, identity=identity, interceptors=[Tagging()])
+async for msg in agent.prompt("hi", context={"request_id": "r-1"}):
+    ...
+```
+
+- Both phases run at publish time — on the stream's first `__anext__` —
+  in one copy of the `contextvars` context `prompt()` was called in, and
+  get the same `ctx`. A prompt that is never iterated, or that `prompt()`
+  itself rejects, runs neither.
+- `before_prompt` runs after the sender identity is resolved and has no
+  side effects: the prompt can still fail after it (the size of the
+  envelope its fields make, its identity). An exception fails the prompt
+  before anything is sent. Several interceptors are merged in order, the
+  later winning a key.
+- `before_publish` (optional; `PublishingPromptInterceptor` types it) runs
+  after the `Agent-Sender` header is signed and the size checked,
+  immediately before the prompt is published, with what the same
+  interceptor's `before_prompt` returned (`state` included). Messages
+  published there describe a prompt that goes out, barring a transport
+  failure. An exception is logged and does not stop the prompt.
+- `fields` are written as top-level envelope fields next to the
+  protocol's (§5.6 obliges receivers to tolerate them); a host reads them
+  back from `Envelope.extras`. A field the envelope defines and the
+  `Agent-Sender` header are refused.
+- An `Envelope` passed to `prompt()` goes out with its own extra fields,
+  so a relay that forwards the envelope it received preserves them (§5.6).
+  Interceptors see them as `ctx.envelope_extras`, a read-only copy (empty
+  for a text prompt); a field an interceptor adds replaces one of the same
+  name.
+- `ctx.identity.publish_signed(subject, payload, nonce=...)` signs with the
+  prompting client's identity; pass `nonce` when the body carries its own
+  id, and it is the header's nonce and the `Nats-Msg-Id` too (also on
+  `Agents.publish_signed`).
+- Without interceptors nothing changes on the wire.
+
 ## Mid-stream queries
 
 Agent handlers can pause their response stream to ask the caller a

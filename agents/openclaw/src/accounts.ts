@@ -4,7 +4,6 @@ import type {
   ResolvedNatsAccount,
   SenderIdentityMode,
   SenderTrustMode,
-  TracingMode,
 } from "./types.js";
 
 // OpenClaw's canonical default account id. Kept local so account resolution
@@ -48,8 +47,7 @@ function applyEnvOverride(
     | "owner"
     | "credentials"
     | "senderIdentity"
-    | "minSenderTrust"
-    | "tracing",
+    | "minSenderTrust",
   configValue: string | undefined,
   envValue: string | undefined,
   accountId: string,
@@ -85,12 +83,6 @@ function resolveSenderTrust(value: unknown, source: string): SenderTrustMode {
   if (value === undefined || value === "") return "any";
   if (value === "any" || value === "signed") return value;
   throw new Error(`${source} must be "any" or "signed"`);
-}
-
-function resolveTracing(value: unknown, source: string): TracingMode {
-  if (value === undefined || value === "") return "off";
-  if (value === "off" || value === "on") return value;
-  throw new Error(`${source} must be "off" or "on"`);
 }
 
 // First defined entry from an ordered list of env var names. Identity vars
@@ -152,7 +144,6 @@ export function resolveNatsAccount(
     // Validate the final values after env overrides have been applied.
     senderIdentity: (raw.senderIdentity ?? "off") as SenderIdentityMode,
     minSenderTrust: (raw.minSenderTrust ?? "any") as SenderTrustMode,
-    tracing: (raw.tracing ?? "off") as TracingMode,
     owner,
     config: raw,
     // Replaced below after the atomic source has been selected.
@@ -268,14 +259,6 @@ export function resolveNatsAccount(
     id,
     "NATS_MIN_SENDER_TRUST",
   );
-  applyEnvOverride(
-    resolved,
-    "tracing",
-    raw.tracing,
-    env.NATS_TRACING,
-    id,
-    "NATS_TRACING",
-  );
 
   // ── $NATS_CONTEXT (highest precedence) ───────────────────────────────
   // Applied LAST so it wins over $NATS_URL and $NATS_CREDENTIALS as the
@@ -307,12 +290,6 @@ export function resolveNatsAccount(
     env.NATS_MIN_SENDER_TRUST !== undefined
       ? "NATS_MIN_SENDER_TRUST"
       : `channels.nats.accounts.${id}.minSenderTrust`,
-  );
-  resolved.tracing = resolveTracing(
-    resolved.tracing,
-    env.NATS_TRACING !== undefined
-      ? "NATS_TRACING"
-      : `channels.nats.accounts.${id}.tracing`,
   );
 
   if (resolved.context) {

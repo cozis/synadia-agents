@@ -113,8 +113,15 @@ export {
   DEFAULT_STATUS_TIMEOUT_MS,
 } from "./prompt/options.js";
 export {
+  type PromptExtras,
+  type PromptInterceptor,
+  type PromptInterceptorContext,
+  type PromptSigning,
+} from "./prompt/interceptor.js";
+export {
   PromptStream,
   buildServiceErrorFromMsg,
+  type PreparedRequest,
   type PromptStreamOptions,
   type StreamMessage,
   type ResponseAttachment,
@@ -198,6 +205,7 @@ export {
   encodedHeaderLength,
   expectedSenderHeaderBytes,
   formatSenderTimestamp,
+  isValidSenderNonce,
   maxSenderHeaderBytes,
   normalizeAccountTokenPosition,
   parseSenderHeader,
@@ -245,29 +253,6 @@ export {
 } from "./identity/self-id.js";
 export { type IdentityOptions } from "./identity/context.js";
 export { base64UrlDecode, base64UrlEncode, sha256, sha256Hex } from "./identity/crypto.js";
-
-// Observability tracing (opt-in)
-export {
-  DEFAULT_EDGE_SUBJECT,
-  EDGE_RECORD_VERSION,
-  THREAD_ID_HEX_LEN,
-  TOOL_CALL_ID_MAX,
-  activeTrace,
-  assertValidTraceOptions,
-  bindActiveTrace,
-  buildEdgeRecord,
-  countTraceRecordDropped,
-  countTraceRecordPublished,
-  inheritedTraceOptions,
-  isThreadId,
-  randomThreadId,
-  traceRecordCounts,
-  validToolCallId,
-  type BuiltEdgeRecord,
-  type TraceOptions,
-  type TraceRecordCounts,
-  type TraceScope,
-} from "./trace.js";
 
 // Logging
 export { type Logger, SILENT_LOGGER } from "./internal/logger.js";

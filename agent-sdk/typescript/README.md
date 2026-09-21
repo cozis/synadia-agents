@@ -156,6 +156,45 @@ What to know:
 
 `SenderGate` / `NonceCache` expose the same classification for hand-rolled services (`SenderGateOptions.operatorAttested` / `.resolver` bind the two features above); the codec itself (`verifySender`, `verifySenderHeader`, `SenderInfo`, `formatSender`, `AgentId`, `SenderResolver`) lives in `@synadia-ai/agents` and is not re-exported here.
 
+## Request interceptors and heartbeat extras
+
+An extension on the host side plugs in around the prompt handler as a `RequestInterceptor`, and adds heartbeat fields with `heartbeatExtras`:
+
+```ts
+import { AsyncLocalStorage } from "node:async_hooks";
+import {
+  AgentService,
+  RequestRejectedError,
+  type RequestInterceptor,
+} from "@synadia-ai/agent-service";
+
+const requestIds = new AsyncLocalStorage<string>();
+let handled = 0;
+const tagging: RequestInterceptor = {
+  async aroundRequest(ctx, next) {
+    // ctx.envelope (unknown fields in ctx.envelope.extras), ctx.sender, ctx.subject, ctx.headers
+    const id = ctx.envelope.extras?.["x_request"];
+    if (id !== undefined && typeof id !== "string")
+      throw new RequestRejectedError(400, "bad x_request");
+    handled += 1;
+    await requestIds.run(id ?? "none", next); // the handler sees requestIds.getStore()
+  },
+};
+
+const service = new AgentService({
+  nc,
+  agent: "my-agent",
+  owner: "me",
+  name: "demo",
+  interceptors: [tagging],
+  heartbeatExtras: () => ({ handled }),
+});
+```
+
+- Interceptors run for every admitted prompt — after the envelope is decoded and the sender classified, before the §6.4 ack — the first listed outermost. Throwing before `next()` refuses the request with no ack: a `RequestRejectedError` answers its §9 code, a `ProtocolError` `400`, anything else `500`.
+- `next()` acks, runs the rest of the chain and the handler, and resolves when they are done; an interceptor must call it once or throw. A throw after `next()` resolved leaves the handler's full reply standing — no error frame — and is logged with a fixed line, never the error's details: an interceptor that wants those logged logs them itself.
+- `heartbeatExtras` is read when each heartbeat and `status` reply is built. A provider that throws, a §8.3 field name, or a value that does not serialize costs that beat its extras, never the beat.
+
 ## Reference agent (`@synadia-ai/agent-service/testing`)
 
 ```ts

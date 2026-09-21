@@ -1,8 +1,8 @@
 // The `Agent-Sender` header on a heartbeat.
 //
 // To a receiver that requires signed heartbeats, an agent's presence is its
-// signed heartbeat: the host sets the same `Agent-Sender` header the SDK
-// puts on its edge records on every heartbeat it publishes — `sub` the
+// signed heartbeat: the host sets an `Agent-Sender` header of the
+// sender-identity extension on every heartbeat it publishes — `sub` the
 // heartbeat subject as published, `ts` the heartbeat's own `ts`, a fresh
 // nonce per beat, `sig` over subject · ts · nonce · sha256(the exact
 // payload bytes published). No new payload field, no new signing format:

@@ -29,6 +29,13 @@ omission performs no host-identity lookup or registration disclosure. It
 cross-check of a closed endpoint. The codec itself lives in
 :mod:`synadia_ai.agents.identity`; the stateful parts are in
 :mod:`synadia_ai.agent_service.identity`.
+
+Extension hooks: ``interceptors`` run around the prompt handler — each sees
+the decoded envelope (its unknown fields in ``extras``), the classified
+sender, the subject and the headers, may refuse the request with a §9
+error before the handler runs, and runs the rest of the request inside a
+context of its own (see :mod:`synadia_ai.agent_service.interceptor`);
+``heartbeat_extras`` adds fields to every heartbeat and status reply.
 """
 
 from __future__ import annotations
@@ -36,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from typing import TYPE_CHECKING
@@ -61,14 +68,8 @@ from synadia_ai.agents import (
     ResponseChunk,
     SenderResolver,
     StatusChunk,
-    TraceOptions,
-    TraceScope,
-    active_trace,
-    bind_active_trace,
     decode,
     format_sender,
-    random_thread_id,
-    trace_record_counts,
 )
 from synadia_ai.agents.identity import (
     DEFAULT_RESOLVE_TTL_S,
@@ -84,13 +85,19 @@ from synadia_ai.agents.messages import encode_chunk
 from ._bytes import format_human_bytes, parse_human_bytes
 from ._inbox import new_inbox
 from ._logging import get_logger
-from .heartbeat import HeartbeatSigner, build_heartbeat_payload, run_publisher
+from .heartbeat import ExtrasProvider, HeartbeatSigner, build_heartbeat_payload, run_publisher
 from .identity import (
     DEFAULT_MIN_SENDER_TRUST,
     DEFAULT_REPLAY_WINDOW_S,
     AcceptSenderHook,
     SenderGate,
     ServiceIdentity,
+)
+from .interceptor import (
+    CallNext,
+    RequestInterceptor,
+    RequestInterceptorContext,
+    RequestRejectedError,
 )
 
 if TYPE_CHECKING:
@@ -150,34 +157,6 @@ DEFAULT_ATTACHMENTS_OK = True
 DEFAULT_KEEPALIVE_INTERVAL_S: float = 30.0
 
 
-def _trace_binding(
-    envelope: Envelope, options: TraceOptions | None
-) -> contextlib.AbstractContextManager[None]:
-    """Bind this execution's trace, or nothing at all.
-
-    A caller's lineage — the pair, ``thread_id`` and ``root_id`` — is
-    adopted whatever this service is configured for, so a tree that starts
-    upstream is not broken here. With no lineage on the envelope, only a
-    service that opted in mints a root — an untraced service binds
-    nothing, so nothing is minted per request and
-    :meth:`PromptStream.trace_headers` stays empty rather than stamping
-    ids on model requests the operator never asked to trace.
-
-    A half pair is never completed: :func:`~synadia_ai.agents.decode`
-    already rejects it on the wire, and an envelope built by hand gets the
-    same :class:`ProtocolError` here — a ``400`` to the caller — rather
-    than a tree of its own.
-    """
-    thread_id, root_id = envelope.thread_id, envelope.root_id
-    if thread_id is None or root_id is None:
-        if thread_id is not None or root_id is not None:
-            raise ProtocolError("envelope thread_id and root_id must be given together")
-        if options is None:
-            return contextlib.nullcontext()
-        thread_id = root_id = random_thread_id()
-    return bind_active_trace(TraceScope(thread_id, root_id), options)
-
-
 class PromptStream:
     """Handle given to a prompt handler for emitting response chunks.
 
@@ -197,29 +176,6 @@ class PromptStream:
         self._request = request
         self._nc = nc
         self._sender = sender
-
-    def trace_headers(self) -> dict[str, str]:
-        """Headers for every model request this execution issues.
-
-        An agent stamps these on each completion request so the model
-        proxy files the call under the right thread and tree without
-        seeing any NATS traffic. Hierarchy is the edge records' job, so
-        the proxy needs no parent or tool-call header.
-
-        ``{}`` when the prompt was untraced, so harness code needs no
-        plumbing and degrades to nothing.
-
-        Each call counts against this execution: the running total is
-        recorded on the edge of any thread it spawns afterwards.
-        """
-        scope = active_trace()
-        if scope is None:
-            return {}
-        scope.turn_count_hint[0] += 1
-        return {
-            "X-Synadia-Thread-ID": scope.thread_id,
-            "X-Synadia-Root-ID": scope.root_id,
-        }
 
     @property
     def sender(self) -> SenderInfo | None:
@@ -369,6 +325,25 @@ class AgentService:
       cross-check — a deployment promise the SDK cannot verify (the
       endpoint is *closed*); a present stamp that disagrees with the
       signed pair → ``401``, agreement → ``sender.account_attested``.
+
+    Extension hooks — both optional:
+
+    - ``interceptors``: request interceptors, run around the prompt
+      handler for every admitted ``prompt`` request — after the envelope
+      is decoded and the sender classified, before the §6.4 ack; the first
+      listed is the outermost. Each may refuse the request by raising
+      before it calls ``call_next()`` (a
+      :class:`~synadia_ai.agent_service.RequestRejectedError` carries its
+      §9 code, a :class:`~synadia_ai.agents.ProtocolError` is a ``400``,
+      anything else a ``500``): the caller then gets the error frame and
+      the terminator, no ack. ``call_next()`` acks, runs the rest of the
+      chain and the handler, and returns when they are done; an
+      interceptor runs it inside a :mod:`contextvars` binding of its own,
+      which the handler then sees.
+    - ``heartbeat_extras``: extra fields for every heartbeat and every
+      ``status`` reply, read when each is built. A §8.3 field name, a
+      value that does not serialise, or a provider that raises costs that
+      beat its extras — never the beat — and is logged.
     """
 
     def __init__(
@@ -390,7 +365,8 @@ class AgentService:
         accept_sender: AcceptSenderHook | None = None,
         resolve_ttl_s: float = DEFAULT_RESOLVE_TTL_S,
         operator_attested: bool = False,
-        trace: TraceOptions | None = None,
+        interceptors: Sequence[RequestInterceptor] = (),
+        heartbeat_extras: ExtrasProvider | None = None,
     ) -> None:
         if heartbeat_interval_s <= 0:
             raise ValueError("heartbeat_interval_s must be > 0 (heartbeat is mandatory in v0.3)")
@@ -418,9 +394,9 @@ class AgentService:
         self._effective_max_payload_value = max_payload
         self._attachments_ok = attachments_ok
         self._keepalive_interval_s = keepalive_interval_s
-        # Observability: handed down to clients used inside prompt handlers.
-        # The service itself never writes trace records.
-        self._trace = trace
+        # Copied: a caller mutating its list afterwards changes nothing here.
+        self._interceptors = tuple(interceptors)
+        self._heartbeat_extras_provider = heartbeat_extras
         self._prompt_handler: PromptHandler | None = None
         self._service: Service | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
@@ -659,21 +635,37 @@ class AgentService:
     def _heartbeat_extras(self) -> dict[str, object]:
         """What goes on the heartbeat beyond the §8.3 required fields.
 
-        When the service opted in to tracing and publishes records: how
-        many trace records this process has published and dropped since
-        it started, as ``records_published`` and ``records_dropped``.
-        Read when each beat is built, so every beat carries the current
-        totals. A rising dropped count tells whoever consumes the
-        heartbeat that records this process owed were never sent. An
-        untraced service reports nothing, so its heartbeat stays
-        byte-identical to plain protocol 0.3; so does a propagate-only
-        one (``edge_subject=None``), which publishes no records and would
-        otherwise report a constant 0/0 that looks like a healthy zero.
+        The ``heartbeat_extras`` provider's fields, read when each beat is
+        built, so every beat carries current values; a provider that
+        raises raises here, and the publisher beats without extras.
+        Without a provider the heartbeat is exactly plain protocol 0.3.
         """
-        if self._trace is None or self._trace.edge_subject is None:
+        if self._heartbeat_extras_provider is None:
             return {}
-        counts = trace_record_counts()
-        return {"records_published": counts.published, "records_dropped": counts.dropped}
+        return dict(self._heartbeat_extras_provider())
+
+    def _status_data(self) -> bytes:
+        """A freshly built heartbeat payload for the status reply, encoded.
+
+        Extras the payload cannot carry — a provider that raised, a §8.3
+        field name, a value that does not serialise — cost the reply its
+        extras, never the reply, as they cost a heartbeat its extras.
+        """
+        if self._service is None:  # pragma: no cover — defensive
+            raise RuntimeError("status handler invoked before start()")
+        try:
+            extras = self._heartbeat_extras()
+            payload = build_heartbeat_payload(
+                self.subject, self._heartbeat_interval_s, self._service.id, extras
+            )
+            return payload.model_dump_json().encode("utf-8")
+        except Exception:
+            # The provider is application code: its exception is not logged.
+            log.error("heartbeat extras failed for the status reply; replying without them")
+        payload = build_heartbeat_payload(
+            self.subject, self._heartbeat_interval_s, self._service.id
+        )
+        return payload.model_dump_json().encode("utf-8")
 
     async def _on_status_request(self, request: Request) -> None:
         """Reply with a freshly-built §8.3 heartbeat payload (v0.3 §-TBD).
@@ -695,14 +687,7 @@ class AgentService:
             # and the reply is sent whatever the outcome.
             sender = self._gate.classify_status(request)
             log.debug("status request on %s from %s", request.subject, format_sender(sender))
-            payload = build_heartbeat_payload(
-                self.subject,
-                self._heartbeat_interval_s,
-                self._service.id,
-                self._heartbeat_extras(),
-            )
-            data = payload.model_dump_json().encode("utf-8")
-            await request.respond(data)
+            await request.respond(self._status_data())
         except Exception:
             # A respond() failure (broker dropped, request torn down, encode
             # error in a future richer payload) MUST surface as a §9.1 error
@@ -745,40 +730,52 @@ class AgentService:
         log.debug("prompt request on %s from %s", request.subject, format_sender(admission.sender))
         return (True, admission.sender)
 
+    async def _accept_envelope(self, request: Request) -> Envelope | None:
+        """The request's envelope, or ``None`` after answering its §9 ``400``.
+
+        Decoded per §5.3 and checked against what the endpoint advertises
+        (§5.4): ``max_payload`` and ``attachments_ok``. The caller's
+        ``finally`` emits the terminator after a refusal.
+        """
+        try:
+            envelope = decode(request.data)
+        except ProtocolError as exc:
+            log.warning("rejecting malformed prompt on %s: %s", request.subject, exc)
+            await request.respond_error("400", _sanitize_error_desc(str(exc)))
+            return None
+
+        max_payload_bytes = parse_human_bytes(self._effective_max_payload_value)
+        if len(request.data) > max_payload_bytes:
+            log.warning(
+                "rejecting oversized prompt on %s: %d bytes exceeds %s",
+                request.subject,
+                len(request.data),
+                self._effective_max_payload_value,
+            )
+            await request.respond_error(
+                "400",
+                _sanitize_error_desc(
+                    f"prompt payload exceeds max_payload {self._effective_max_payload_value}"
+                ),
+            )
+            return None
+        if envelope.attachments and not self._attachments_ok:
+            log.warning(
+                "rejecting attachments on %s: endpoint advertised attachments_ok=false",
+                request.subject,
+            )
+            await request.respond_error(
+                "400",
+                _sanitize_error_desc("attachments are not supported by this endpoint"),
+            )
+            return None
+        return envelope
+
     async def _on_prompt_request(self, request: Request) -> None:
         keepalive_task: asyncio.Task[None] | None = None
         try:
-            try:
-                envelope = decode(request.data)
-            except ProtocolError as exc:
-                log.warning("rejecting malformed prompt on %s: %s", request.subject, exc)
-                await request.respond_error("400", _sanitize_error_desc(str(exc)))
-                return
-
-            max_payload_bytes = parse_human_bytes(self._effective_max_payload_value)
-            if len(request.data) > max_payload_bytes:
-                log.warning(
-                    "rejecting oversized prompt on %s: %d bytes exceeds %s",
-                    request.subject,
-                    len(request.data),
-                    self._effective_max_payload_value,
-                )
-                await request.respond_error(
-                    "400",
-                    _sanitize_error_desc(
-                        f"prompt payload exceeds max_payload {self._effective_max_payload_value}"
-                    ),
-                )
-                return
-            if envelope.attachments and not self._attachments_ok:
-                log.warning(
-                    "rejecting attachments on %s: endpoint advertised attachments_ok=false",
-                    request.subject,
-                )
-                await request.respond_error(
-                    "400",
-                    _sanitize_error_desc("attachments are not supported by this endpoint"),
-                )
+            envelope = await self._accept_envelope(request)
+            if envelope is None:
                 return
 
             # Sender identity: classify after the envelope checks, before the
@@ -788,56 +785,58 @@ class AgentService:
             if not admitted:
                 return
 
-            # §6.4: emit the leading ack BEFORE any handler work so warm-up
-            # latency stays inside the §6.6 budget and the stream is observable
-            # to plain `nats req --wait-for-empty`. Best-effort, mirroring the
-            # terminator path below — if respond() fails, log and continue;
-            # the next send (handler chunk or terminator) will surface it.
-            try:
-                await request.respond(encode_chunk(StatusChunk(status="ack")))
-            except Exception:
-                log.error(
-                    "failed to emit leading ack on %s (exception)",
-                    request.subject,
-                )
-
             stream = PromptStream(request, self._nc, sender=sender)
             handler = self._prompt_handler
             if handler is None:  # pragma: no cover — start() rejects this path
                 raise RuntimeError("prompt handler invoked before on_prompt() registered one")
 
-            if self._keepalive_interval_s is not None:
-                keepalive_task = asyncio.create_task(
-                    _keepalive_loop(request, self._keepalive_interval_s),
-                    name=f"keepalive-{request.subject}",
-                )
+            # Everything from the ack on is the innermost `call_next()` of the
+            # request interceptors: one that refuses before calling it leaves
+            # the caller an error frame and the terminator, and no ack.
+            started = False
+            # Set once the handler returns: from then on the caller has its
+            # full reply, and a failure is no longer the caller's.
+            answered = False
 
+            async def serve() -> None:
+                nonlocal started, answered, keepalive_task
+                if started:
+                    raise RuntimeError("request interceptor called call_next() more than once")
+                started = True
+                keepalive_task = await self._ack_and_keep_alive(request)
+                await handler(envelope, stream)
+                answered = True
+
+            ctx = RequestInterceptorContext(
+                envelope=envelope,
+                sender=sender,
+                subject=request.subject,
+                headers=dict(request.headers or {}),
+            )
             try:
-                # Place thread_id and root_id in the context storage
-                # to allow clients used as tools to reache them
-                with _trace_binding(envelope, self._trace):
-                    await handler(envelope, stream)
-            except ProtocolError as exc:
-                log.warning(
-                    "prompt handler rejected protocol input on %s: %s",
-                    request.subject,
-                    exc,
-                )
-                await _stop_keepalive(keepalive_task)
-                keepalive_task = None
-                await request.respond_error("400", _sanitize_error_desc(str(exc)))
-            except Exception:
-                log.error(
-                    "prompt handler raised on %s (exception)",
-                    request.subject,
-                )
+                await _run_intercepted(self._interceptors, ctx, serve)
+                if not started:
+                    # Neither refused nor answered: a stream with no ack is no answer.
+                    raise RuntimeError("request interceptor returned without calling call_next()")
+            except Exception as exc:
                 # Stop keep-alive BEFORE the §9 error frame so the keepalive
-                # task can't race an ack chunk in between error(500) and the
+                # task can't race an ack chunk in between the error and the
                 # §6.5 terminator emitted in the outer `finally`. Ditto in
                 # the success path right below.
                 await _stop_keepalive(keepalive_task)
                 keepalive_task = None
-                await request.respond_error("500", "handler error")
+                if answered:
+                    # A request interceptor raised after its call_next()
+                    # returned: the handler's reply went out in full, so it
+                    # stands, and the stream ends with its terminator (outer
+                    # `finally`) and no error frame.
+                    log.error(
+                        "request interceptor failed on %s after the handler completed; "
+                        "the reply is kept (exception)",
+                        request.subject,
+                    )
+                else:
+                    await _respond_failure(request, exc)
             else:
                 await _stop_keepalive(keepalive_task)
                 keepalive_task = None
@@ -858,6 +857,67 @@ class AgentService:
                     "failed to emit stream terminator on %s (exception)",
                     request.subject,
                 )
+
+    async def _ack_and_keep_alive(self, request: Request) -> asyncio.Task[None] | None:
+        """Emit the leading ack and start the keep-alive cadence.
+
+        Returns the keep-alive task, ``None`` when keep-alive is disabled.
+        """
+        # §6.4: emit the leading ack BEFORE any handler work so warm-up
+        # latency stays inside the §6.6 budget and the stream is observable
+        # to plain `nats req --wait-for-empty`. Best-effort, mirroring the
+        # terminator path below — if respond() fails, log and continue;
+        # the next send (handler chunk or terminator) will surface it.
+        try:
+            await request.respond(encode_chunk(StatusChunk(status="ack")))
+        except Exception:
+            log.error(
+                "failed to emit leading ack on %s (exception)",
+                request.subject,
+            )
+        if self._keepalive_interval_s is None:
+            return None
+        return asyncio.create_task(
+            _keepalive_loop(request, self._keepalive_interval_s),
+            name=f"keepalive-{request.subject}",
+        )
+
+
+async def _run_intercepted(
+    interceptors: tuple[RequestInterceptor, ...],
+    ctx: RequestInterceptorContext,
+    serve: CallNext,
+) -> None:
+    """Run ``serve`` inside ``interceptors``, the first the outermost.
+
+    Each one's ``call_next()`` runs the rest of the chain.
+    """
+
+    async def at(index: int) -> None:
+        if index == len(interceptors):
+            await serve()
+            return
+        await interceptors[index].around_request(ctx, lambda: at(index + 1))
+
+    await at(0)
+
+
+async def _respond_failure(request: Request, exc: Exception) -> None:
+    """Answer the §9 error frame for a request its handler did not answer.
+
+    A :class:`RequestRejectedError` answers its own code, a
+    :class:`ProtocolError` ``400``, anything else a generic ``500`` whose
+    exception stays out of the reply and the log alike.
+    """
+    if isinstance(exc, RequestRejectedError):
+        log.warning("prompt request refused on %s: %d", request.subject, exc.code)
+        await request.respond_error(str(exc.code), _sanitize_error_desc(exc.description))
+    elif isinstance(exc, ProtocolError):
+        log.warning("prompt handler rejected protocol input on %s: %s", request.subject, exc)
+        await request.respond_error("400", _sanitize_error_desc(str(exc)))
+    else:
+        log.error("prompt handler raised on %s (exception)", request.subject)
+        await request.respond_error("500", "handler error")
 
 
 async def _stop_keepalive(task: asyncio.Task[None] | None) -> None:

@@ -413,6 +413,14 @@ export interface SignSenderHeaderOptions {
   readonly nonce?: string;
 }
 
+/**
+ * `true` iff `nonce` fits the header grammar, `[A-Za-z0-9_-]{1,64}` — the
+ * check a caller-chosen nonce must pass before it is signed.
+ */
+export function isValidSenderNonce(nonce: string): boolean {
+  return NONCE_REGEX.test(nonce);
+}
+
 /** Build and sign a header. `ts` and `nonce` are fresh unless overridden. */
 export async function signSenderHeader(opts: SignSenderHeaderOptions): Promise<AgentSenderHeader> {
   const dot = opts.id.indexOf(".");

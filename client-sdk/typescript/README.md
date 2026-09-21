@@ -178,6 +178,41 @@ What to know:
 - **Reverse lookup.** `agents.resolveSender(id)` (also `new SenderResolver(nc, { ttlMs })` and the uncached `resolveSender(nc, id)`) turns a verified agent ID back into the `AgentInfo` that registered it: `$SRV.INFO.agents` is enumerated, every candidate's `id_sig` verified against its own prompt subject, and the index cached for `resolveTtlMs` (default 10 s; concurrent callers share one enumeration). `undefined` means "not a reachable agent" — a human user, a plain service, or an agent that is offline. Discovery is account-local, and the lookup identifies, never authorizes. On the host side the same lookup is bound to `response.sender.resolve()`.
 - **`verifySender(msg, "live" | "stored")`** is the spec's `VerifySender` over anything shaped `{ subject, data, headers? }` — a core `Msg`, a `ServiceMsg`, a JetStream `JsMsg`. `live` runs the freshness checks (the nonce is only _looked up_ — the receiver records it); `stored` proves authorship of a stored record against its stored subject and skips freshness, so consumers dedupe on `(user, nonce)` themselves.
 
+### Prompt interceptors
+
+An extension that needs to see or add to every prompt — extra envelope fields, extra headers, a signed message of its own about the prompt — plugs in as a `PromptInterceptor`, in two phases:
+
+```ts
+import { Agents, type PromptInterceptor } from "@synadia-ai/agents";
+
+const tagging: PromptInterceptor = {
+  // Phase one: what the prompt carries. No side effects.
+  beforePrompt(ctx) {
+    // ctx.agent, ctx.prompt, ctx.context (PromptOptions.context), ctx.connection
+    const id = String(ctx.context["requestId"] ?? "none");
+    return { fields: { x_request: id }, headers: { "X-Request": id }, state: id };
+  },
+  // Phase two: the prompt is signed and checked, and goes out right after.
+  async beforePublish(ctx, extras) {
+    if (!ctx.identity.canSign) return;
+    await ctx.identity.publishSigned(
+      "audit.prompts",
+      JSON.stringify({ request: extras?.state, to: ctx.agent.instanceId }),
+    );
+  },
+};
+
+const agents = new Agents({ nc, identity: { signer }, interceptors: [tagging] });
+await agent.prompt("hi", { context: { requestId: "r-1" } });
+```
+
+- Both phases run at publish time — on the stream's first iteration — in the async context `prompt()` was called in, and get the same `ctx`. A prompt that is never iterated, or that `prompt()` itself rejects, runs neither.
+- `beforePrompt` runs after the sender identity is resolved and has no side effects: the prompt can still fail after it (the size of the envelope its fields make, its identity). A throw fails the prompt before anything is sent. Several interceptors are merged in order, the later winning a key.
+- `beforePublish` (optional) runs after the `Agent-Sender` header is signed and the size checked, immediately before the prompt is published, with what the same interceptor's `beforePrompt` returned (`state` included). Messages published there describe a prompt that goes out, barring a transport failure. A throw is logged (`new Agents({ logger })`) and does not stop the prompt.
+- `fields` are written as top-level envelope fields next to the protocol's (§5.6 obliges receivers to tolerate them); a host reads them back from `RequestEnvelope.extras`. `prompt`, `attachments` and the `Agent-Sender` header are refused.
+- `ctx.identity.publishSigned(subject, payload, { nonce })` signs with the prompting client's identity; pass `nonce` when the body carries its own id, and it is the header's nonce and the `Nats-Msg-Id` too (also on `agents.publishSigned`).
+- Without interceptors nothing changes on the wire.
+
 Subpath exports:
 
 - **`@synadia-ai/agents/errors`** - the error class hierarchy, for targeted `instanceof` branches.

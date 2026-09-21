@@ -8,27 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Opt-in tracing through `"tracing": "on"` / `NATS_TRACING=on` /
-  `/nats-configure tracing on`: the extension adopts or mints the prompt's
-  thread and, while a NATS prompt is PI's active turn, stamps
-  `X-Synadia-Thread-ID` and `X-Synadia-Root-ID` on PI's provider requests
-  through `before_provider_headers`, so a model proxy files them under the
-  caller's thread as for an SDK-built agent. Propagate-only: no record is
-  published and no sender identity is needed. With tracing off nothing is
-  stamped, even for a caller that sent lineage. The prompt is handed to PI
-  inside the request's trace scope, so an SDK client used by a PI tool
-  during the turn inherits the right thread.
-
 ### Fixed
 
 - A NATS prompt's turn now ends on PI's `agent_settled` rather than
   `agent_end`. PI can auto-retry a failed model call, compact and retry an
   overflowed turn, or continue with queued messages after `agent_end`; the
   caller used to get its terminator before that answer, and the answer's
-  text and traced model calls were lost. The next queued prompt is also
-  injected as soon as PI settles instead of waiting for the next arrival.
+  text was lost. The next queued prompt is also injected as soon as PI
+  settles instead of waiting for the next arrival.
 
 ### Changed
 

@@ -57,6 +57,8 @@ FORBIDDEN_SPEC_PREFIXES = (
 FORBIDDEN_PUBLIC_TEXT = (
     b"agent fabric",
     b"synadia-agent-fabric",
+    b"scratchpad",
+    b"afo-",
 )
 NKEY_SEED_PATTERN = re.compile(rb"\bS[UAONC][A-Z2-7]{54,60}\b")
 JWT_CANDIDATE_PATTERN = re.compile(

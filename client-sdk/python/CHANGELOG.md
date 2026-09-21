@@ -10,6 +10,46 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Added
 
+- **Prompt interceptors.** `Agents(nc=nc, interceptors=[...])` — every
+  `Agent` it hands out inherits them; `Agent(..., interceptors=...)` takes
+  them directly. A `PromptInterceptor` runs at publish time — on the
+  stream's first `__anext__`, in a copy of the `contextvars` context
+  `prompt()` was called in — in two phases that see the same per-prompt
+  `ctx` (`PromptInterceptorContext`): the target `agent`, the `prompt`
+  text, `envelope_extras` (the extra fields of an `Envelope` passed to
+  `prompt()`, a read-only copy; empty for a text prompt), the opaque
+  `context` from the new `prompt(..., context=...)`, the `connection`, and
+  `identity` (`PromptSigning`: `can_sign`, `self_id()`,
+  `publish_signed()`).
+  - `async before_prompt(ctx)`, after the sender identity is resolved,
+    returns `PromptExtras` — extra envelope `fields` and `headers`, and a
+    `state` the SDK hands back — or `None`, and has no side effects.
+    Several are merged in order, the later winning a key. A field the
+    envelope defines or the `Agent-Sender` header is refused with
+    `NatsAgentError`; an exception fails the prompt before anything is
+    sent. A field the caller's envelope also carries is replaced, as
+    between interceptors.
+  - `async before_publish(ctx, extras)`, optional
+    (`PublishingPromptInterceptor`), runs only after the `Agent-Sender`
+    header is signed and the size checked, immediately before the prompt
+    is published, with what that interceptor's `before_prompt` returned.
+    That is where an interceptor publishes its own messages, so they
+    describe a prompt that goes out; an exception is logged and does not
+    stop the prompt.
+
+  A prompt never iterated, or one `prompt()` itself rejects, runs neither
+  phase.
+  Without interceptors nothing changes on the wire. The TypeScript SDK has
+  the same hook.
+- **`Envelope.extras` (§5.6).** The top-level fields an envelope does not
+  define, verbatim; `encode()` now writes a `null` among them too, so a
+  decode → encode round trip keeps what a peer sent. `is_envelope_field`
+  (in `synadia_ai.agents.envelope`) names the fields the codec owns.
+- **Signing with a chosen nonce.** `sign_sender` / `publish_signed` /
+  `request_signed` take `nonce=`: sign with the id a message body carries,
+  so it is the `Agent-Sender` nonce and the `Nats-Msg-Id` too.
+  `is_valid_sender_nonce` checks the header grammar
+  (`[A-Za-z0-9_-]{1,64}`); a nonce outside it is an `IdentityError`.
 - **`save_attachments(attachments, directory, *, max_total_bytes=...)`.**
   The receiving counterpart of `Attachment.from_path`, synchronous like it:
   writes the attachments of a reply (§6.3), a mid-stream query (§7.1) or an
@@ -30,45 +70,10 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
   disables it). Real I/O errors raise `OSError`. The TypeScript SDK's
   `saveAttachments` behaves the same, on the shared cases in
   `test-fixtures/attachments/`. Nothing on the wire changes.
-- **Trace record counts.** The SDK counts the trace records it handed to
-  the connection and the ones it could not — no identity to sign with, or
-  a publish that raised — process-wide, counted from process start. These
-  are the drops the SDK itself observed: a record lost after it left the
-  process is not counted, and a record is only due once its prompt goes
-  out, so a prompt never iterated or rejected by validation counts
-  nothing, and neither does propagate-only mode. `trace_record_counts()`
-  returns the snapshot (`TraceRecordCounts`); `count_trace_record_published()`
-  / `count_trace_record_dropped()` are for other record writers in the same
-  process. The agent service reports both numbers on its heartbeat.
 - **`HeartbeatPayload.extras`.** Unknown heartbeat fields are now kept
   (`extra="allow"`), readable on `extras` and preserved verbatim on
   re-encode, as the TypeScript SDK does; they used to be dropped on
   decode.
-- **Observability tracing (opt-in).** `Agents(nc=nc, trace=TraceOptions())`
-  — or an `AgentService` handing its options down — makes every `prompt()`
-  mint a thread id, carry `thread_id` / `root_id` in the envelope, and
-  publish a signed edge record (`build_edge_record`, `EDGE_RECORD_VERSION`)
-  to `TraceOptions.edge_subject` (default `DEFAULT_EDGE_SUBJECT`, `None`
-  for propagate-only) immediately before the prompt goes out — and only
-  then: a prompt that is never iterated, fails validation, or whose header
-  cannot be built publishes no edge. The record names its writer in
-  `agent` (`{account}.{user}`, the identity that signs it); its
-  `record_id` is also the header's nonce and the `Nats-Msg-Id`, so body,
-  signature and stream de-duplication share one id.
-  `prompt(..., tool_call_id=...)` labels the edge. Omitted, prompts stay byte-identical to protocol 0.3 — an
-  untraced client drops the `thread_id` / `root_id` of any `Envelope` handed
-  to it, so an untraced relay forwarding what it received sends a plain
-  envelope. With tracing on, an explicit `Envelope` may override the minted
-  lineage, except that forwarding the envelope a handler received spawns a
-  new thread rather than reusing its parent's. Exports: `TraceOptions`, `TraceScope`,
-  `active_trace`, `bind_active_trace`, `inherited_trace_options`,
-  `random_thread_id`, `is_thread_id`, `valid_tool_call_id`.
-  - Lineage read from the wire is untrusted, bounded input: a `thread_id`
-    or `root_id` that is not a string of `THREAD_ID_HEX_LEN` lowercase hex
-    characters is a malformed envelope (`ProtocolError`); an empty string
-    or `null` is absent.
-  - `TraceOptions` rejects an `edge_subject` that can never be published
-    to (empty, wildcard, whitespace) with `ValueError`.
 - `SenderSignatureRequiredError` exposes stable `code` (`401`),
   `description` (`"signature required"`), and `subject` attributes for
   handling local signed-target preflight failures without parsing a message.
@@ -90,13 +95,6 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Changed
 
-- **A half lineage pair is a malformed envelope.** `decode()` rejects a
-  wire envelope carrying exactly one of `thread_id` and `root_id` with a
-  `ProtocolError` — an agent service answers `400`, as for a wrongly
-  shaped id. A caller sends both or neither; adopting a lone field would
-  file the execution under a tree the caller never named. The TypeScript
-  SDK reads the wire the same way. An explicit `Envelope` handed to
-  `prompt()` may still name one field; `prompt()` completes it as before.
 - Sender identity is now opt-in: omitting `identity` performs no lookup and
   sends no `Agent-Sender` header; explicit `Identity()` enables unsigned
   claims, and `send_unsigned_claim=False` performs no automatic identity
@@ -109,6 +107,18 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 - NATS URL errors redact token and user/password userinfo. URL and context
   bundle resolution preserve WebSocket paths and query strings. The existing
   `load_context_options` API and auth precedence remain compatible.
+
+### Fixed
+
+- **`Agent.prompt(envelope)` sends the envelope's extra fields (§5.6).** It
+  used to send only `prompt` and `attachments`, so an agent relaying the
+  envelope it received dropped the top-level fields the protocol does not
+  define, which §5.6 obliges a relay to preserve. Now they go out verbatim
+  (a `null` among them), after the protocol's fields, and count toward
+  `max_payload`; relaying a decoded envelope sends its bytes unchanged. A
+  prompt interceptor's field of the same name replaces one. A caller that
+  wants the old behaviour passes `Envelope(prompt=..., attachments=...)`.
+  The TypeScript SDK's `prompt()` takes text only, so it has no such path.
 
 ## [0.8.0] - 2026-08-29
 

@@ -10,8 +10,8 @@ to ensure heartbeat and status responses share the exact same payload
 construction path.
 
 To a receiver that requires signed heartbeats, an agent's presence is its
-signed heartbeat: with a :class:`HeartbeatSigner` the publisher sets the
-same ``Agent-Sender`` header the SDK puts on its edge records on every
+signed heartbeat: with a :class:`HeartbeatSigner` the publisher sets an
+``Agent-Sender`` header of the sender-identity extension on every
 heartbeat — ``sub`` the heartbeat subject as published, ``ts`` the
 heartbeat's own ``ts``, a fresh nonce per beat, ``sig`` over subject ·
 ts · nonce · sha256 of the exact payload bytes published. No new payload

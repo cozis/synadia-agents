@@ -210,6 +210,56 @@ the same classification for hand-rolled services; the codec itself
 `AgentId`, `SenderResolver`, the `signer_from_*` helpers) lives in
 `synadia-ai-agents` (`>=0.8`) and is not re-exported here.
 
+## Request interceptors and heartbeat extras
+
+An extension on the host side plugs in around the prompt handler as a
+`RequestInterceptor`, and adds heartbeat fields with `heartbeat_extras`:
+
+```python
+from contextvars import ContextVar
+from synadia_ai.agent_service import (
+    AgentService, CallNext, RequestInterceptorContext, RequestRejectedError,
+)
+
+request_id: ContextVar[str | None] = ContextVar("request_id", default=None)
+handled = 0
+
+class Tagging:
+    async def around_request(self, ctx: RequestInterceptorContext, call_next: CallNext) -> None:
+        # ctx.envelope (unknown fields in ctx.envelope.extras), ctx.sender, ctx.subject, ctx.headers
+        global handled
+        value = ctx.envelope.extras.get("x_request")
+        if value is not None and not isinstance(value, str):
+            raise RequestRejectedError(400, "bad x_request")
+        handled += 1
+        token = request_id.set(value)  # the handler sees request_id.get()
+        try:
+            await call_next()
+        finally:
+            request_id.reset(token)
+
+service = AgentService(
+    agent="my-agent", owner="me", session_name="demo", nc=nc,
+    interceptors=[Tagging()],
+    heartbeat_extras=lambda: {"handled": handled},
+)
+```
+
+- Interceptors run for every admitted prompt — after the envelope is
+  decoded and the sender classified, before the §6.4 ack — the first
+  listed outermost. Raising before `call_next()` refuses the request with
+  no ack: a `RequestRejectedError` answers its §9 code, a `ProtocolError`
+  `400`, anything else `500`.
+- `call_next()` acks, runs the rest of the chain and the handler, and
+  returns when they are done; an interceptor must call it once or raise.
+  An exception after `call_next()` returned leaves the handler's full
+  reply standing — no error frame — and is logged with a fixed line, never
+  the exception's details: an interceptor that wants those logged logs
+  them itself.
+- `heartbeat_extras` is read when each heartbeat and `status` reply is
+  built. A provider that raises, a §8.3 field name, or a value that does
+  not serialise costs that beat its extras, never the beat.
+
 ## Where things live
 
 - This package — `synadia_ai.agent_service`: `AgentService`,

@@ -1,4 +1,4 @@
-import type { RequestAttachment, RequestEnvelope, TraceScope } from "@synadia-ai/agents";
+import type { RequestAttachment, RequestEnvelope } from "@synadia-ai/agents";
 import type { PromptResponse } from "@synadia-ai/agent-service";
 
 export interface QueuedPiPrompt {
@@ -8,19 +8,6 @@ export interface QueuedPiPrompt {
 	readonly response: PromptResponse;
 	readonly createdAt: number;
 	readonly completion: Promise<void>;
-	/**
-	 * The headers every model call PI makes for this prompt must carry —
-	 * the SDK's `X-Synadia-Thread-ID` and `X-Synadia-Root-ID` — computed by
-	 * the prompt handler inside the trace scope AgentService bound for it,
-	 * and stamped onto PI's provider requests while this request is active.
-	 * Empty when tracing is off.
-	 */
-	readonly traceHeaders: Readonly<Record<string, string>>;
-	/**
-	 * The trace scope AgentService bound for this prompt's handler, so the
-	 * prompt can be handed to PI inside it. `undefined` when tracing is off.
-	 */
-	readonly trace: TraceScope | undefined;
 }
 
 interface MutableQueuedPiPrompt extends QueuedPiPrompt {
@@ -57,8 +44,6 @@ export class PiPromptQueue {
 		envelope: RequestEnvelope,
 		response: PromptResponse,
 		createdAt = Date.now(),
-		traceHeaders: Readonly<Record<string, string>> = {},
-		trace: TraceScope | undefined = undefined,
 	): QueuedPiPrompt {
 		const id = String(++this.#counter);
 		let resolve!: () => void;
@@ -74,8 +59,6 @@ export class PiPromptQueue {
 			response,
 			createdAt,
 			completion,
-			traceHeaders,
-			trace,
 			settled: false,
 			resolve,
 			reject,

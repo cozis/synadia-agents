@@ -54,10 +54,8 @@ class HeartbeatPayload(BaseModel):
     to tolerate unknown fields for forward compat: pydantic keeps them,
     :attr:`extras` reads them, and a ``decode → encode`` round trip
     preserves them verbatim — the same as the TypeScript SDK's
-    ``HeartbeatPayload.extras``. An agent that opted in to tracing
-    reports ``records_published`` and ``records_dropped`` there: how
-    many trace records its process has published and dropped since it
-    started.
+    ``HeartbeatPayload.extras`` (an ``AgentService`` puts its
+    ``heartbeat_extras`` there).
 
     The model's serializer drops ``session`` when it is ``None`` so that
     a payload decoded from a session-less peer round-trips through

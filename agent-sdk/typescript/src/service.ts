@@ -42,6 +42,12 @@
 //     `Nats-Request-Info` cross-check of a closed endpoint. With a signer
 //     every heartbeat carries a signed `Agent-Sender` (`sub` the heartbeat
 //     subject, `ts` the frame's own); the status reply carries none.
+//   - Extension hooks: `interceptors` run around the prompt handler — each
+//     sees the decoded envelope (its unknown fields in `extras`), the
+//     classified sender, the subject and the headers, may refuse the
+//     request with a §9 error before the handler runs, and runs the rest
+//     of the request inside a context of its own; `heartbeatExtras` adds
+//     fields to every heartbeat and status reply.
 //
 // Mirrors the Python SDK's `AgentService` (`client-sdk/python/src/synadia_ai/agents/service.py`)
 // — wire-equivalent behaviour, idiomatic TS API.
@@ -50,12 +56,9 @@ import type { MsgHdrs, NatsConnection } from "@nats-io/nats-core";
 import { Svcm, type Service, type ServiceHandler, type ServiceMsg } from "@nats-io/services";
 
 import {
-  activeTrace,
-  assertValidTraceOptions,
   agentIdAccount,
   agentIdUser,
   AgentSubject,
-  bindActiveTrace,
   decodeEnvelope,
   encodeBase64,
   formatHumanBytes,
@@ -68,7 +71,6 @@ import {
   PROMPT_ENDPOINT_NAME,
   PROMPT_QUEUE_GROUP,
   ProtocolError,
-  randomThreadId,
   SDK_PROTOCOL_VERSION,
   selfId,
   SenderResolver,
@@ -84,9 +86,6 @@ import {
   type RequestEnvelope,
   type SenderInfo,
   type SenderSigner,
-  traceRecordCounts,
-  type TraceOptions,
-  type TraceScope,
 } from "@synadia-ai/agents";
 
 import {
@@ -101,6 +100,11 @@ import {
   SenderGate,
   type AcceptSenderHook,
 } from "./identity/classify.js";
+import {
+  RequestRejectedError,
+  type RequestInterceptor,
+  type RequestInterceptorContext,
+} from "./interceptor.js";
 import {
   encodeChunk,
   type Chunk,
@@ -201,14 +205,6 @@ export interface AgentServiceOptions {
    */
   readonly keepaliveIntervalS?: number | null;
   /**
-   * Observability tracing handed down to clients used inside prompt
-   * handlers (opt-in). The service itself never writes trace records; it
-   * always adopts or mints the execution's `(thread, root)` and binds it
-   * as the ambient trace. Passing this makes a nested `Agent.prompt()`
-   * with no configuration of its own trace the calls it spawns.
-   */
-  readonly trace?: TraceOptions;
-  /**
    * Extra metadata keys merged into the service metadata (forward-compat).
    * The required keys (`agent`, `owner`, `protocol_version`, and `session`
    * when set) and the identity keys (`user_nkey`, `account`, `id_sig`)
@@ -290,6 +286,28 @@ export interface AgentServiceOptions {
    * Unsigned claims are never cross-checked.
    */
   readonly operatorAttested?: boolean;
+  /**
+   * Request interceptors, run around the prompt handler for every admitted
+   * `prompt` request — after the envelope is decoded and the sender
+   * classified, before the §6.4 ack. The first listed is the outermost.
+   * Each may refuse the request by throwing before it calls `next()` (a
+   * {@link RequestRejectedError} carries its §9 code, a `ProtocolError` is
+   * a `400`, anything else a `500`): the caller then gets the error frame
+   * and the terminator, no ack. `next()` acks, runs the rest of the chain
+   * and the handler, and resolves when they are done; an interceptor runs
+   * it inside a context of its own (an `AsyncLocalStorage.run`), which the
+   * handler then sees. Default: none.
+   */
+  readonly interceptors?: ReadonlyArray<RequestInterceptor>;
+  /**
+   * Extra fields for every heartbeat and every `status` reply, read when
+   * each is built so a value that moves between beats is current on every
+   * one. A §8.3 field name (`agent`, `owner`, `session`, `instance_id`,
+   * `ts`, `interval_s`), a value that does not serialize, or a provider
+   * that throws costs that beat its extras — never the beat — and is
+   * logged at `error`.
+   */
+  readonly heartbeatExtras?: () => Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -321,38 +339,6 @@ function randomId(): string {
 }
 
 /**
- * This execution's `(thread, root)`, or `undefined` when there is nothing
- * to trace.
- *
- * A caller's lineage — the pair, `thread_id` and `root_id` — is adopted
- * whatever this service is configured for, so a tree that starts upstream
- * is not broken here. With no lineage on the envelope, only a service
- * that opted in mints a root — an untraced service binds nothing, so
- * nothing is minted per request and `PromptResponse.traceHeaders()` stays
- * empty rather than stamping ids on model requests the operator never
- * asked to trace. The service writes no trace record either way.
- *
- * A half pair is never completed: `decodeEnvelope` already rejects it on
- * the wire, and an envelope built by hand gets the same `ProtocolError`
- * here — a `400` to the caller — rather than a tree of its own.
- */
-function traceScopeFor(
-  envelope: RequestEnvelope,
-  options: TraceOptions | undefined,
-): TraceScope | undefined {
-  const { threadId, rootId } = envelope;
-  if (threadId !== undefined && rootId !== undefined) {
-    return { threadId, rootId, turnCountHint: 0 };
-  }
-  if (threadId !== undefined || rootId !== undefined) {
-    throw new ProtocolError("envelope `thread_id` and `root_id` must be given together");
-  }
-  if (options === undefined) return undefined;
-  const minted = randomThreadId();
-  return { threadId: minted, rootId: minted, turnCountHint: 0 };
-}
-
-/**
  * Server-side handle given to a {@link PromptHandler} for emitting response
  * chunks back to the caller. The {@link AgentService} owns stream
  * termination — handlers `send(...)` zero or more chunks and return.
@@ -375,30 +361,6 @@ export class PromptResponse {
     this.#msg = msg;
     this.#nc = nc;
     this.sender = sender;
-  }
-
-  /**
-   * Headers for every model request this execution issues.
-   *
-   * An agent stamps these on each completion request so the model proxy
-   * files the call under the right thread and tree without seeing any
-   * NATS traffic. Hierarchy is the edge records' job, so the proxy needs
-   * no parent or tool-call header.
-   *
-   * `{}` when the prompt was untraced, so harness code needs no plumbing
-   * and degrades to nothing.
-   *
-   * Each call counts against this execution: the running total is
-   * recorded on the edge of any thread it spawns afterwards.
-   */
-  traceHeaders(): Record<string, string> {
-    const scope = activeTrace();
-    if (scope === undefined) return {};
-    scope.turnCountHint += 1;
-    return {
-      "X-Synadia-Thread-ID": scope.threadId,
-      "X-Synadia-Root-ID": scope.rootId,
-    };
   }
 
   /**
@@ -500,6 +462,7 @@ export class AgentService {
   readonly #minSenderTrust: MinSenderTrust;
   readonly #gate: SenderGate;
   readonly #resolver: SenderResolver;
+  readonly #interceptors: ReadonlyArray<RequestInterceptor>;
   #identity: AgentId | undefined;
   #heartbeatSigner: HeartbeatSigner | undefined;
   #handler: PromptHandler | null = null;
@@ -539,9 +502,6 @@ export class AgentService {
     if (options.operatorAttested !== undefined && typeof options.operatorAttested !== "boolean") {
       throw new Error("AgentService: operatorAttested must be a boolean");
     }
-    // Handed down to every client used inside a handler; a subject that can
-    // never be published to fails here, not as a warning per prompt.
-    assertValidTraceOptions(options.trace);
 
     this.#options = options;
     this.#subject = AgentSubject.new(
@@ -555,6 +515,8 @@ export class AgentService {
     this.#logger = options.logger ?? SILENT_LOGGER;
     this.#minSenderTrust = minSenderTrust;
     this.#resolver = new SenderResolver(options.nc, { ttlMs: resolveTtlMs });
+    // Copied: a caller mutating its array afterwards changes nothing here.
+    this.#interceptors = Object.freeze([...(options.interceptors ?? [])]);
     this.#gate = new SenderGate({
       minSenderTrust,
       replayWindowMs,
@@ -821,34 +783,62 @@ export class AgentService {
 
   /**
    * What goes on the heartbeat beyond the §8.3 required fields: the
-   * session label when the harness multiplexes, and — when the service
-   * opted in to tracing and publishes records — how many trace records
-   * this process has published and dropped since it started, as
-   * `records_published` and `records_dropped`. The counts are read when
-   * each heartbeat is built, so every beat carries the current totals. A
-   * rising dropped count tells whoever consumes the heartbeat that
-   * records this process owed were never sent. An untraced service
-   * reports nothing, so its heartbeat stays byte-identical to plain
-   * protocol 0.3; so does a propagate-only one (`edgeSubject: null`),
-   * which publishes no records and would otherwise report a constant 0/0
-   * that looks like a healthy zero.
+   * session label when the harness multiplexes, and the `heartbeatExtras`
+   * provider's fields, read when each heartbeat is built so every beat
+   * carries current values. Without a provider the heartbeat is exactly
+   * plain protocol 0.3.
    */
   #heartbeatOptions(): BuildHeartbeatPayloadOptions {
     const options: { session?: string; extras?: Record<string, unknown> } = {};
     if (this.#options.session !== undefined) options.session = this.#options.session;
-    if (this.#options.trace !== undefined && this.#options.trace.edgeSubject !== null) {
-      const counts = traceRecordCounts();
-      options.extras = {
-        records_published: counts.published,
-        records_dropped: counts.dropped,
-      };
-    }
+    const provided = this.#providedExtras();
+    if (provided !== undefined) options.extras = { ...provided };
     return options;
   }
 
   /**
+   * The `heartbeatExtras` provider's fields for one beat, or `undefined`
+   * when there is no provider or its answer cannot go on the wire. A bad
+   * extra must never take the agent's liveness down with it: the beat
+   * goes out without it, and the fault is logged.
+   */
+  #providedExtras(): Readonly<Record<string, unknown>> | undefined {
+    const provider = this.#options.heartbeatExtras;
+    if (provider === undefined) return undefined;
+    let extras: Readonly<Record<string, unknown>>;
+    try {
+      extras = provider();
+    } catch {
+      // The provider is application code: its exception is not logged.
+      this.#logger.error("heartbeatExtras provider failed; publishing without extras", {
+        subject: this.#subject.heartbeat,
+        error: "exception",
+      });
+      return undefined;
+    }
+    const clash = Object.keys(extras).filter((key) => HEARTBEAT_FIELDS.has(key));
+    if (clash.length > 0) {
+      this.#logger.error("heartbeatExtras reuse §8.3 field names; publishing without extras", {
+        subject: this.#subject.heartbeat,
+        fields: clash.sort().join(","),
+      });
+      return undefined;
+    }
+    try {
+      JSON.stringify(extras);
+    } catch {
+      this.#logger.error("heartbeatExtras do not serialize; publishing without extras", {
+        subject: this.#subject.heartbeat,
+        error: "exception",
+      });
+      return undefined;
+    }
+    return extras;
+  }
+
+  /**
    * Publish one heartbeat frame. With a signer bound at `start()` the frame
-   * carries the `Agent-Sender` header the SDK puts on its edge records:
+   * carries an `Agent-Sender` header of the sender-identity extension:
    * `sub` the heartbeat subject as published, `ts` the frame's own `ts`, a
    * fresh nonce, `sig` over subject · ts · nonce · sha256 of the exact
    * bytes published. Nothing in the payload changes; a 0.3 subscriber
@@ -1009,6 +999,82 @@ export class AgentService {
 
     const response = new PromptResponse(msg, this.#options.nc, sender);
 
+    // Everything from the ack on is the innermost `next()` of the request
+    // interceptors: an interceptor that refuses before calling it leaves
+    // the caller an error frame and the terminator, and no ack.
+    let started = false;
+    // Set once the handler returns: from then on the caller has its full
+    // reply, and a failure is no longer the caller's.
+    let answered = false;
+    let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+    const stopKeepalive = (): void => {
+      if (keepaliveTimer !== null) {
+        clearInterval(keepaliveTimer);
+        keepaliveTimer = null;
+      }
+    };
+    const serve = async (): Promise<void> => {
+      if (started) throw new Error("request interceptor called next() more than once");
+      started = true;
+      keepaliveTimer = this.#ackAndKeepAlive(msg);
+      await handler(envelope, response);
+      answered = true;
+    };
+    const ctx: RequestInterceptorContext = {
+      envelope,
+      sender,
+      subject: msg.subject,
+      headers: msg.headers,
+    };
+
+    try {
+      await runIntercepted(this.#interceptors, ctx, serve);
+      if (!started) {
+        // Neither refused nor answered: a stream with no ack is no answer.
+        throw new Error("request interceptor returned without calling next()");
+      }
+    } catch (err) {
+      // Stop keep-alive BEFORE the §9 error frame so an ack chunk can't
+      // race in between the error and the terminator.
+      stopKeepalive();
+      if (answered) {
+        // A request interceptor failed after its next() returned: the
+        // handler's reply went out in full, so it stands, and the stream
+        // ends with its terminator (below) and no error frame.
+        this.#logger.error(
+          "request interceptor failed after the handler completed; the reply is kept",
+          { subject: msg.subject, error: "exception" },
+        );
+        return;
+      }
+      const rejected = rejectionOf(err);
+      if (rejected === undefined) {
+        this.#logger.error("prompt handler failed", {
+          subject: msg.subject,
+          error: "exception",
+        });
+      } else {
+        this.#logger.warn("prompt request refused", { subject: msg.subject, code: rejected[0] });
+      }
+      try {
+        const [code, desc] = rejected ?? [500, "handler error"];
+        msg.respondError(code, sanitizeErrorDesc(desc));
+      } catch {
+        /* connection may already be gone */
+      }
+    } finally {
+      stopKeepalive();
+      // §6.5 + §9.3: every stream — successful or errored — ends with a
+      // zero-byte body message that carries NO NATS headers.
+      tryRespondTerminator(msg);
+    }
+  }
+
+  /**
+   * Emit the leading ack and start the keep-alive cadence; returns its
+   * timer, `null` when keep-alive is disabled.
+   */
+  #ackAndKeepAlive(msg: ServiceMsg): ReturnType<typeof setInterval> | null {
     // §6.4: emit the mandatory leading `ack` status chunk as the first
     // message on the reply subject, before the handler runs. Confirms
     // request acceptance and resets the caller's inactivity timeout
@@ -1034,63 +1100,68 @@ export class AgentService {
     // model. The §6.4 spec mandates only the leading ack above;
     // periodic acks remain a valid wire shape and stay in the SDK
     // as additional defense.
-    let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
-    if (this.#keepaliveIntervalS !== null) {
-      const intervalMs = this.#keepaliveIntervalS * 1000;
-      keepaliveTimer = setInterval(() => {
-        try {
-          msg.respond(ackBytes);
-        } catch {
-          // best-effort; clear so we don't keep firing on a dead request
-          if (keepaliveTimer) clearInterval(keepaliveTimer);
-          keepaliveTimer = null;
-        }
-      }, intervalMs);
-      keepaliveTimer.unref?.();
-    }
-
-    const stopKeepalive = (): void => {
-      if (keepaliveTimer !== null) {
-        clearInterval(keepaliveTimer);
-        keepaliveTimer = null;
-      }
-    };
-
-    try {
-      // Place threadId and rootId in the ambient context so clients used
-      // as tools can reach them.
-      const scope = traceScopeFor(envelope, this.#options.trace);
-      await (scope === undefined
-        ? handler(envelope, response)
-        : bindActiveTrace(scope, () => handler(envelope, response), this.#options.trace));
-    } catch (err) {
-      // Stop keep-alive BEFORE the §9 error frame so an ack chunk can't
-      // race in between the error and the terminator.
-      stopKeepalive();
-      this.#logger.error("prompt handler failed", {
-        subject: msg.subject,
-        error: "exception",
-      });
+    if (this.#keepaliveIntervalS === null) return null;
+    const intervalMs = this.#keepaliveIntervalS * 1000;
+    const timer = setInterval(() => {
       try {
-        const desc = err instanceof Error ? err.message : String(err);
-        const isProtocolError =
-          // Cross-realm / duplicate-module guard: adapters may throw a
-          // ProtocolError class from another installed SDK copy.
-          err instanceof ProtocolError || (err instanceof Error && err.name === "ProtocolError");
-        msg.respondError(
-          isProtocolError ? 400 : 500,
-          isProtocolError ? sanitizeErrorDesc(desc) : "handler error",
-        );
+        msg.respond(ackBytes);
       } catch {
-        /* connection may already be gone */
+        // best-effort; stop so we don't keep firing on a dead request
+        clearInterval(timer);
       }
-    } finally {
-      stopKeepalive();
-      // §6.5 + §9.3: every stream — successful or errored — ends with a
-      // zero-byte body message that carries NO NATS headers.
-      tryRespondTerminator(msg);
-    }
+    }, intervalMs);
+    timer.unref?.();
+    return timer;
   }
+}
+
+// The §8.3 field names: a `heartbeatExtras` entry under one of them would
+// overwrite the real field on the wire.
+const HEARTBEAT_FIELDS: ReadonlySet<string> = new Set([
+  "agent",
+  "owner",
+  "session",
+  "instance_id",
+  "ts",
+  "interval_s",
+]);
+
+/**
+ * Run `serve` inside `interceptors`, the first the outermost: each one's
+ * `next()` runs the rest of the chain.
+ */
+function runIntercepted(
+  interceptors: ReadonlyArray<RequestInterceptor>,
+  ctx: RequestInterceptorContext,
+  serve: () => Promise<void>,
+): Promise<void> {
+  const at = (index: number): Promise<void> => {
+    const interceptor = interceptors[index];
+    if (interceptor === undefined) return serve();
+    return Promise.resolve(interceptor.aroundRequest(ctx, () => at(index + 1)));
+  };
+  return at(0);
+}
+
+/**
+ * The §9 code and description a thrown value answers with, or `undefined`
+ * for a plain failure (a `500` with a generic description — the message
+ * of an arbitrary error is not the caller's business).
+ */
+function rejectionOf(err: unknown): readonly [number, string] | undefined {
+  // Cross-realm / duplicate-module guard: adapters may throw an error
+  // class from another installed SDK copy, so the name counts as well.
+  if (
+    err instanceof RequestRejectedError ||
+    (err instanceof Error && err.name === "RequestRejectedError")
+  ) {
+    const { code, description } = err as RequestRejectedError;
+    return [code, description];
+  }
+  if (err instanceof ProtocolError || (err instanceof Error && err.name === "ProtocolError")) {
+    return [400, err.message];
+  }
+  return undefined;
 }
 
 function tryRespondTerminator(msg: ServiceMsg): void {

@@ -9,7 +9,6 @@
 
 import { utf8ByteLength } from "../bytes.js";
 import { ProtocolError } from "../errors.js";
-import { isThreadId, THREAD_ID_HEX_LEN } from "../trace.js";
 
 export interface RequestAttachment {
   readonly filename: string;
@@ -19,11 +18,25 @@ export interface RequestAttachment {
 export interface RequestEnvelope {
   readonly prompt: string;
   readonly attachments?: ReadonlyArray<RequestAttachment>;
-  // Observability lineage (trace.ts). NOT part of v0.3 — they are the
-  // SDK's tracing extension, and §5.6 tolerates them. Both present on
-  // prompts from a tracing-enabled caller, both absent otherwise.
-  readonly threadId?: string;
-  readonly rootId?: string;
+  /**
+   * Top-level fields the protocol does not define (§5.6), by wire name.
+   * The encoder writes them next to the protocol's own fields — which win
+   * a clash — and the decoder keeps every field it does not know here, so
+   * an extension reads what a peer sent without the SDK knowing about it.
+   * Absent when there are none.
+   */
+  readonly extras?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Wire names the envelope codec owns. An extra under one of these is
+ * never written, and the decoder never reports one as unknown.
+ */
+const ENVELOPE_FIELDS: ReadonlySet<string> = new Set(["prompt", "attachments"]);
+
+/** `true` iff `key` is a wire field the envelope codec owns, never an extra. */
+export function isEnvelopeField(key: string): boolean {
+  return ENVELOPE_FIELDS.has(key);
 }
 
 /** Serialize a request envelope to UTF-8 bytes per §5.1. */
@@ -44,8 +57,13 @@ function envelopeObject(env: RequestEnvelope): Record<string, unknown> {
       content: encodeBase64(a.content),
     }));
   }
-  if (env.threadId !== undefined) obj["thread_id"] = env.threadId;
-  if (env.rootId !== undefined) obj["root_id"] = env.rootId;
+  // After the protocol's own fields, in the order given — the order the
+  // Python SDK writes them in.
+  if (env.extras !== undefined) {
+    for (const [key, value] of Object.entries(env.extras)) {
+      if (!ENVELOPE_FIELDS.has(key) && value !== undefined) setOwn(obj, key, value);
+    }
+  }
   return obj;
 }
 
@@ -114,40 +132,6 @@ export function encodeBase64(bytes: Uint8Array): string {
  * or unsafe filenames (path separators, `..`, NUL, absolute paths). Agent
  * services translate this into a `Nats-Service-Error-Code: 400` response.
  */
-/**
- * One lineage field, absent when the key is missing or `null`.
- *
- * A present-but-not-a-string value is a malformed envelope (400), the same
- * as any other wrongly-typed field — and the same as the Python SDK, which
- * rejects it too. Silently dropping it would make the receiver mint a
- * fresh root and file the execution under a tree of its own. An empty
- * string is absent, again matching Python.
- */
-function decodeLineageField(obj: Record<string, unknown>, wireName: string): string | undefined {
-  const value = obj[wireName];
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "string") {
-    throw new ProtocolError(`envelope \`${wireName}\` must be a string`);
-  }
-  // An empty id names nothing. Treating it as absent keeps a receiver
-  // from adopting "" as a thread and filing every child under it — and
-  // keeps both SDKs reading the same wire the same way.
-  if (value === "") return undefined;
-  // Untrusted, bounded input: the id is adopted verbatim and later stamped
-  // on the agent's model requests as a header value, so anything not
-  // shaped like a minted id (a CRLF, a megabyte of garbage) is malformed.
-  if (!isThreadId(value)) {
-    throw new ProtocolError(
-      `envelope \`${wireName}\` must be ${THREAD_ID_HEX_LEN} lowercase hex characters`,
-    );
-  }
-  return value;
-}
-
-// The Python decoder and the agent service's own check on a hand-built
-// envelope say the same.
-const HALF_LINEAGE_PAIR = "envelope `thread_id` and `root_id` must be given together";
-
 export function decodeEnvelope(data: Uint8Array): RequestEnvelope {
   // §5.3: a zero-byte request payload is invalid.
   if (data.length === 0) {
@@ -189,24 +173,11 @@ export function decodeEnvelope(data: Uint8Array): RequestEnvelope {
     throw new ProtocolError("envelope `prompt` must be a non-empty string");
   }
 
-  // Lineage rides through untouched: the agent service adopts it, and a
-  // caller that never enabled tracing sees neither field.
-  const threadId = decodeLineageField(obj, "thread_id");
-  const rootId = decodeLineageField(obj, "root_id");
-  // The pair travels together: a caller that traces sends both, one that
-  // does not sends neither. Exactly one names a broken or hand-written
-  // caller, and adopting the lone field would file this execution under
-  // a tree the caller never named, or root a thread the caller meant as a
-  // child — so it is a malformed envelope, the same 400 as a wrongly
-  // shaped id. The Python SDK reads the wire the same way.
-  if ((threadId === undefined) !== (rootId === undefined)) {
-    throw new ProtocolError(HALF_LINEAGE_PAIR);
-  }
-  const lineage = threadId !== undefined && rootId !== undefined ? { threadId, rootId } : {};
+  const unknown = unknownFields(obj);
 
   const rawAttachments = obj["attachments"];
   if (rawAttachments === undefined) {
-    return { prompt, ...lineage };
+    return { prompt, ...unknown };
   }
   if (!Array.isArray(rawAttachments)) {
     throw new ProtocolError("envelope `attachments` must be an array");
@@ -215,7 +186,28 @@ export function decodeEnvelope(data: Uint8Array): RequestEnvelope {
   const attachments: RequestAttachment[] = rawAttachments.map((item, idx) =>
     decodeAttachment(item, idx),
   );
-  return attachments.length > 0 ? { prompt, attachments, ...lineage } : { prompt, ...lineage };
+  return attachments.length > 0 ? { prompt, attachments, ...unknown } : { prompt, ...unknown };
+}
+
+/**
+ * §5.6: the fields a decoded envelope does not define, kept verbatim as
+ * `extras` — `{}` (no key at all) when there are none, so a plain
+ * envelope decodes to exactly `{ prompt, attachments? }`.
+ */
+function unknownFields(obj: Record<string, unknown>): { extras?: Record<string, unknown> } {
+  let extras: Record<string, unknown> | undefined;
+  for (const [key, value] of Object.entries(obj)) {
+    if (ENVELOPE_FIELDS.has(key)) continue;
+    setOwn((extras ??= {}), key, value);
+  }
+  return extras !== undefined ? { extras: Object.freeze(extras) } : {};
+}
+
+// A field named `__proto__` is data on the wire. Plain assignment would set
+// the object's prototype instead, losing the field; define it as an own
+// property, which is what `JSON.parse` does.
+function setOwn(obj: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(obj, key, { value, enumerable: true, writable: true, configurable: true });
 }
 
 /**

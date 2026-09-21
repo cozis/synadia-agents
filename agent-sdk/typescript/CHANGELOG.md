@@ -8,6 +8,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Request interceptors.** `AgentServiceOptions.interceptors`: each
+  `RequestInterceptor`'s `aroundRequest(ctx, next)` runs around the prompt
+  handler for every admitted request — after the envelope is decoded and
+  the sender classified, before the §6.4 ack; the first listed is the
+  outermost. `ctx` carries the decoded `envelope` (unknown top-level
+  fields in `envelope.extras`), the classified `sender`, the `subject` and
+  the request's `headers`. Throwing before `next()` refuses the request
+  with no ack: a `RequestRejectedError(code, description)` answers its §9
+  code (400–599), a `ProtocolError` `400`, anything else `500`. `next()`
+  acks and runs the rest of the chain and the handler; an interceptor runs
+  it inside its own context (`AsyncLocalStorage.run`), which the handler
+  then sees. One that returns without calling `next()` answers `500`; a
+  second call of `next()` rejects. A throw after `next()` resolved — the
+  handler's reply already out in full — leaves that reply standing: no
+  error frame, the normal terminator, and one error-level log line with a
+  fixed message, never the error's details.
+- **`heartbeatExtras`.** `AgentServiceOptions.heartbeatExtras` — a provider
+  read when each heartbeat and each `status` reply is built, merged into
+  its extras. A provider that throws, a §8.3 field name, or a value that
+  does not serialize costs that beat its extras, never the beat, and is
+  logged at `error`.
 - **Signed heartbeats.** With `identity: { signer }` the service sets the
   `Agent-Sender` header of the sender-identity extension on every
   heartbeat it publishes — `sub` the heartbeat subject as published, `ts`
@@ -23,24 +44,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   being signed finish without publishing. `signHeartbeat` /
   `signHeartbeatHeader` and `HeartbeatSigner` are exported for hand-rolled
   publishers; the shared fixtures gain the `signed-heartbeat` vector.
-- **Heartbeat trace record counts.** A service that opted in to tracing
-  puts `records_published` and `records_dropped` — two counters since
-  process start, read fresh on every beat from `traceRecordCounts()` — in
-  the heartbeat's extras and on the `status` reply, so whoever consumes
-  the heartbeat knows how many records the process failed to publish.
-  Only drops the SDK itself observed are counted; a record lost after it
-  left the process is not. An untraced or propagate-only service reports
-  neither; its heartbeat is unchanged.
-- **Observability tracing (opt-in).** `AgentServiceOptions.trace` hands
-  tracing down to every `@synadia-ai/agents` client used inside a prompt
-  handler. The service adopts the caller's `thread_id` / `root_id` (or
-  mints a root when it opted in) and binds them as the ambient trace for
-  the handler; `PromptResponse.traceHeaders()` returns the
-  `X-Synadia-Thread-ID` / `X-Synadia-Root-ID` headers to stamp on each
-  model request (`{}` when untraced). The service itself writes no trace
-  record. A malformed lineage id on the envelope is a `400`; a `trace`
-  whose `edgeSubject` can never be published to is rejected at
-  construction.
 - **Sender identity (the sender-identity extension).** `AgentService`
   classifies every `prompt` request before the §6.4 ack: a malformed
   `Agent-Sender` header → `400`; a failing signature, replayed nonce,
@@ -96,13 +99,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- **A half lineage pair is rejected, not completed.** An envelope
-  carrying exactly one of `thread_id` and `root_id` is a malformed
-  envelope: the `400` frame and the terminator, no ack, and the handler
-  never runs — where the service used to fill in `root_id = thread_id`
-  or mint a thread under the given root. Both present are adopted
-  verbatim; neither makes a service that opted in mint a root; unchanged.
-  The Python host behaves the same.
 - `extraMetadata` can no longer override the required registration keys.
   `AgentService` and `ReferenceAgent` now write `agent`, `owner` and
   `protocol_version` over `extraMetadata` (previously an extra entry

@@ -320,6 +320,19 @@ class ValidationTests(unittest.TestCase):
                     release.extract_checked_tar(archive, destination)
             self.assertFalse((root / "outside" / "payload").exists())
 
+    def test_public_scan_rejects_private_product_terms(self) -> None:
+        artifact = Path("package.tgz")
+        for text in (
+            b"built for the Agent Fabric",
+            b"see synadia-agent-fabric-docs",
+            b"a ScratchPad reference",
+            b"decided in AFO-12",
+        ):
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(release.ReleaseError, "private product"):
+                    release.inspect_public_text(artifact, "README.md", text)
+        release.inspect_public_text(artifact, "README.md", b"a plain protocol package")
+
     def test_public_scan_covers_large_files_and_all_nkey_seed_types(self) -> None:
         artifact = Path("package.tgz")
         stream = io.BytesIO(b"x" * (2 * 1024 * 1024 + 1) + b"synadia-agent-fabric")

@@ -9,12 +9,18 @@ SDKs save a reply's files under the same names. The behaviour tests below
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import os
+import signal
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+if sys.platform != "win32":
+    import resource
 
 import synadia_ai.agents as package
 from synadia_ai.agents import (
@@ -226,9 +232,10 @@ def test_raises_after_1000_names_are_taken(tmp_path: Path) -> None:
         save_attachments([att("x.txt", "x")], tmp_path)
 
 
-def test_rejects_a_negative_limit(tmp_path: Path) -> None:
+@pytest.mark.parametrize("limit", [-1, float("nan")])
+def test_rejects_a_negative_or_nan_limit(tmp_path: Path, limit: float) -> None:
     with pytest.raises(ValueError, match="max_total_bytes"):
-        save_attachments([], tmp_path, max_total_bytes=-1)
+        save_attachments([], tmp_path, max_total_bytes=limit)  # type: ignore[arg-type]
 
 
 def test_raises_a_real_io_error_when_the_directory_is_a_file(tmp_path: Path) -> None:
@@ -236,6 +243,24 @@ def test_raises_a_real_io_error_when_the_directory_is_a_file(tmp_path: Path) -> 
     file.write_bytes(b"")
     with pytest.raises(OSError):
         save_attachments([att("a.txt", "a")], file)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_FSIZE is POSIX")
+def test_removes_a_partly_written_file_before_raising(tmp_path: Path) -> None:
+    # A real write failure, no mock: past the soft file-size limit, write()
+    # fails with EFBIG once the first 1 KiB is on disk.
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    previous = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (1024, hard))
+    try:
+        with pytest.raises(OSError) as raised:
+            save_attachments([att("small.txt", "ok"), att("big.bin", "x" * 4096)], tmp_path)
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+        signal.signal(signal.SIGXFSZ, previous)
+    assert raised.value.errno == errno.EFBIG
+    # The file saved before the failure stays; the partial one is gone.
+    assert [p.name for p in tmp_path.iterdir()] == ["small.txt"]
 
 
 @pytest.mark.skipif(

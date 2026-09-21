@@ -58,9 +58,18 @@ const STRICT_BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 // Literals, not a computed `Set`: a bundle that never calls
 // `saveAttachments` drops this module whole.
 const EDGE_CHARS =
-  " .\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a" +
+  " .\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a" +
   "\u2028\u2029\u202f\u205f\u3000\ufeff";
 const REPLACEMENT_CHARACTER = "\ufffd";
+// Replaced by `_`: the characters Windows forbids in a name, besides the
+// separators and control characters handled already. On every OS, so a
+// name comes out the same wherever it is saved.
+const WINDOWS_FORBIDDEN = '<>:"|?*';
+// A Windows device name (Microsoft's list: CON, PRN, AUX, NUL, COM1 to COM9,
+// LPT1 to LPT9, COM and LPT with a superscript ¹ ² ³), any case, alone or
+// before a dot: `NUL.tar.gz` is the device too. Spaces before the dot are
+// ignored, on the side of caution, as Python's `os.path.isreserved` does.
+const WINDOWS_DEVICE_NAME_RE = /^(?:CON|PRN|AUX|NUL|(?:COM|LPT)[1-9\u00b9\u00b2\u00b3]) *(?:\.|$)/i;
 
 /**
  * Decode received attachments and write each into `dir` (created if
@@ -71,9 +80,11 @@ const REPLACEMENT_CHARACTER = "\ufffd";
  *   padded, no whitespace). Anything else is not written:
  *   `skipped: "invalid_content"`. Bad content never throws.
  * - **Name**: the part after the last `/` or `\`, control characters
- *   removed, leading and trailing dots and whitespace stripped,
- *   `attachment-<n>` (1-based position) when nothing is left, shortened to
- *   200 UTF-8 bytes keeping an extension of up to 16 characters.
+ *   removed, `< > : " | ? *` replaced by `_`, leading and trailing dots and
+ *   whitespace stripped, `attachment-<n>` (1-based position) when nothing
+ *   is left, shortened to 200 UTF-8 bytes keeping an extension of up to 16
+ *   characters, and a Windows device name (`CON`, `nul.txt`, `COM1.log`)
+ *   prefixed with `_`. The same on every OS.
  * - **Never overwrites, never follows a link**: each file is created
  *   exclusively; on a clash (an earlier attachment, a file or a symlink
  *   already there) the next free `<stem> (2)<ext>`, `(3)`, … is used.
@@ -148,12 +159,16 @@ export function safeAttachmentName(name: string, position: number): string {
   // replaced, so the name always encodes to UTF-8 (as in Python).
   for (const ch of name.slice(lastSeparator + 1)) {
     const cp = ch.codePointAt(0)!;
-    if (cp <= 0x1f || cp === 0x7f) continue;
-    out += cp >= 0xd800 && cp <= 0xdfff ? REPLACEMENT_CHARACTER : ch;
+    // C0, DEL and C1: U+009B, for one, starts a terminal escape sequence.
+    if (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) continue;
+    if (cp >= 0xd800 && cp <= 0xdfff) out += REPLACEMENT_CHARACTER;
+    else out += WINDOWS_FORBIDDEN.includes(ch) ? "_" : ch;
   }
   out = trimEdges(out);
   if (out === "") return `attachment-${position}`;
-  return shortenName(out);
+  out = shortenName(out);
+  // Checked after shortening, since a cut can leave one (`CON` + spaces + …).
+  return WINDOWS_DEVICE_NAME_RE.test(out) ? shortenName(`_${out}`) : out;
 }
 
 function shortenName(name: string): string {

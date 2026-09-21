@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import math
 import os
 import re
 from collections.abc import Iterable
@@ -44,16 +45,32 @@ _STRICT_BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}")
 # ``str.isspace()`` and JavaScript's ``\s`` call whitespace (control
 # characters are removed before this runs), so both SDKs trim alike.
 _EDGE_CHARS = (
-    " .\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    " .\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
     "\u2028\u2029\u202f\u205f\u3000\ufeff"
 )
 
-# Removed from a name: C0 controls and DEL. Replaced by U+FFFD, as in
-# TypeScript: lone surrogates, which JSON allows and no file system encodes.
+# Removed from a name: C0 controls, DEL and C1 controls (U+009B, for one,
+# starts a terminal escape sequence). Replaced by U+FFFD, as in TypeScript:
+# lone surrogates, which JSON allows and no file system encodes. Replaced
+# by ``_``: the characters Windows forbids in a name, besides the
+# separators and control characters handled already — on every OS, so a
+# name comes out the same wherever it is saved.
 _NAME_TRANSLATION: dict[int, int | None] = {
-    **dict.fromkeys([*range(0x20), 0x7F]),
+    **dict.fromkeys([*range(0x20), *range(0x7F, 0xA0)]),
     **dict.fromkeys(range(0xD800, 0xE000), 0xFFFD),
+    **dict.fromkeys(map(ord, '<>:"|?*'), ord("_")),
 }
+
+# A Windows device name (Microsoft's list: CON, PRN, AUX, NUL, COM1 to COM9,
+# LPT1 to LPT9, COM and LPT with a superscript ¹ ² ³), any case, alone or
+# before a dot: ``NUL.tar.gz`` is the device too. Spaces before the dot are
+# ignored, on the side of caution, as ``os.path.isreserved`` does.
+# ``re.ASCII``: only ASCII letters match case-insensitively, as in
+# TypeScript.
+_WINDOWS_DEVICE_NAME = re.compile(
+    r"(?:CON|PRN|AUX|NUL|(?:COM|LPT)[1-9\u00b9\u00b2\u00b3]) *(?:\.|\Z)",
+    re.IGNORECASE | re.ASCII,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,9 +106,12 @@ def save_attachments(
       alphabet, padded, no whitespace). Anything else is not written:
       ``skipped="invalid_content"``. Bad content never raises.
     - **Name**: the part after the last ``/`` or ``\\``, control characters
-      removed, leading and trailing dots and whitespace stripped,
-      ``attachment-<n>`` (1-based position) when nothing is left, shortened
-      to 200 UTF-8 bytes keeping an extension of up to 16 characters.
+      removed, ``< > : " | ? *`` replaced by ``_``, leading and trailing
+      dots and whitespace stripped, ``attachment-<n>`` (1-based position)
+      when nothing is left, shortened to 200 UTF-8 bytes keeping an
+      extension of up to 16 characters, and a Windows device name
+      (``CON``, ``nul.txt``, ``COM1.log``) prefixed with ``_``. The same on
+      every OS.
     - **Never overwrites, never follows a link**: each file is created
       exclusively; on a clash (an earlier attachment, a file or a symlink
       already there) the next free ``<stem> (2)<ext>``, ``(3)``, … is used.
@@ -103,7 +123,8 @@ def save_attachments(
     Real I/O errors (permissions, disk full) are raised as :class:`OSError`;
     a file this call created and could not finish writing is removed first.
     """
-    if max_total_bytes is not None and max_total_bytes < 0:
+    # NaN compares false to everything and would disable the limit silently.
+    if max_total_bytes is not None and (math.isnan(max_total_bytes) or max_total_bytes < 0):
         raise ValueError(
             "save_attachments: max_total_bytes must be a non-negative int or None "
             f"(got {max_total_bytes})"
@@ -152,7 +173,9 @@ def _safe_name(name: str, position: int) -> str:
     kept = name[last_separator + 1 :].translate(_NAME_TRANSLATION).strip(_EDGE_CHARS)
     if not kept:
         return f"attachment-{position}"
-    return _shorten(kept)
+    kept = _shorten(kept)
+    # Checked after shortening, since a cut can leave one (``CON`` + spaces + …).
+    return _shorten(f"_{kept}") if _WINDOWS_DEVICE_NAME.match(kept) else kept
 
 
 def _shorten(name: str) -> str:

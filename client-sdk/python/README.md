@@ -206,6 +206,45 @@ What to know:
 - `scripts/whoami.py` prints what `self_id()` resolves for a connection
   (or why it resolves nothing).
 
+## Prompt interceptors
+
+An extension that needs to see or add to every prompt — extra envelope
+fields, extra headers, a signed message of its own published first —
+plugs in as a `PromptInterceptor`:
+
+```python
+import json
+from synadia_ai.agents import Agents, PromptExtras, PromptInterceptorContext
+
+class Tagging:
+    async def before_prompt(self, ctx: PromptInterceptorContext) -> PromptExtras | None:
+        # ctx.agent, ctx.prompt, ctx.context (prompt(context=...)), ctx.connection
+        if ctx.identity.can_sign:
+            body = json.dumps({"to": ctx.agent.instance_id})
+            await ctx.identity.publish_signed("audit.prompts", body)
+        return PromptExtras(fields={"x_request": "r-1"}, headers={"X-Request": "r-1"})
+
+agents = Agents(nc=nc, identity=identity, interceptors=[Tagging()])
+async for msg in agent.prompt("hi", context={"request_id": "r-1"}):
+    ...
+```
+
+- Interceptors run in order at publish time — on the stream's first
+  `__anext__`, after the sender identity is resolved and before the
+  `Agent-Sender` header is signed over the final envelope — in a copy of
+  the `contextvars` context `prompt()` was called in. A prompt that is
+  never iterated runs none; an exception fails the prompt before it is
+  sent.
+- `fields` are written as top-level envelope fields next to the
+  protocol's (§5.6 obliges receivers to tolerate them); a host reads them
+  back from `Envelope.extras`. A field the envelope defines and the
+  `Agent-Sender` header are refused.
+- `ctx.identity.publish_signed(subject, payload, nonce=...)` signs with the
+  prompting client's identity; pass `nonce` when the body carries its own
+  id, and it is the header's nonce and the `Nats-Msg-Id` too (also on
+  `Agents.publish_signed`).
+- Without interceptors nothing changes on the wire.
+
 ## Mid-stream queries
 
 Agent handlers can pause their response stream to ask the caller a

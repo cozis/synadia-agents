@@ -113,8 +113,15 @@ export {
   DEFAULT_STATUS_TIMEOUT_MS,
 } from "./prompt/options.js";
 export {
+  type PromptExtras,
+  type PromptInterceptor,
+  type PromptInterceptorContext,
+  type PromptSigning,
+} from "./prompt/interceptor.js";
+export {
   PromptStream,
   buildServiceErrorFromMsg,
+  type PreparedRequest,
   type PromptStreamOptions,
   type StreamMessage,
   type ResponseAttachment,
@@ -198,6 +205,7 @@ export {
   encodedHeaderLength,
   expectedSenderHeaderBytes,
   formatSenderTimestamp,
+  isValidSenderNonce,
   maxSenderHeaderBytes,
   normalizeAccountTokenPosition,
   parseSenderHeader,

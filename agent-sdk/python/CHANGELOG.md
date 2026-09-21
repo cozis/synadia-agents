@@ -10,6 +10,25 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Added
 
+- **Request interceptors.** `AgentService(interceptors=[...])`: each
+  `RequestInterceptor`'s `async around_request(ctx, call_next)` runs around
+  the prompt handler for every admitted request — after the envelope is
+  decoded and the sender classified, before the §6.4 ack; the first
+  listed is the outermost. `ctx` (`RequestInterceptorContext`) carries the
+  decoded `envelope` (unknown top-level fields in `envelope.extras`), the
+  classified `sender`, the `subject` and the request's `headers`. Raising
+  before `call_next()` refuses the request with no ack: a
+  `RequestRejectedError(code, description)` answers its §9 code (400–599),
+  a `ProtocolError` `400`, anything else `500`. `call_next()` acks and runs
+  the rest of the chain and the handler; an interceptor runs it inside a
+  `contextvars` binding of its own, which the handler then sees. One that
+  returns without calling it answers `500`; a second call raises. The
+  TypeScript host has the same hook.
+- **`heartbeat_extras`.** `AgentService(heartbeat_extras=...)` — a provider
+  read when each heartbeat and each `status` reply is built, merged into
+  its extras. A provider that raises, a §8.3 field name, or a value that
+  does not serialise costs that beat its extras, never the beat, and is
+  logged.
 - **Signed heartbeats.** With `identity=ServiceIdentity(signer=…)` the
   service sets the `Agent-Sender` header of the sender-identity extension
   on every heartbeat it publishes — `sub` the heartbeat subject as

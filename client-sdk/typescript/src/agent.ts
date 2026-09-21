@@ -6,7 +6,11 @@
 // Sender identity (extension): when constructed by an `Agents` client the
 // handle carries its optional `IdentityContext`, and `prompt()` / `status()`
 // attach an `Agent-Sender` header only when identity was explicitly enabled.
+//
+// Prompt interceptors: the handle also carries its client's interceptors,
+// which `prompt()` runs at publish time (see `prompt/interceptor.ts`).
 
+import { AsyncResource } from "node:async_hooks";
 import { Empty, headers, type MsgHdrs, type NatsConnection } from "@nats-io/nats-core";
 import type { AgentInfo } from "./discovery/agent-info.js";
 import type { EndpointInfo, MinSenderTrust } from "./discovery/endpoint-info.js";
@@ -14,11 +18,13 @@ import { NatsAgentError, ProtocolError, SenderSignatureRequiredError } from "./e
 import { decodeHeartbeatPayload, type HeartbeatPayload } from "./heartbeat/payload.js";
 import type { AgentId } from "./identity/agent-id.js";
 import type { IdentityContext, SenderHeaderPlan } from "./identity/context.js";
+import { selfId } from "./identity/self-id.js";
 import {
   AGENT_SENDER_HEADER,
   maxSenderHeaderBytes,
   serializeSenderHeader,
 } from "./identity/sender-header.js";
+import { signedPublishHeaders, toBytes } from "./identity/signed-publish.js";
 import { combineAbortSignals } from "./internal/abort.js";
 import {
   activeTrace,
@@ -34,7 +40,18 @@ import {
 } from "./trace.js";
 import { STATUS_ENDPOINT_NAME } from "./internal/service-name.js";
 import { normalizeAttachments } from "./prompt/attachments.js";
-import { encodedEnvelopeSize, encodeEnvelope, type RequestEnvelope } from "./prompt/envelope.js";
+import {
+  encodedEnvelopeSize,
+  encodeEnvelope,
+  isEnvelopeField,
+  type RequestEnvelope,
+} from "./prompt/envelope.js";
+import type {
+  PromptExtras,
+  PromptInterceptor,
+  PromptInterceptorContext,
+  PromptSigning,
+} from "./prompt/interceptor.js";
 import {
   DEFAULT_PROMPT_MAX_WAIT_MS,
   DEFAULT_STATUS_TIMEOUT_MS,
@@ -46,7 +63,11 @@ import {
   assertPromptNonEmpty,
   assertWithinMaxPayload,
 } from "./prompt/validate.js";
-import { buildServiceErrorFromMsg, PromptStream } from "./stream/prompt-stream.js";
+import {
+  buildServiceErrorFromMsg,
+  PromptStream,
+  type PreparedRequest,
+} from "./stream/prompt-stream.js";
 import { isErrorSignal } from "./stream/terminator.js";
 
 export class Agent {
@@ -78,6 +99,7 @@ export class Agent {
   readonly #closeSignal: AbortSignal | undefined;
   readonly #identity: IdentityContext | undefined;
   readonly #trace: TraceOptions | undefined;
+  readonly #interceptors: ReadonlyArray<PromptInterceptor>;
 
   constructor(
     nc: NatsConnection,
@@ -86,6 +108,7 @@ export class Agent {
     closeSignal: AbortSignal | undefined = undefined,
     identity: IdentityContext | undefined = undefined,
     trace: TraceOptions | undefined = undefined,
+    interceptors: ReadonlyArray<PromptInterceptor> = [],
   ) {
     this.#nc = nc;
     this.#defaultInactivityTimeoutMs = defaultInactivityTimeoutMs;
@@ -93,6 +116,7 @@ export class Agent {
     this.#identity = identity;
     assertValidTraceOptions(trace);
     this.#trace = trace;
+    this.#interceptors = Object.freeze([...interceptors]);
     this.instanceId = info.instanceId;
     this.agent = info.agent;
     this.owner = info.owner;
@@ -131,6 +155,11 @@ export class Agent {
    */
   get tracingEnabled(): boolean {
     return this.#trace !== undefined;
+  }
+
+  /** The prompt interceptors `prompt()` runs, in order (inherited from `Agents`). */
+  get interceptors(): ReadonlyArray<PromptInterceptor> {
+    return this.#interceptors;
   }
 
   /**
@@ -176,6 +205,20 @@ export class Agent {
     const subject = opts.subject ?? this.promptEndpoint.subject;
     const sub = opts.sub ?? subject;
     const requireSigned = this.promptEndpoint.minSenderTrust === "signed";
+    // Bound here, while the async context is still the caller's: the
+    // interceptors run at publish time, when it may be another one.
+    const intercept =
+      this.#interceptors.length > 0
+        ? AsyncResource.bind((): Promise<CollectedExtras> =>
+            collectExtras(this.#interceptors, {
+              agent: this,
+              prompt: text,
+              context: opts.context ?? EMPTY_CONTEXT,
+              connection: this.#nc,
+              identity: this.#signing(),
+            }),
+          )
+        : undefined;
     const identity = this.#identity;
     if (requireSigned && !identity?.signer) {
       throw new SenderSignatureRequiredError(subject);
@@ -255,7 +298,7 @@ export class Agent {
         connLimit,
         headerBound,
       );
-      return this.#buildStream(envelope, subject, sub, requireSigned, opts, edge);
+      return this.#buildStream(envelope, subject, sub, requireSigned, opts, edge, intercept);
     }
 
     // With attachments: load files, then check max_payload on the final encoded size.
@@ -268,7 +311,7 @@ export class Agent {
         connLimit,
         headerBound,
       );
-      return this.#buildStream(envelope, subject, sub, requireSigned, opts, edge);
+      return this.#buildStream(envelope, subject, sub, requireSigned, opts, edge, intercept);
     })();
   }
 
@@ -279,8 +322,11 @@ export class Agent {
     requireSigned: boolean,
     opts: PromptOptions,
     edge: (() => Promise<void>) | undefined,
+    intercept: (() => Promise<CollectedExtras>) | undefined,
   ): Promise<PromptStream> {
-    // Encode once; the header (when signed) covers exactly these bytes.
+    // Encode once; the header (when signed) covers exactly these bytes —
+    // unless an interceptor adds fields, when the envelope is encoded again
+    // at publish time.
     const payload = encodeEnvelope(envelope);
     const initialPlan = await this.#planHeader(sub, requireSigned);
     if (initialPlan) {
@@ -296,20 +342,94 @@ export class Agent {
     const identityEnabled =
       identity !== undefined && (identity.signer !== undefined || identity.sendUnsignedClaim);
     const signal = combineAbortSignals([opts.signal, this.#closeSignal]);
+    const prepare =
+      identityEnabled || edge !== undefined || intercept !== undefined
+        ? (): Promise<PreparedRequest> =>
+            this.#prepareAtPublish(envelope, payload, sub, requireSigned, identityEnabled, {
+              edge,
+              intercept,
+            })
+        : undefined;
     return new PromptStream({
       nc: this.#nc,
       subject,
       payload,
-      // Re-plan at publish time. A reconnect after `prompt()` may invalidate
-      // the initial identity; a captured plan must never survive it.
-      ...(identityEnabled
-        ? { buildHeaders: () => this.#headersAtPublish(sub, requireSigned, payload) }
-        : {}),
-      ...(edge ? { beforePublish: edge } : {}),
+      ...(prepare ? { prepare } : {}),
       inactivityTimeoutMs: opts.inactivityTimeoutMs ?? this.#defaultInactivityTimeoutMs,
       maxWaitMs: opts.maxWaitMs ?? DEFAULT_PROMPT_MAX_WAIT_MS,
       signal,
     });
+  }
+
+  /**
+   * The request as published, prepared on the stream's first iteration.
+   *
+   * The sender identity is planned again first — a reconnect after
+   * `prompt()` may invalidate the initial one, and a captured plan must
+   * never survive it — so an identity that cannot be had fails the prompt
+   * before any interceptor publishes. The interceptors run next; their
+   * fields make the envelope be encoded again, and the exact `max_payload`
+   * check covers the bytes that go out. The `Agent-Sender` header is
+   * signed last, over those bytes.
+   */
+  async #prepareAtPublish(
+    envelope: RequestEnvelope,
+    planned: Uint8Array,
+    sub: string,
+    requireSigned: boolean,
+    identityEnabled: boolean,
+    hooks: {
+      readonly edge: (() => Promise<void>) | undefined;
+      readonly intercept: (() => Promise<CollectedExtras>) | undefined;
+    },
+  ): Promise<PreparedRequest> {
+    const plan = identityEnabled ? await this.#planHeader(sub, requireSigned) : undefined;
+    let payload = planned;
+    let hdrs: MsgHdrs | undefined;
+    if (hooks.intercept) {
+      const extras = await hooks.intercept();
+      if (extras.fields !== undefined) {
+        payload = encodeEnvelope({ ...envelope, extras: extras.fields });
+        if (!plan) {
+          assertWithinMaxPayload(payload.length, this.promptEndpoint, this.#nc.info?.max_payload);
+        }
+      }
+      if (extras.headers !== undefined) {
+        hdrs = headers();
+        for (const [key, value] of Object.entries(extras.headers)) hdrs.set(key, value);
+      }
+    }
+    if (plan) {
+      assertWithinMaxPayload(
+        payload.length,
+        this.promptEndpoint,
+        this.#nc.info?.max_payload,
+        plan.wireBytes,
+      );
+      hdrs ??= headers();
+      hdrs.set(AGENT_SENDER_HEADER, serializeSenderHeader(await plan.build(payload)));
+    }
+    // After the header is built: building can still fail (identity lost
+    // on a reconnect, the exact header pushing the request over
+    // `max_payload`), and an edge record is a claim that a prompt was
+    // sent, so nothing may be published until that claim is certain.
+    if (hooks.edge) await hooks.edge();
+    return hdrs !== undefined ? { payload, headers: hdrs } : { payload };
+  }
+
+  /** Signing with this handle's identity, for its prompt interceptors. */
+  #signing(): PromptSigning {
+    const nc = this.#nc;
+    const identity = this.#identity;
+    return {
+      canSign: identity?.signer !== undefined,
+      selfId: () => identity?.selfId() ?? selfId(nc),
+      publishSigned: async (subject, payload, opts = {}) => {
+        const bytes = toBytes(payload);
+        const hdrs = await signedPublishHeaders(identity, subject, bytes, opts);
+        nc.publish(subject, bytes, { headers: hdrs });
+      },
+    };
   }
 
   /**
@@ -395,22 +515,52 @@ export class Agent {
       console.warn(`@synadia-ai/agents: failed to publish edge record on ${subject}`, err);
     }
   }
+}
 
-  async #headersAtPublish(
-    sub: string,
-    requireSigned: boolean,
-    payload: Uint8Array,
-  ): Promise<MsgHdrs | undefined> {
-    const plan = await this.#planHeader(sub, requireSigned);
-    if (!plan) return undefined;
-    assertWithinMaxPayload(
-      payload.length,
-      this.promptEndpoint,
-      this.#nc.info?.max_payload,
-      plan.wireBytes,
-    );
-    return this.#headersFor(plan, payload);
+const EMPTY_CONTEXT: Readonly<Record<string, unknown>> = Object.freeze({});
+
+/** The interceptors' additions to one prompt, merged. */
+interface CollectedExtras {
+  readonly fields?: Readonly<Record<string, unknown>>;
+  readonly headers?: Readonly<Record<string, string>>;
+}
+
+/**
+ * Run `interceptors` in order and merge what they add; a later one wins a
+ * key an earlier one also set. A field the envelope codec owns, or the
+ * `Agent-Sender` header, is refused rather than silently dropped: an
+ * interceptor that sets one has a bug worth hearing about.
+ */
+async function collectExtras(
+  interceptors: ReadonlyArray<PromptInterceptor>,
+  ctx: PromptInterceptorContext,
+): Promise<CollectedExtras> {
+  // Maps, turned into objects by `Object.fromEntries`, which defines every
+  // key as an own property — a field named `__proto__` included.
+  const fields = new Map<string, unknown>();
+  const hdrs = new Map<string, string>();
+  for (const interceptor of interceptors) {
+    const extras = (await interceptor.beforePrompt(ctx)) as PromptExtras | undefined;
+    if (extras === undefined) continue;
+    for (const [key, value] of Object.entries(extras.fields ?? {})) {
+      if (isEnvelopeField(key)) {
+        throw new NatsAgentError(`prompt interceptor: envelope field \`${key}\` is not an extra`);
+      }
+      fields.set(key, value);
+    }
+    for (const [key, value] of Object.entries(extras.headers ?? {})) {
+      if (key.toLowerCase() === AGENT_SENDER_HEADER.toLowerCase()) {
+        throw new NatsAgentError(
+          `prompt interceptor: the ${AGENT_SENDER_HEADER} header is the SDK's`,
+        );
+      }
+      hdrs.set(key, value);
+    }
   }
+  return {
+    ...(fields.size > 0 ? { fields: Object.fromEntries(fields) } : {}),
+    ...(hdrs.size > 0 ? { headers: Object.fromEntries(hdrs) } : {}),
+  };
 }
 
 // Connections already warned that their edge records go nowhere. One

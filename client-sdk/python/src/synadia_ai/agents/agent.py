@@ -11,6 +11,10 @@ Sender identity (extension): a handle carries an
 then attach a live-bound signed header or an explicitly requested unsigned
 claim; omission attaches nothing and performs no identity lookup.
 
+Prompt interceptors: a handle also carries its client's interceptors,
+which ``prompt()`` runs at publish time (see
+:mod:`synadia_ai.agents.interceptor`).
+
 The server-side counterpart (``AgentService``) ships in the sibling
 distribution :mod:`synadia_ai.agent_service`.
 """
@@ -19,7 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Mapping
+import contextvars
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeAlias
 from weakref import WeakSet
@@ -41,7 +46,20 @@ from .errors import (
 )
 from .heartbeat import HeartbeatPayload
 from .identity.agent_id import AgentId
-from .identity.options import Identity, plan_sender_header, sender_header_bound
+from .identity.options import (
+    Identity,
+    SenderHeaderPlan,
+    plan_sender_header,
+    sender_header_bound,
+)
+from .interceptor import (
+    EMPTY_CONTEXT,
+    PromptExtras,
+    PromptInterceptor,
+    PromptInterceptorContext,
+    PromptSigning,
+    collect_extras,
+)
 from .messages import QueryChunk, ResponseChunk, StatusChunk, decode_chunk
 from .trace import (
     TraceOptions,
@@ -188,6 +206,21 @@ class _EdgePlan:
     unsigned: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _Interception:
+    """What :meth:`Agent.prompt` hands its stream for the prompt interceptors."""
+
+    #: The caller's context, captured by ``prompt()``.
+    context: contextvars.Context
+    ctx: PromptInterceptorContext
+    #: The envelope before the interceptors' fields are added.
+    envelope: Envelope
+
+
+#: The wire fields the envelope codec owns — never an interceptor's extra.
+_ENVELOPE_FIELDS = frozenset(Envelope.model_fields)
+
+
 class Agent:
     """A live handle returned by :meth:`Agents.discover`.
 
@@ -220,6 +253,7 @@ class Agent:
         close_event: asyncio.Event | None = None,
         identity: Identity | None = None,
         trace: TraceOptions | None = None,
+        interceptors: Sequence[PromptInterceptor] = (),
     ) -> None:
         if prompt_max_wait_s <= 0:
             raise ValueError(f"prompt_max_wait_s must be > 0 (got {prompt_max_wait_s!r}).")
@@ -230,11 +264,18 @@ class Agent:
         self._close_event = close_event
         self._sender_identity = identity
         self._trace = trace
+        # Copied: a caller mutating its list afterwards changes nothing here.
+        self._interceptors = tuple(interceptors)
 
     @property
     def tracing_enabled(self) -> bool:
         """``True`` iff tracing was enabled on this handle."""
         return self._trace is not None
+
+    @property
+    def interceptors(self) -> tuple[PromptInterceptor, ...]:
+        """The prompt interceptors :meth:`prompt` runs, in order (inherited from ``Agents``)."""
+        return self._interceptors
 
     # --- flat read-only identity / capability fields -------------------
 
@@ -337,6 +378,7 @@ class Agent:
         subject: str | None = None,
         sub: str | None = None,
         tool_call_id: str | None = None,
+        context: Mapping[str, object] | None = None,
     ) -> AsyncIterator[StreamMessage]:
         """Send a prompt and return an async iterator of streamed messages.
 
@@ -368,6 +410,15 @@ class Agent:
 
         ``tool_call_id`` is the ID of the model tool call this prompt
         serves, used to label the trace edge when tracing is enabled.
+
+        ``context`` holds opaque values for the client's prompt
+        interceptors, handed to each as ``ctx.context`` — the SDK never
+        reads them. A caller that knows which interceptors it runs passes
+        what they need here (the ID of the model tool call a prompt
+        serves, say). The interceptors run at publish time, in a copy of
+        the context this call was made in (see
+        :mod:`synadia_ai.agents.interceptor`); one that raises fails the
+        prompt on the first ``__anext__``, before it is sent.
 
         §5.4 pre-publish validation runs synchronously before any wire I/O.
         Failures raise:
@@ -523,6 +574,23 @@ class Agent:
 
         effective_timeout = timeout if timeout is not None else self._default_inactivity_timeout
         effective_max_wait = max_wait_s if max_wait_s is not None else self._default_max_wait_s
+        # Captured here, while the context is still the caller's: the
+        # interceptors run at publish time, when it may be another one.
+        intercept = (
+            _Interception(
+                context=contextvars.copy_context(),
+                ctx=PromptInterceptorContext(
+                    agent=self,
+                    prompt=envelope.prompt,
+                    context=context if context is not None else EMPTY_CONTEXT,
+                    connection=self._nc,
+                    identity=PromptSigning(self._nc, self._sender_identity),
+                ),
+                envelope=envelope,
+            )
+            if self._interceptors
+            else None
+        )
         return self._stream_prompt(
             encoded,
             effective_timeout,
@@ -531,6 +599,7 @@ class Agent:
             sub=signed_subject,
             require_signed=require_signed,
             edge_publish=edge_publish,
+            intercept=intercept,
         )
 
     # --- status --------------------------------------------------------
@@ -779,6 +848,56 @@ class Agent:
             count_trace_record_dropped()
             log.exception("failed to publish edge record on %s", subject)
 
+    async def _prepare_request(
+        self,
+        encoded: bytes,
+        *,
+        sub: str,
+        require_signed: bool,
+        intercept: _Interception | None,
+    ) -> tuple[bytes, SenderHeaderPlan | None, dict[str, str]]:
+        """The request bytes as published, their header plan and the interceptors' headers.
+
+        Resolves the live identity as late as nats-py allows and re-checks
+        ``max_payload`` with the exact header size. nats-py exposes no
+        reconnect generation, so a reconnect after this lookup and before
+        publish cannot yet be detected; adopting one when available is the
+        remaining target. The header is signed at publish time.
+
+        The prompt interceptors run once the identity is known — an
+        identity that cannot be had fails the prompt before any of them
+        publishes — and before the header is signed, over the envelope as
+        their fields leave it.
+        """
+        plan = await plan_sender_header(
+            self._sender_identity, self._nc, sub, require_signed=require_signed
+        )
+        extra_headers: dict[str, str] = {}
+        if intercept is not None:
+            extras = await self._run_interceptors(intercept)
+            if extras.fields:
+                encoded = encode(intercept.envelope.model_copy(update=dict(extras.fields)))
+            extra_headers = dict(extras.headers)
+        if plan is not None or intercept is not None:
+            ep = self._info.prompt_endpoint
+            conn_limit = getattr(self._nc, "max_payload", 0) or None
+            header_bytes = plan.wire_bytes if plan is not None else 0
+            assert_within_max_payload(len(encoded), ep.max_payload_bytes, conn_limit, header_bytes)
+        return encoded, plan, extra_headers
+
+    async def _run_interceptors(self, intercept: _Interception) -> PromptExtras:
+        """Run the prompt interceptors in the context ``prompt()`` was called in.
+
+        A task carries a context of its own; awaiting it here keeps
+        cancellation and exceptions flowing as a plain ``await`` would.
+        """
+        task = asyncio.get_running_loop().create_task(
+            collect_extras(self._interceptors, intercept.ctx, _ENVELOPE_FIELDS),
+            name=f"agents-prompt-interceptors:{self.instance_id}",
+            context=intercept.context,
+        )
+        return await task
+
     async def _stream_prompt(
         self,
         encoded: bytes,
@@ -789,6 +908,7 @@ class Agent:
         sub: str,
         require_signed: bool,
         edge_publish: _EdgePlan | None = None,
+        intercept: _Interception | None = None,
     ) -> AsyncIterator[StreamMessage]:
         # Pre-flight: refuse outright if the owning Agents is already
         # closed. This catches the "called prompt() after close()" case
@@ -803,20 +923,9 @@ class Agent:
         await mux.start()
         self._raise_if_closed()
 
-        # Resolve the live identity as late as nats-py allows and re-check
-        # `max_payload` with the exact header size. nats-py exposes no
-        # reconnect generation, so a reconnect after this lookup and before
-        # publish cannot yet be detected; adopting one when available is the
-        # remaining target. The header is signed at publish time.
-        plan = await plan_sender_header(
-            self._sender_identity, self._nc, sub, require_signed=require_signed
+        encoded, plan, extra_headers = await self._prepare_request(
+            encoded, sub=sub, require_signed=require_signed, intercept=intercept
         )
-        if plan is not None:
-            ep = self._info.prompt_endpoint
-            conn_limit = getattr(self._nc, "max_payload", 0) or None
-            assert_within_max_payload(
-                len(encoded), ep.max_payload_bytes, conn_limit, plan.wire_bytes
-            )
 
         # `max_wait_s > 0` is enforced at the public boundary (Agent.prompt
         # and the constructors), so we treat it as an invariant here.
@@ -842,7 +951,8 @@ class Agent:
             # Built BEFORE the edge record goes out: signing can still fail,
             # and an edge record is a claim that a prompt was sent, so
             # nothing may be published until that claim is certain.
-            headers = await plan.build_headers(encoded) if plan is not None else None
+            signed = await plan.build_headers(encoded) if plan is not None else {}
+            headers = {**extra_headers, **signed} or None
 
             # Observability: publish the edge before the prompt goes out, so
             # an observer sees the node before it runs.

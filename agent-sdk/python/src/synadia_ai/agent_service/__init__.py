@@ -21,6 +21,10 @@ Public API:
   the host's own signer (registers ``id_sig`` and signs every heartbeat's
   ``Agent-Sender``; :mod:`synadia_ai.agent_service.heartbeat` has the
   publisher and ``sign_heartbeat`` for hand-rolled ones).
+* :class:`RequestInterceptor`, :class:`RequestInterceptorContext`,
+  :class:`RequestRejectedError` — the hook around the prompt handler
+  (``AgentService(interceptors=[...])``); ``heartbeat_extras=`` adds
+  fields to every heartbeat and status reply.
 * :data:`AcceptSenderHook`, :class:`SenderGate`, :class:`NonceCache`,
   :class:`SenderAdmission`, :class:`SenderRejection` — the stateful
   classification parts, exposed for hand-rolled services.
@@ -57,6 +61,12 @@ from .identity import (
     SenderRejection,
     ServiceIdentity,
 )
+from .interceptor import (
+    CallNext,
+    RequestInterceptor,
+    RequestInterceptorContext,
+    RequestRejectedError,
+)
 from .service import (
     DEFAULT_ATTACHMENTS_OK,
     DEFAULT_KEEPALIVE_INTERVAL_S,
@@ -75,9 +85,13 @@ __all__ = [
     "DEFAULT_REPLAY_WINDOW_S",
     "AcceptSenderHook",
     "AgentService",
+    "CallNext",
     "NonceCache",
     "PromptHandler",
     "PromptStream",
+    "RequestInterceptor",
+    "RequestInterceptorContext",
+    "RequestRejectedError",
     "SenderAdmission",
     "SenderGate",
     "SenderRejection",

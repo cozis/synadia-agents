@@ -22,8 +22,11 @@
 // `publishSigned` / `requestSigned` sign arbitrary publishes (JetStream
 // included); `resolveSender(id)` is the reverse lookup (agent ID → the
 // agent that registered it, `id_sig` verified, TTL-cached).
+//
+// Prompt interceptors: `interceptors: [...]` runs each one before every
+// prompt an `Agent` from this client publishes (see `prompt/interceptor.ts`).
 
-import { headers, type Msg, type MsgHdrs, type NatsConnection } from "@nats-io/nats-core";
+import type { Msg, NatsConnection } from "@nats-io/nats-core";
 import type { Agent } from "./agent.js";
 import type { AgentInfo } from "./discovery/agent-info.js";
 import {
@@ -32,19 +35,22 @@ import {
   pingInstance,
   type DiscoverOptions,
 } from "./discovery/srv-ping.js";
-import { SenderSignatureRequiredError } from "./errors.js";
 import { HeartbeatTracker, type Liveness } from "./heartbeat/tracker.js";
 import { type HeartbeatPayload } from "./heartbeat/payload.js";
 import type { AgentId } from "./identity/agent-id.js";
 import { IdentityContext, type IdentityOptions } from "./identity/context.js";
 import { SenderResolver } from "./identity/resolve-sender.js";
 import { refreshSelfId, selfId } from "./identity/self-id.js";
+import { serializeSenderHeader } from "./identity/sender-header.js";
 import {
-  AGENT_SENDER_HEADER,
-  serializeSenderHeader,
-  type AgentSenderHeader,
-} from "./identity/sender-header.js";
+  NATS_MSG_ID_HEADER,
+  signedPublishHeaders,
+  signedSenderHeader,
+  toBytes,
+  type SignedPublishOptions,
+} from "./identity/signed-publish.js";
 import { type Logger, SILENT_LOGGER } from "./internal/logger.js";
+import type { PromptInterceptor } from "./prompt/interceptor.js";
 import { assertValidTraceOptions, type TraceOptions } from "./trace.js";
 
 /** Default per-stream inactivity timeout (§6.6) — 60 seconds. */
@@ -53,8 +59,7 @@ export const DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS = 60_000;
 /** Default `requestSigned()` timeout — 2 seconds. */
 export const DEFAULT_REQUEST_SIGNED_TIMEOUT_MS = 2_000;
 
-/** JetStream de-duplication header; `publishSigned` sets it to the nonce. */
-export const NATS_MSG_ID_HEADER = "Nats-Msg-Id";
+export { NATS_MSG_ID_HEADER, type SignedPublishOptions };
 
 export interface AgentsOptions {
   /** A pre-connected `NatsConnection`. Caller retains ownership. */
@@ -78,17 +83,13 @@ export interface AgentsOptions {
    * byte-identical to plain protocol 0.3; pass `{}` to enable with defaults.
    */
   readonly trace?: TraceOptions;
-}
-
-/** Options for the signed low-level wrappers. */
-export interface SignedPublishOptions {
   /**
-   * Subject to sign instead of the publish subject — only for a caller
-   * whose own account renamed the import (sign the exporter's subject).
+   * Prompt interceptors, run in order before every prompt an `Agent` from
+   * this client publishes — each may publish signed messages of its own and
+   * add envelope fields and headers. Default: none, and prompts are exactly
+   * what the protocol sends.
    */
-  readonly sub?: string;
-  /** Existing headers to add `Agent-Sender` (and `Nats-Msg-Id`) to. */
-  readonly headers?: MsgHdrs;
+  readonly interceptors?: ReadonlyArray<PromptInterceptor>;
 }
 
 export interface SignedRequestOptions extends SignedPublishOptions {
@@ -103,6 +104,7 @@ export class Agents {
   readonly #streamInactivityTimeoutMs: number;
   readonly #identity: IdentityContext | undefined;
   readonly #trace: TraceOptions | undefined;
+  readonly #interceptors: ReadonlyArray<PromptInterceptor>;
   readonly #resolver: SenderResolver;
   readonly #closeController = new AbortController();
   #closed = false;
@@ -122,6 +124,8 @@ export class Agents {
     // can never be published to fails here, not as a warning per prompt.
     assertValidTraceOptions(options.trace);
     this.#trace = options.trace;
+    // Copied: a caller mutating its array afterwards changes nothing here.
+    this.#interceptors = Object.freeze([...(options.interceptors ?? [])]);
     // Validates `resolveTtlMs` up front (throws `IdentityError`).
     this.#resolver = new SenderResolver(
       options.nc,
@@ -143,6 +147,11 @@ export class Agents {
   /** The tracing options this client was constructed with; `undefined` = tracing off. */
   get trace(): TraceOptions | undefined {
     return this.#trace;
+  }
+
+  /** The prompt interceptors every `Agent` from this client runs, in order. */
+  get interceptors(): ReadonlyArray<PromptInterceptor> {
+    return this.#interceptors;
   }
 
   /**
@@ -187,6 +196,7 @@ export class Agents {
       opts,
       this.#identity,
       this.#trace,
+      this.#interceptors,
     );
   }
 
@@ -257,6 +267,7 @@ export class Agents {
       opts,
       this.#identity,
       this.#trace,
+      this.#interceptors,
     );
   }
 
@@ -287,21 +298,25 @@ export class Agents {
 
   /**
    * Build a complete `Agent-Sender` header *value* for a publish of
-   * `payload` to `subject` — the SDK supplies id, `ts` and a fresh nonce.
-   * Pass the exact subject and payload you will publish; set `opts.sub`
-   * only behind a rename by your own account. Works for any publish,
-   * JetStream included (`headers.set("Agent-Sender", value)`).
+   * `payload` to `subject` — the SDK supplies id, `ts` and a fresh nonce
+   * (or `opts.nonce`, see {@link SignedPublishOptions.nonce}). Pass the
+   * exact subject and payload you will publish; set `opts.sub` only behind
+   * a rename by your own account. Works for any publish, JetStream
+   * included (`headers.set("Agent-Sender", value)`).
    *
    * Rejects with {@link SenderSignatureRequiredError} when no signer is
-   * configured, else with the `selfId()` error when the identity is
-   * unavailable.
+   * configured, with `IdentityError` for a malformed `opts.nonce`, else
+   * with the `selfId()` error when the identity is unavailable.
    */
   async signSender(
     subject: string,
     payload: Uint8Array | string,
-    opts: { readonly sub?: string } = {},
+    opts: Pick<SignedPublishOptions, "sub" | "nonce"> = {},
   ): Promise<string> {
-    return serializeSenderHeader(await this.#signedHeader(subject, toBytes(payload), opts.sub));
+    this.#ensureOpen();
+    return serializeSenderHeader(
+      await signedSenderHeader(this.#identity, subject, toBytes(payload), opts),
+    );
   }
 
   /**
@@ -314,8 +329,9 @@ export class Agents {
     payload: Uint8Array | string,
     opts: SignedPublishOptions = {},
   ): Promise<void> {
+    this.#ensureOpen();
     const bytes = toBytes(payload);
-    const hdrs = await this.#signedHeaders(subject, bytes, opts);
+    const hdrs = await signedPublishHeaders(this.#identity, subject, bytes, opts);
     this.#nc.publish(subject, bytes, { headers: hdrs });
   }
 
@@ -329,8 +345,9 @@ export class Agents {
     payload: Uint8Array | string,
     opts: SignedRequestOptions = {},
   ): Promise<Msg> {
+    this.#ensureOpen();
     const bytes = toBytes(payload);
-    const hdrs = await this.#signedHeaders(subject, bytes, opts);
+    const hdrs = await signedPublishHeaders(this.#identity, subject, bytes, opts);
     return this.#nc.request(subject, bytes, {
       timeout: opts.timeoutMs ?? DEFAULT_REQUEST_SIGNED_TIMEOUT_MS,
       headers: hdrs,
@@ -349,31 +366,6 @@ export class Agents {
   resolveSender(id: AgentId | string): Promise<AgentInfo | undefined> {
     this.#ensureOpen();
     return this.#resolver.resolve(id);
-  }
-
-  async #signedHeader(
-    subject: string,
-    payload: Uint8Array,
-    sub: string | undefined,
-  ): Promise<AgentSenderHeader> {
-    this.#ensureOpen();
-    const identity = this.#identity;
-    if (!identity?.signer) throw new SenderSignatureRequiredError(subject);
-    const plan = await identity.plan(sub ?? subject, true);
-    if (!plan) throw new SenderSignatureRequiredError(subject); // unreachable with a signer
-    return plan.build(payload);
-  }
-
-  async #signedHeaders(
-    subject: string,
-    payload: Uint8Array,
-    opts: SignedPublishOptions,
-  ): Promise<MsgHdrs> {
-    const h = await this.#signedHeader(subject, payload, opts.sub);
-    const hdrs = opts.headers ?? headers();
-    hdrs.set(AGENT_SENDER_HEADER, serializeSenderHeader(h));
-    if (h.nonce !== undefined) hdrs.set(NATS_MSG_ID_HEADER, h.nonce);
-    return hdrs;
   }
 
   /**
@@ -399,8 +391,4 @@ export class Agents {
       throw new Error("@synadia-ai/agents: Agents is closed");
     }
   }
-}
-
-function toBytes(payload: Uint8Array | string): Uint8Array {
-  return typeof payload === "string" ? new TextEncoder().encode(payload) : payload;
 }

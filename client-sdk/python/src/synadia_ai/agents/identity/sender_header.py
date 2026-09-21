@@ -439,6 +439,14 @@ def build_signed_input(
     ).encode()
 
 
+def is_valid_sender_nonce(nonce: str) -> bool:
+    """``True`` iff ``nonce`` fits the header grammar, ``[A-Za-z0-9_-]{1,64}``.
+
+    The check a caller-chosen nonce must pass before it is signed.
+    """
+    return _NONCE_REGEX.fullmatch(nonce) is not None
+
+
 async def sign_sender_header(
     *,
     signer: SenderSigner,

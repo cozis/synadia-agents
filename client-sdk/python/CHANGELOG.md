@@ -10,6 +10,32 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 
 ### Added
 
+- **Prompt interceptors.** `Agents(nc=nc, interceptors=[...])` — every
+  `Agent` it hands out inherits them; `Agent(..., interceptors=...)` takes
+  them directly. A `PromptInterceptor`'s `async before_prompt(ctx)` runs
+  before each prompt is published: on the stream's first `__anext__`,
+  after the sender identity is resolved and before the `Agent-Sender`
+  header is signed, in a copy of the `contextvars` context `prompt()` was
+  called in. `ctx` (`PromptInterceptorContext`) carries the target
+  `agent`, the `prompt` text, the opaque `context` from the new
+  `prompt(..., context=...)`, the `connection`, and `identity`
+  (`PromptSigning`: `can_sign`, `self_id()`, `publish_signed()`) to publish
+  signed messages of its own first. It returns `PromptExtras` — extra
+  envelope `fields` and `headers` — or `None`; several are merged in
+  order, the later winning a key. A field the envelope defines or the
+  `Agent-Sender` header is refused with `NatsAgentError`; an exception fails
+  the prompt before it is sent; a prompt never iterated runs none. Without
+  interceptors nothing changes on the wire. The TypeScript SDK has the
+  same hook.
+- **`Envelope.extras` (§5.6).** The top-level fields an envelope does not
+  define, verbatim; `encode()` now writes a `null` among them too, so a
+  decode → encode round trip keeps what a peer sent. `is_envelope_field`
+  (in `synadia_ai.agents.envelope`) names the fields the codec owns.
+- **Signing with a chosen nonce.** `sign_sender` / `publish_signed` /
+  `request_signed` take `nonce=`: sign with the id a message body carries,
+  so it is the `Agent-Sender` nonce and the `Nats-Msg-Id` too.
+  `is_valid_sender_nonce` checks the header grammar
+  (`[A-Za-z0-9_-]{1,64}`); a nonce outside it is an `IdentityError`.
 - **`save_attachments(attachments, directory, *, max_total_bytes=...)`.**
   The receiving counterpart of `Attachment.from_path`, synchronous like it:
   writes the attachments of a reply (§6.3), a mid-stream query (§7.1) or an

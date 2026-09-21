@@ -15,6 +15,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Prompt interceptors.** `new Agents({ nc, interceptors: [...] })` — every
+  `Agent` it hands out inherits them; `new Agent(...)` takes them as its last
+  argument. A `PromptInterceptor`'s `beforePrompt(ctx)` runs before each
+  prompt is published: on the stream's first iteration, after the sender
+  identity is resolved and before the `Agent-Sender` header is signed, in
+  the async context `prompt()` was called in. `ctx` carries the target
+  `agent`, the `prompt` text, the opaque `context` from the new
+  `PromptOptions.context`, the `connection`, and `identity` (`PromptSigning`:
+  `canSign`, `selfId()`, `publishSigned()`) to publish signed messages of
+  its own first. It returns `PromptExtras` — extra envelope `fields` and
+  `headers` — or nothing; several are merged in order, the later winning a
+  key. A protocol field (`prompt`, `attachments`) or the `Agent-Sender`
+  header is refused with `NatsAgentError`; a throw fails the prompt before
+  it is sent; a prompt never iterated runs none. Without interceptors
+  nothing changes on the wire.
+- **Envelope extras (§5.6).** `RequestEnvelope.extras`: `encodeEnvelope`
+  writes them as top-level fields after the protocol's own (which win a
+  clash), and `decodeEnvelope` keeps every top-level field it does not
+  know there, verbatim — absent when there are none. `isEnvelopeField`
+  names the fields the codec owns.
+- **Signing with a chosen nonce.** `SignedPublishOptions.nonce` (and
+  `signSender`'s `nonce`): sign with the id a message body carries, so it
+  is the `Agent-Sender` nonce and — with `publishSigned` /
+  `requestSigned` — the `Nats-Msg-Id` too. `isValidSenderNonce` checks the
+  header grammar (`[A-Za-z0-9_-]{1,64}`); a nonce outside it is an
+  `IdentityError`.
 - **`saveAttachments(attachments, dir, { maxTotalBytes })`.** The receiving
   counterpart of `normalizeAttachments`: writes the attachments of a reply
   (§6.3) or a mid-stream query (§7.1) into `dir`, created if missing, so a
@@ -200,10 +226,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `SenderSignatureRequiredError` synchronously when the endpoint requires
   `signed` and no signer is configured.
 - **`PromptStream` constructor takes an options object**
-  (`{ nc, subject, payload, buildHeaders?, inactivityTimeoutMs, maxWaitMs, signal? }`)
+  (`{ nc, subject, payload, prepare?, inactivityTimeoutMs, maxWaitMs, signal? }`)
   and the request headers are built at publish time (first iteration),
   so a signed header's `ts` / nonce stay fresh even when the caller
-  iterates late. `buildServiceErrorFromMsg` is exported.
+  iterates late. `buildServiceErrorFromMsg` and `PreparedRequest` (what
+  `prepare` returns) are exported.
 - `PayloadTooLargeError` gained a `headerBytes` field (0 when no header
   is sent) and mentions the header in its message when it counted one.
 - `discover()` starts identity lookup only when identity was explicitly

@@ -10,6 +10,7 @@ import {
 import { Svcm } from "@nats-io/services";
 import { Agent } from "../agent.js";
 import type { IdentityContext } from "../identity/context.js";
+import type { PromptInterceptor } from "../prompt/interceptor.js";
 import type { TraceOptions } from "../trace.js";
 import { SERVICE_NAME } from "../internal/service-name.js";
 import { assertValidToken } from "../subjects.js";
@@ -63,6 +64,7 @@ export async function discoverAgents(
   opts: DiscoverOptions = {},
   identity?: IdentityContext,
   trace?: TraceOptions,
+  interceptors: ReadonlyArray<PromptInterceptor> = [],
 ): Promise<Agent[]> {
   const requestOpts: RequestManyOptions =
     opts.timeoutMs !== undefined
@@ -75,7 +77,10 @@ export async function discoverAgents(
   const infos = await enumerateAgentInfos(nc, requestOpts);
   return infos
     .filter((info) => matchesFilter(info, opts.filter))
-    .map((info) => new Agent(nc, info, defaultInactivityTimeoutMs, closeSignal, identity, trace));
+    .map(
+      (info) =>
+        new Agent(nc, info, defaultInactivityTimeoutMs, closeSignal, identity, trace, interceptors),
+    );
 }
 
 /**
@@ -139,6 +144,7 @@ export async function lookupAgentInstance(
   opts: { timeoutMs?: number } = {},
   identity?: IdentityContext,
   trace?: TraceOptions,
+  interceptors: ReadonlyArray<PromptInterceptor> = [],
 ): Promise<Agent | null> {
   const timeout = opts.timeoutMs ?? 2000;
   // §2 MUST rules — instanceIds are normally server-generated UUIDs, but a
@@ -163,7 +169,15 @@ export async function lookupAgentInstance(
   if (!raw || typeof raw !== "object") return null;
   const info = buildAgentInfo(raw);
   if (!info) return null;
-  return new Agent(nc, info, defaultInactivityTimeoutMs, closeSignal, identity, trace);
+  return new Agent(
+    nc,
+    info,
+    defaultInactivityTimeoutMs,
+    closeSignal,
+    identity,
+    trace,
+    interceptors,
+  );
 }
 
 /** On-demand reachability check for a single instance (§8.4). */

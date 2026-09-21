@@ -19,6 +19,10 @@ Public API entry points:
   extension (optional ``Agent-Sender`` on ``prompt`` / ``status`` requests,
   ``Agents.self_id()``, the signed wrappers); the shared codec lives in
   :mod:`synadia_ai.agents.identity` and is re-exported here.
+* :class:`PromptInterceptor` — the hook that runs before every prompt an
+  :class:`Agents` client publishes (``Agents(interceptors=[...])``), for
+  extensions that add envelope fields, headers, or signed messages of
+  their own.
 
 The agent-host surface (``AgentService``, ``PromptStream``,
 ``PromptHandler``) lives in the sibling package
@@ -133,6 +137,7 @@ from .identity import (
     expected_sender_header_bytes,
     format_sender,
     format_sender_timestamp,
+    is_valid_sender_nonce,
     max_sender_header_bytes,
     normalize_account_token_position,
     parse_sender_header,
@@ -151,6 +156,12 @@ from .identity import (
     verify_agent_id,
     verify_sender,
     verify_sender_header,
+)
+from .interceptor import (
+    PromptExtras,
+    PromptInterceptor,
+    PromptInterceptorContext,
+    PromptSigning,
 )
 from .messages import Chunk, QueryChunk, ResponseChunk, StatusChunk
 from .subjects import AgentSubject
@@ -243,6 +254,10 @@ __all__ = [
     "NonceSeen",
     "PayloadTooLargeError",
     "PromptEmptyError",
+    "PromptExtras",
+    "PromptInterceptor",
+    "PromptInterceptorContext",
+    "PromptSigning",
     "ProtocolError",
     "Query",
     "QueryChunk",
@@ -282,6 +297,7 @@ __all__ = [
     "format_sender_timestamp",
     "inherited_trace_options",
     "is_thread_id",
+    "is_valid_sender_nonce",
     "load_context_options",
     "max_sender_header_bytes",
     "normalize_account_token_position",

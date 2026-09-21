@@ -8,6 +8,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Request interceptors.** `AgentServiceOptions.interceptors`: each
+  `RequestInterceptor`'s `aroundRequest(ctx, next)` runs around the prompt
+  handler for every admitted request — after the envelope is decoded and
+  the sender classified, before the §6.4 ack; the first listed is the
+  outermost. `ctx` carries the decoded `envelope` (unknown top-level
+  fields in `envelope.extras`), the classified `sender`, the `subject` and
+  the request's `headers`. Throwing before `next()` refuses the request
+  with no ack: a `RequestRejectedError(code, description)` answers its §9
+  code (400–599), a `ProtocolError` `400`, anything else `500`. `next()`
+  acks and runs the rest of the chain and the handler; an interceptor runs
+  it inside its own context (`AsyncLocalStorage.run`), which the handler
+  then sees. One that returns without calling `next()` answers `500`; a
+  second call of `next()` rejects.
+- **`heartbeatExtras`.** `AgentServiceOptions.heartbeatExtras` — a provider
+  read when each heartbeat and each `status` reply is built, merged into
+  its extras. A provider that throws, a §8.3 field name, or a value that
+  does not serialize costs that beat its extras, never the beat, and is
+  logged at `error`.
 - **Signed heartbeats.** With `identity: { signer }` the service sets the
   `Agent-Sender` header of the sender-identity extension on every
   heartbeat it publishes — `sub` the heartbeat subject as published, `ts`

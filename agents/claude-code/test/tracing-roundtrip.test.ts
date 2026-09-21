@@ -59,6 +59,11 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
   let untracedCaller: Agents
   let targetService: AgentService
   let targetTraceScope: TraceScope | undefined
+  let tracedPlugin: Client
+  let onPromptCompletion: (
+    content: string,
+    meta: Record<string, unknown>,
+  ) => void = () => undefined
 
   // The plugin's hook, run as Claude Code would run it for this test process.
   function runHook(payload: Record<string, unknown>) {
@@ -118,6 +123,10 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
     mcp.fallbackNotificationHandler = async notification => {
       if (notification.method !== 'notifications/claude/channel') return
       const params = notification.params as { content: string; meta: Record<string, unknown> }
+      if (params.meta.event === 'agent_prompt_completed') {
+        onPromptCompletion(params.content, params.meta)
+        return
+      }
       // Trace ids must never become model-visible channel attributes.
       expect(Object.keys(params.meta).sort()).toEqual(['request_id', 'session', 'ts'])
       await onPrompt(mcp, String(params.meta.request_id), params.content)
@@ -235,7 +244,10 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
   })
 
   test('signed + tracing on: the served pair binds the caller\'s thread to the session', async () => {
-    await startPlugin('traced', { NATS_SENDER_IDENTITY: 'signed', CLAUDE_CODE_SESSION_ID: SESSION_A })
+    tracedPlugin = await startPlugin('traced', {
+      NATS_SENDER_IDENTITY: 'signed',
+      CLAUDE_CODE_SESSION_ID: SESSION_A,
+    })
     const records = await promptAndCollect(tracedCaller, 'traced', 'hello traced')
     expect(records.map(m => decode(m).kind)).toEqual(['edge', 'served', 'served'])
     const [edge, start, end] = records.map(decode) as [Record_, Record_, Record_]
@@ -352,6 +364,65 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
       })
     } finally {
       onPrompt = previousOnPrompt
+    }
+  }, 30_000)
+
+  test('prompt_agent completion wakes Claude with a retrievable prompt id', async () => {
+    let resolveCompletion!: (value: {
+      content: string
+      meta: Record<string, unknown>
+    }) => void
+    const completion = new Promise<{
+      content: string
+      meta: Record<string, unknown>
+    }>(resolve => {
+      resolveCompletion = resolve
+    })
+    onPromptCompletion = (content, meta) => resolveCompletion({ content, meta })
+
+    try {
+      const startedResult = await tracedPlugin.callTool({
+        name: 'prompt_agent',
+        arguments: {
+          instance_id: targetService.instanceId,
+          prompt: 'background notification prompt',
+        },
+      })
+      const startedText = startedResult.content.find(item => item.type === 'text')
+      const started = JSON.parse(
+        startedText?.type === 'text' ? startedText.text : '',
+      ) as { prompt_id: string; state: string }
+      expect(started.state).toBe('pending')
+
+      const notified = await Promise.race([
+        completion,
+        Bun.sleep(2_000).then(() => {
+          throw new Error('prompt completion notification timed out')
+        }),
+      ])
+      expect(notified.content).toContain(`Agent prompt ${started.prompt_id} completed`)
+      expect(notified.meta).toEqual({
+        event: 'agent_prompt_completed',
+        prompt_id: started.prompt_id,
+        state: 'completed',
+      })
+      expect(Object.keys(notified.meta)).not.toContain('trace_id')
+
+      const waited = await tracedPlugin.callTool({
+        name: 'wait_for_reply',
+        arguments: { prompt_ids: [started.prompt_id], timeout_ms: 0 },
+      })
+      const waitedText = waited.content.find(item => item.type === 'text')
+      expect(
+        JSON.parse(waitedText?.type === 'text' ? waitedText.text : ''),
+      ).toMatchObject({
+        timed_out: false,
+        prompt_id: started.prompt_id,
+        state: 'completed',
+        response: 'target response',
+      })
+    } finally {
+      onPromptCompletion = () => undefined
     }
   }, 30_000)
 

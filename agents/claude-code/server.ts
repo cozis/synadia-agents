@@ -267,6 +267,16 @@ function startupDescription(error: unknown): string {
   return `startup failed (${error instanceof Error ? error.name : "unknown error"})`;
 }
 
+function promptCompletionNotice(
+  promptId: string,
+  state: "completed" | "error",
+): string {
+  return [
+    `Agent prompt ${promptId} ${state === "completed" ? "completed" : "finished with an error"}.`,
+    `Call wait_for_reply with prompt_ids [${JSON.stringify(promptId)}] and timeout_ms 0 to retrieve the result.`,
+  ].join(" ");
+}
+
 function toolError(error: unknown) {
   return {
     content: [
@@ -715,6 +725,28 @@ async function run(): Promise<void> {
             args as unknown as Parameters<AsyncPromptManager["promptAgent"]>[1],
             {
               ...(active?.trace ? { traceScope: active.trace } : {}),
+              onSettled: (event) => {
+                void mcp!
+                  .notification({
+                    method: "notifications/claude/channel",
+                    params: {
+                      content: promptCompletionNotice(
+                        event.prompt_id,
+                        event.state,
+                      ),
+                      meta: {
+                        event: "agent_prompt_completed",
+                        prompt_id: event.prompt_id,
+                        state: event.state,
+                      },
+                    },
+                  })
+                  .catch(() =>
+                    logEvent("prompt completion notification failed", {
+                      promptId: event.prompt_id,
+                    }),
+                  );
+              },
             },
           );
           return {

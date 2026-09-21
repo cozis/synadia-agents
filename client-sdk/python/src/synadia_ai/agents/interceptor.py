@@ -2,9 +2,9 @@
 
 Both phases run once per prompt, in the order the client lists the
 interceptors, and see the same per-prompt context: the target agent, the
-prompt text, the opaque ``context`` the caller passed to
-:meth:`Agent.prompt`, the connection, and signing with the prompting
-client's identity.
+prompt text, the extra fields of an :class:`Envelope` the caller passed to
+:meth:`Agent.prompt`, the opaque ``context`` the caller passed with it, the
+connection, and signing with the prompting client's identity.
 
 1. ``before_prompt(ctx)`` decides what the prompt carries: it returns extra
    envelope fields and extra headers, or ``None``, and has no side effects
@@ -23,7 +23,9 @@ The SDK gives those fields and headers no meaning. §5.6 obliges a receiver
 to tolerate unknown top-level envelope fields; a host built on
 :mod:`synadia_ai.agent_service` reads them back from
 :attr:`Envelope.extras` and the request's headers in its own request
-interceptors.
+interceptors. The caller's envelope's own extra fields go out too (a
+relay preserves them, §5.6); an interceptor's field of the same name
+replaces one.
 
 When they run: at publish time, on the stream's first ``__anext__``, so a
 prompt that is never iterated, or that :meth:`Agent.prompt` itself
@@ -36,6 +38,7 @@ hook.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -106,6 +109,11 @@ class PromptInterceptorContext:
     agent: Agent
     #: The prompt text.
     prompt: str
+    #: The extra fields (:attr:`Envelope.extras`) of an envelope passed to
+    #: ``Agent.prompt``, which go out with it; empty for a text prompt. A
+    #: read-only copy: changing what it holds changes nothing sent. It never
+    #: holds an interceptor's fields.
+    envelope_extras: Mapping[str, object]
     #: ``Agent.prompt(context=...)``, verbatim; empty when the caller passed none.
     context: Mapping[str, object]
     #: The connection the prompt goes out on.
@@ -119,7 +127,8 @@ class PromptExtras:
     """What a :class:`PromptInterceptor` adds to the prompt, from its first phase.
 
     ``fields`` are extra top-level envelope fields, by wire name — a field
-    the envelope defines (``prompt``, ``attachments``) is refused.
+    the envelope defines (``prompt``, ``attachments``) is refused; one the
+    caller's envelope also carries (``ctx.envelope_extras``) is replaced.
     ``headers`` are extra message headers — ``Agent-Sender`` belongs to the
     SDK and is refused. ``state`` is anything the interceptor wants back in
     its second phase: opaque to the SDK, never sent, handed to
@@ -160,6 +169,15 @@ class PublishingPromptInterceptor(PromptInterceptor, Protocol):
 
 
 EMPTY_CONTEXT: Mapping[str, object] = MappingProxyType({})
+
+
+def read_only_extras(extras: Mapping[str, object]) -> Mapping[str, object]:
+    """``extras`` as :attr:`PromptInterceptorContext.envelope_extras` shows them.
+
+    A deep copy behind a read-only mapping, so an interceptor that changes a
+    nested value changes nothing sent.
+    """
+    return MappingProxyType(copy.deepcopy(dict(extras))) if extras else EMPTY_CONTEXT
 
 
 @dataclass(frozen=True, slots=True)

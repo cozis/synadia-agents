@@ -16,8 +16,10 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
   stream's first `__anext__`, in a copy of the `contextvars` context
   `prompt()` was called in — in two phases that see the same per-prompt
   `ctx` (`PromptInterceptorContext`): the target `agent`, the `prompt`
-  text, the opaque `context` from the new `prompt(..., context=...)`, the
-  `connection`, and `identity` (`PromptSigning`: `can_sign`, `self_id()`,
+  text, `envelope_extras` (the extra fields of an `Envelope` passed to
+  `prompt()`, a read-only copy; empty for a text prompt), the opaque
+  `context` from the new `prompt(..., context=...)`, the `connection`, and
+  `identity` (`PromptSigning`: `can_sign`, `self_id()`,
   `publish_signed()`).
   - `async before_prompt(ctx)`, after the sender identity is resolved,
     returns `PromptExtras` — extra envelope `fields` and `headers`, and a
@@ -25,7 +27,8 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
     Several are merged in order, the later winning a key. A field the
     envelope defines or the `Agent-Sender` header is refused with
     `NatsAgentError`; an exception fails the prompt before anything is
-    sent.
+    sent. A field the caller's envelope also carries is replaced, as
+    between interceptors.
   - `async before_publish(ctx, extras)`, optional
     (`PublishingPromptInterceptor`), runs only after the `Agent-Sender`
     header is signed and the size checked, immediately before the prompt
@@ -104,6 +107,18 @@ the 0.x line is explicitly unstable per protocol spec §11.2.
 - NATS URL errors redact token and user/password userinfo. URL and context
   bundle resolution preserve WebSocket paths and query strings. The existing
   `load_context_options` API and auth precedence remain compatible.
+
+### Fixed
+
+- **`Agent.prompt(envelope)` sends the envelope's extra fields (§5.6).** It
+  used to send only `prompt` and `attachments`, so an agent relaying the
+  envelope it received dropped the top-level fields the protocol does not
+  define, which §5.6 obliges a relay to preserve. Now they go out verbatim
+  (a `null` among them), after the protocol's fields, and count toward
+  `max_payload`; relaying a decoded envelope sends its bytes unchanged. A
+  prompt interceptor's field of the same name replaces one. A caller that
+  wants the old behaviour passes `Envelope(prompt=..., attachments=...)`.
+  The TypeScript SDK's `prompt()` takes text only, so it has no such path.
 
 ## [0.8.0] - 2026-08-29
 

@@ -219,7 +219,8 @@ from synadia_ai.agents import Agents, PromptExtras, PromptInterceptorContext
 class Tagging:
     # Phase one: what the prompt carries. No side effects.
     async def before_prompt(self, ctx: PromptInterceptorContext) -> PromptExtras | None:
-        # ctx.agent, ctx.prompt, ctx.context (prompt(context=...)), ctx.connection
+        # ctx.agent, ctx.prompt, ctx.envelope_extras, ctx.context (prompt(context=...)),
+        # ctx.connection
         request_id = str(ctx.context.get("request_id", "none"))
         return PromptExtras(
             fields={"x_request": request_id},
@@ -259,6 +260,11 @@ async for msg in agent.prompt("hi", context={"request_id": "r-1"}):
   protocol's (§5.6 obliges receivers to tolerate them); a host reads them
   back from `Envelope.extras`. A field the envelope defines and the
   `Agent-Sender` header are refused.
+- An `Envelope` passed to `prompt()` goes out with its own extra fields,
+  so a relay that forwards the envelope it received preserves them (§5.6).
+  Interceptors see them as `ctx.envelope_extras`, a read-only copy (empty
+  for a text prompt); a field an interceptor adds replaces one of the same
+  name.
 - `ctx.identity.publish_signed(subject, payload, nonce=...)` signs with the
   prompting client's identity; pass `nonce` when the body carries its own
   id, and it is the header's nonce and the `Nats-Msg-Id` too (also on

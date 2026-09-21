@@ -58,6 +58,7 @@ from .interceptor import (
     PromptInterceptorContext,
     PromptSigning,
     collect_extras,
+    read_only_extras,
     run_before_publish,
 )
 from .messages import QueryChunk, ResponseChunk, StatusChunk, decode_chunk
@@ -341,6 +342,12 @@ class Agent:
         sentinel, since an unbounded prompt stream is the exact failure
         mode this ceiling exists to prevent.
 
+        An :class:`Envelope` goes out with its extra fields
+        (:attr:`Envelope.extras`), so a relay that forwards the envelope it
+        received preserves them (§5.6); the prompt interceptors see them as
+        ``ctx.envelope_extras``, and a field an interceptor adds replaces one
+        of the same name.
+
         ``context`` holds opaque values for the client's prompt
         interceptors, handed to each as ``ctx.context`` — the SDK never
         reads them. A caller that knows which interceptors it runs passes
@@ -420,11 +427,10 @@ class Agent:
                 merged_attachments.extend(attachments)
             else:
                 merged_attachments = list(text.attachments) if text.attachments else None
-            # Only the prompt and its attachments are carried over: the
-            # envelope's extra fields are its sender's, and a relay that
-            # forwards what it received sends a plain envelope unless its
-            # own prompt interceptors add fields.
-            envelope = Envelope(prompt=text.prompt, attachments=merged_attachments)
+            # The envelope's extra fields go out with it: a relay forwarding
+            # what it received preserves them (§5.6). A prompt interceptor's
+            # field of the same name replaces one at publish time.
+            envelope = Envelope(prompt=text.prompt, attachments=merged_attachments, **text.extras)
         else:
             envelope = Envelope(
                 prompt=text,
@@ -466,6 +472,7 @@ class Agent:
                 ctx=PromptInterceptorContext(
                     agent=self,
                     prompt=envelope.prompt,
+                    envelope_extras=read_only_extras(envelope.extras),
                     context=context if context is not None else EMPTY_CONTEXT,
                     connection=self._nc,
                     identity=PromptSigning(self._nc, self._sender_identity),

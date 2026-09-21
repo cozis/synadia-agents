@@ -54,7 +54,7 @@ spec to catch up.
 | Pre-publish `max_payload` check              | `PayloadTooLargeError(limit, actual)` before any wire I/O. Effective limit is `min(endpoint.max_payload_bytes, nc.max_payload)` — caller's broker cap binds when smaller. | §5.4       |
 | Empty prompt rejected pre-publish            | `PromptEmptyError` before any wire I/O.                                               | §5.1, §5.3 |
 | Endpoint subject resolution                  | Always `endpoints[].subject` from discovery; never constructed from identity.         | §4.3, §12  |
-| Unknown envelope fields                      | `Envelope` uses `extra="allow"`; decode → encode round-trips lossless per §5.6 (a `null` included), readable on `Envelope.extras`. A stray inbound `session` from a non-compliant peer rides this bag — under v0.3 the request subject IS the session, so `Envelope.session` is no longer a first-class field. Prompt interceptors add fields here; request interceptors read them. | §5.6 |
+| Unknown envelope fields                      | `Envelope` uses `extra="allow"`; decode → encode round-trips lossless per §5.6 (a `null` included), readable on `Envelope.extras`. A stray inbound `session` from a non-compliant peer rides this bag — under v0.3 the request subject IS the session, so `Envelope.session` is no longer a first-class field. `Agent.prompt(envelope)` sends them, so a relay forwarding what it received preserves them; a prompt interceptor's field of the same name replaces one. Prompt interceptors add fields here; request interceptors read them. | §5.6 |
 
 ## Response streaming (§6)
 

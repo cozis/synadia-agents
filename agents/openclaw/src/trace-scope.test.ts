@@ -1,7 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { TraceScope } from "@synadia-ai/agents";
 import { describe, expect, it } from "vitest";
 import {
   OPENCLAW_TRACE_SCOPE_KEY,
+  activeAgentTraceScope,
+  associateAgentTraceScope,
   newTraceId,
   openClawTraceScope,
   runWithTraceId,
@@ -14,7 +17,13 @@ const ID = "9f2c4b1e8a7d33051c6e0b42d78a91f0";
 describe("trace ids", () => {
   it("validTraceId accepts a W3C trace id and refuses anything else", () => {
     expect(validTraceId(ID)).toBe(true);
-    for (const bad of [undefined, "", ID.toUpperCase(), ID.slice(1), "0".repeat(32)]) {
+    for (const bad of [
+      undefined,
+      "",
+      ID.toUpperCase(),
+      ID.slice(1),
+      "0".repeat(32),
+    ]) {
       expect(validTraceId(bad)).toBe(false);
     }
   });
@@ -31,7 +40,9 @@ describe("trace ids", () => {
 describe("openClawTraceScope", () => {
   it("adopts OpenClaw's store when the global carries one", () => {
     const storage = new AsyncLocalStorage<OpenClawTraceContext | undefined>();
-    const root = { [OPENCLAW_TRACE_SCOPE_KEY]: { marker: OPENCLAW_TRACE_SCOPE_KEY, storage } };
+    const root = {
+      [OPENCLAW_TRACE_SCOPE_KEY]: { marker: OPENCLAW_TRACE_SCOPE_KEY, storage },
+    };
     expect(openClawTraceScope(root)).toBe(storage);
   });
 
@@ -39,7 +50,10 @@ describe("openClawTraceScope", () => {
     const root: Record<symbol, unknown> = {};
     const storage = openClawTraceScope(root);
     expect(storage).toBeInstanceOf(AsyncLocalStorage);
-    const state = root[OPENCLAW_TRACE_SCOPE_KEY] as { marker: unknown; storage: unknown };
+    const state = root[OPENCLAW_TRACE_SCOPE_KEY] as {
+      marker: unknown;
+      storage: unknown;
+    };
     expect(state.marker).toBe(OPENCLAW_TRACE_SCOPE_KEY);
     expect(state.storage).toBe(storage);
     // A second call finds the same store.
@@ -47,8 +61,12 @@ describe("openClawTraceScope", () => {
   });
 
   it("refuses a global of another shape rather than misusing it", () => {
-    expect(openClawTraceScope({ [OPENCLAW_TRACE_SCOPE_KEY]: { storage: {} } })).toBeUndefined();
-    expect(openClawTraceScope({ [OPENCLAW_TRACE_SCOPE_KEY]: 42 })).toBeUndefined();
+    expect(
+      openClawTraceScope({ [OPENCLAW_TRACE_SCOPE_KEY]: { storage: {} } }),
+    ).toBeUndefined();
+    expect(
+      openClawTraceScope({ [OPENCLAW_TRACE_SCOPE_KEY]: 42 }),
+    ).toBeUndefined();
   });
 });
 
@@ -73,8 +91,45 @@ describe("runWithTraceId", () => {
 
   it("runs the callback as-is without a usable id or store", async () => {
     const storage = new AsyncLocalStorage<OpenClawTraceContext | undefined>();
-    expect(await runWithTraceId(undefined, async () => storage.getStore(), storage)).toBeUndefined();
-    expect(await runWithTraceId("not a trace id", async () => storage.getStore(), storage)).toBeUndefined();
+    expect(
+      await runWithTraceId(undefined, async () => storage.getStore(), storage),
+    ).toBeUndefined();
+    expect(
+      await runWithTraceId(
+        "not a trace id",
+        async () => storage.getStore(),
+        storage,
+      ),
+    ).toBeUndefined();
     expect(await runWithTraceId(ID, async () => "ran", undefined)).toBe("ran");
+  });
+});
+
+describe("AgentService trace scope handoff", () => {
+  it("recovers the originating scope through OpenClaw's active trace id", async () => {
+    const storage = new AsyncLocalStorage<OpenClawTraceContext | undefined>();
+    const agentScope: TraceScope = {
+      threadId: "a".repeat(32),
+      rootId: "b".repeat(32),
+      turnCountHint: 3,
+    };
+    const release = associateAgentTraceScope(ID, agentScope);
+
+    expect(
+      await runWithTraceId(
+        ID,
+        async () => activeAgentTraceScope(storage),
+        storage,
+      ),
+    ).toBe(agentScope);
+
+    release();
+    expect(
+      await runWithTraceId(
+        ID,
+        async () => activeAgentTraceScope(storage),
+        storage,
+      ),
+    ).toBeUndefined();
   });
 });

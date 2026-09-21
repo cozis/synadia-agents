@@ -11,6 +11,7 @@ import {
   DEFAULT_EDGE_SUBJECT,
   type RequestEnvelope,
   type TraceOptions,
+  Agents,
 } from "@synadia-ai/agents";
 import {
   AgentService,
@@ -28,7 +29,11 @@ import {
 import { connectToNats, drainConnection } from "./nats/connection.js";
 import type { ResolvedNatsAccount } from "./types.js";
 import { getNatsRuntime, setActiveConnection } from "./runtime.js";
-import { newTraceId, runWithTraceId } from "./trace-scope.js";
+import {
+  associateAgentTraceScope,
+  newTraceId,
+  runWithTraceId,
+} from "./trace-scope.js";
 import { ServedPublisher, type ServedStatus } from "./served.js";
 import {
   cleanupAgentStaging,
@@ -43,10 +48,9 @@ const HEARTBEAT_INTERVAL_S = 5;
  * The SDK trace options for the resolved account; `undefined` when off.
  * With tracing on the service adopts a traced caller's thread, or mints
  * one for a prompt that carries none, and reports the trace record counts
- * on its heartbeat. The plugin exposes no tool that prompts other agents,
- * so it never writes an edge record; what it publishes is the served pair
- * that binds each prompt to the trace id its model calls carry (see
- * `ServedPublisher`), on the same default subject.
+ * on its heartbeat. The plugin publishes the served pair that binds each
+ * prompt to the trace id its model calls carry (see `ServedPublisher`) and
+ * a separate child edge when `prompt_agent` calls another agent.
  */
 export function traceOptionsFor(
   account: Pick<ResolvedNatsAccount, "tracing">,
@@ -59,8 +63,11 @@ let activeService: AgentService | null = null;
 let activeNc: NatsConnection | null = null;
 let activeBundle: NatsConnectionBundle | null = null;
 let activeAgentName: string | null = null;
+let activeAgentClient: Agents | null = null;
 
 async function cleanupPrevious(): Promise<void> {
+  await activeAgentClient?.close();
+  activeAgentClient = null;
   if (activeService) {
     try {
       await activeService.stop();
@@ -82,7 +89,7 @@ async function cleanupPrevious(): Promise<void> {
     cleanupAgentStaging(ATTACHMENT_BASE_DIR, activeAgentName);
     activeAgentName = null;
   }
-  setActiveConnection(null, null, null);
+  setActiveConnection(null, null, null, null);
 }
 
 export async function startNatsGateway(
@@ -118,6 +125,13 @@ export async function startNatsGateway(
   activeAgentName = agentName;
 
   const traceOptions = traceOptionsFor(account);
+  activeAgentClient = new Agents({
+    nc: connected.nc,
+    ...(connected.bundle.signer
+      ? { identity: { signer: connected.bundle.signer } }
+      : {}),
+    ...(traceOptions ? { trace: traceOptions } : {}),
+  });
   const logger = gatewayLogger(ctx);
   const service = new AgentService({
     nc: connected.nc,
@@ -180,7 +194,12 @@ export async function startNatsGateway(
     throw error;
   }
 
-  setActiveConnection(connected.nc, agentName, account.owner);
+  setActiveConnection(
+    connected.nc,
+    agentName,
+    account.owner,
+    activeAgentClient,
+  );
   ctx.setStatus({
     ...ctx.getStatus(),
     running: true,
@@ -283,6 +302,8 @@ async function dispatchPromptToOpenClaw(
     channel: effectiveRuntime,
   };
 
+  const releaseAgentTraceScope = associateAgentTraceScope(traceId, scope);
+
   let status: ServedStatus = "ok";
   try {
     // Tracing: dispatch inside OpenClaw's trace scope keyed by the minted
@@ -290,42 +311,43 @@ async function dispatchPromptToOpenClaw(
     // A no-op without a scope store or with tracing off.
     await runWithTraceId(traceId, () =>
       dispatchInboundDirectDmWithRuntime({
-      cfg,
-      runtime: runtimeWithStreaming,
-      channel: "nats",
-      channelLabel: "NATS",
-      accountId: account.accountId,
-      peer: { kind: "direct", id: "remote" },
-      senderId: "remote",
-      senderAddress: "nats:remote",
-      recipientAddress: `nats:${account.agentName}`,
-      conversationLabel: "remote",
-      rawBody: finalPrompt,
-      messageId: `nats-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      timestamp: Date.now(),
-      commandAuthorized: true,
-      deliver: async (payload) => {
-        const text = payload.text ?? "";
-        if (!text) return;
-        for (const slice of splitResponseText(text, maxPayloadBytes)) {
-          await response.send(slice);
-        }
-      },
-      onRecordError: (err) => {
-        ctx.log?.error?.(`nats: session record error: ${String(err)}`);
-      },
-      onDispatchError: (err, info) => {
-        ctx.log?.error?.(`nats: ${info.kind} dispatch error: ${String(err)}`);
-        // OpenClaw reports some dispatch failures here and still resolves;
-        // the served pair records the turn as failed either way.
-        status = "error";
-      },
+        cfg,
+        runtime: runtimeWithStreaming,
+        channel: "nats",
+        channelLabel: "NATS",
+        accountId: account.accountId,
+        peer: { kind: "direct", id: "remote" },
+        senderId: "remote",
+        senderAddress: "nats:remote",
+        recipientAddress: `nats:${account.agentName}`,
+        conversationLabel: "remote",
+        rawBody: finalPrompt,
+        messageId: `nats-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        timestamp: Date.now(),
+        commandAuthorized: true,
+        deliver: async (payload) => {
+          const text = payload.text ?? "";
+          if (!text) return;
+          for (const slice of splitResponseText(text, maxPayloadBytes)) {
+            await response.send(slice);
+          }
+        },
+        onRecordError: (err) => {
+          ctx.log?.error?.(`nats: session record error: ${String(err)}`);
+        },
+        onDispatchError: (err, info) => {
+          ctx.log?.error?.(`nats: ${info.kind} dispatch error: ${String(err)}`);
+          // OpenClaw reports some dispatch failures here and still resolves;
+          // the served pair records the turn as failed either way.
+          status = "error";
+        },
       }),
     );
   } catch (err) {
     status = "error";
     throw err;
   } finally {
+    releaseAgentTraceScope();
     // The turn is over either way: `end` carries its outcome.
     turn?.settle(status);
   }

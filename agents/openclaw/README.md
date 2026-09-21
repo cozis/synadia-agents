@@ -207,8 +207,18 @@ plugin takes part in the SDKs' observability tracing extension:
   startup, and every record owed counts as dropped on the heartbeat's
   `records_dropped`.
 
-The plugin exposes no tool for prompting other agents, so it writes no `edge`
-records of its own.
+The plugin exposes `discover_agents` and `prompt_agent`. The gateway associates
+OpenClaw's per-turn trace id with the active SDK service scope for the lifetime
+of the dispatch, so `prompt_agent` can recover the parent thread even when the
+tool runs through OpenClaw's command lane. With tracing on, its SDK client
+publishes the child `edge` record using the host identity.
+
+### Agent tools
+
+| Tool              | What it does                                                                                                                                                  |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `discover_agents` | Discovers reachable agents and returns their `instance_id` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched.                  |
+| `prompt_agent`    | Prompts one discovered `instance_id`, collects its streamed response, and handles interactive queries with `query_response` or a conservative default denial. |
 
 ## Verify
 

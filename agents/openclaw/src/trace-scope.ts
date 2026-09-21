@@ -21,9 +21,12 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { TraceScope } from "@synadia-ai/agents";
 
 /** The symbol OpenClaw keeps its trace scope store under (2026.5.4 through 2026.9.x). */
-export const OPENCLAW_TRACE_SCOPE_KEY = Symbol.for("openclaw.diagnosticTraceScope.state.v1");
+export const OPENCLAW_TRACE_SCOPE_KEY = Symbol.for(
+  "openclaw.diagnosticTraceScope.state.v1",
+);
 
 /** What OpenClaw puts in the scope: its diagnostic trace context. */
 export interface OpenClawTraceContext {
@@ -39,10 +42,13 @@ interface ScopeState {
 }
 
 const TRACE_ID = /^[0-9a-f]{32}$/;
+const agentTraceScopes = new Map<string, TraceScope>();
 
 /** `true` iff `value` is a W3C trace id: 32 lowercase hex, not all zeros. */
 export function validTraceId(value: unknown): value is string {
-  return typeof value === "string" && TRACE_ID.test(value) && !/^0+$/.test(value);
+  return (
+    typeof value === "string" && TRACE_ID.test(value) && !/^0+$/.test(value)
+  );
 }
 
 function randomHex(bytes: number): string {
@@ -68,7 +74,10 @@ export function newTraceId(): string {
  * marker and an `AsyncLocalStorage` are all it checks for.
  */
 export function openClawTraceScope(
-  root: Record<symbol, unknown> = globalThis as unknown as Record<symbol, unknown>,
+  root: Record<symbol, unknown> = globalThis as unknown as Record<
+    symbol,
+    unknown
+  >,
 ): AsyncLocalStorage<OpenClawTraceContext | undefined> | undefined {
   const existing = root[OPENCLAW_TRACE_SCOPE_KEY] as ScopeState | undefined;
   if (existing !== undefined) {
@@ -99,7 +108,9 @@ export function openClawTraceScope(
 export function runWithTraceId<T>(
   traceId: string | undefined,
   fn: () => Promise<T>,
-  scope: AsyncLocalStorage<OpenClawTraceContext | undefined> | undefined = openClawTraceScope(),
+  scope:
+    | AsyncLocalStorage<OpenClawTraceContext | undefined>
+    | undefined = openClawTraceScope(),
 ): Promise<T> {
   if (scope === undefined || !validTraceId(traceId)) return fn();
   const trace: OpenClawTraceContext = Object.freeze({
@@ -108,4 +119,29 @@ export function runWithTraceId<T>(
     traceFlags: "01",
   });
   return scope.run(trace, fn);
+}
+
+/** Associate one OpenClaw turn with the AgentService trace scope that started it. */
+export function associateAgentTraceScope(
+  traceId: string | undefined,
+  agentScope: TraceScope | undefined,
+): () => void {
+  if (!validTraceId(traceId) || agentScope === undefined)
+    return () => undefined;
+  agentTraceScopes.set(traceId, agentScope);
+  return () => {
+    if (agentTraceScopes.get(traceId) === agentScope) {
+      agentTraceScopes.delete(traceId);
+    }
+  };
+}
+
+/** Recover the AgentService scope for the current OpenClaw turn. */
+export function activeAgentTraceScope(
+  scope:
+    | AsyncLocalStorage<OpenClawTraceContext | undefined>
+    | undefined = openClawTraceScope(),
+): TraceScope | undefined {
+  const traceId = scope?.getStore()?.traceId;
+  return traceId === undefined ? undefined : agentTraceScopes.get(traceId);
 }

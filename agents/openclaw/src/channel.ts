@@ -5,14 +5,19 @@ import {
 } from "openclaw/plugin-sdk/core";
 import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk/core";
 import type { ChannelSetupWizard } from "openclaw/plugin-sdk/channel-setup";
+import { Type } from "@sinclair/typebox";
+import { activeTrace } from "@synadia-ai/agents";
+import { discoverAgents, promptAgent } from "./agent-tools.js";
 import { outboundSubject } from "./nats/index.js";
 import { listNatsAccountIds, resolveNatsAccount } from "./accounts.js";
 import { startNatsGateway, stopNatsGateway } from "./gateway.js";
 import {
   getActiveConnection,
+  getActiveAgentClient,
   getActiveAgentName,
   getActiveOwner,
 } from "./runtime.js";
+import { activeAgentTraceScope } from "./trace-scope.js";
 import type { ResolvedNatsAccount } from "./types.js";
 
 export const natsPlugin = createChatChannelPlugin<ResolvedNatsAccount>({
@@ -333,7 +338,67 @@ export const natsPlugin = createChatChannelPlugin<ResolvedNatsAccount>({
           to: `nats:${(params.to as string) ?? "unknown"}`,
         }),
     },
-    agentTools: () => [],
+    agentTools: () => [
+      {
+        name: "discover_agents",
+        label: "Discover agents",
+        description:
+          "Discover agents reachable on NATS. Returns instance_id values for prompt_agent. All filters are optional and AND-matched.",
+        parameters: Type.Object({
+          agent: Type.Optional(Type.String({ minLength: 1 })),
+          owner: Type.Optional(Type.String({ minLength: 1 })),
+          name: Type.Optional(Type.String({ minLength: 1 })),
+          session: Type.Optional(Type.String({ minLength: 1 })),
+          timeout_ms: Type.Optional(
+            Type.Integer({ minimum: 1, maximum: 30_000 }),
+          ),
+        }),
+        async execute(_toolCallId, params) {
+          const client = getActiveAgentClient();
+          if (!client) throw new Error("NATS is not connected");
+          const result = await discoverAgents(
+            client,
+            params as Parameters<typeof discoverAgents>[1],
+          );
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+            details: result,
+          };
+        },
+      },
+      {
+        name: "prompt_agent",
+        label: "Prompt agent",
+        description:
+          "Prompt one agent instance returned by discover_agents and collect its streamed response. Interactive queries receive query_response, or a conservative denial when omitted.",
+        parameters: Type.Object({
+          instance_id: Type.String({ minLength: 1 }),
+          prompt: Type.String({ minLength: 1 }),
+          max_wait_ms: Type.Optional(
+            Type.Integer({ minimum: 1, maximum: 3_600_000 }),
+          ),
+          query_response: Type.Optional(Type.String()),
+        }),
+        async execute(toolCallId, params, signal) {
+          const client = getActiveAgentClient();
+          if (!client) throw new Error("NATS is not connected");
+          const scope = activeTrace() ?? activeAgentTraceScope();
+          const result = await promptAgent(
+            client,
+            params as Parameters<typeof promptAgent>[1],
+            {
+              signal,
+              toolCallId,
+              ...(scope ? { traceScope: scope } : {}),
+            },
+          );
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+            details: result,
+          };
+        },
+      },
+    ],
   },
   // OpenClaw's own direct-message policy remains open/no-pairing. Protocol
   // sender admission is independently enforced by AgentService.

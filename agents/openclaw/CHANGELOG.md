@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `discover_agents` and `prompt_agent` model tools. The gateway keeps an SDK
+  client on its active NATS connection; when tracing is on, `prompt_agent`
+  recovers the originating `TraceScope` through OpenClaw's per-turn trace id
+  and publishes the child edge with the host identity.
 - Opt-in tracing through `tracing: "on"` / `NATS_TRACING=on` (also in the
   setup wizard): the channel adopts a traced caller's thread, or mints one
   for a prompt that carries none; mints a fresh trace id per prompt and

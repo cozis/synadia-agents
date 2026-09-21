@@ -1,4 +1,5 @@
 import type { NatsConnection } from "@nats-io/nats-core";
+import type { Agents } from "@synadia-ai/agents";
 import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
 
@@ -16,15 +17,22 @@ export const {
 let activeNc: NatsConnection | null = null;
 let activeAgentName: string | null = null;
 let activeOwner: string | null = null;
+let activeAgentClient: Agents | null = null;
 
 export function setActiveConnection(
   nc: NatsConnection | null,
   agentName: string | null,
   owner: string | null,
+  agentClient: Agents | null = null,
 ): void {
   activeNc = nc;
   activeAgentName = agentName;
   activeOwner = owner;
+  activeAgentClient = agentClient;
+}
+
+export function getActiveAgentClient(): Agents | null {
+  return activeAgentClient;
 }
 
 export function getActiveConnection(): NatsConnection | null {

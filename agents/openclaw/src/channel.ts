@@ -3,7 +3,12 @@ import {
   buildChannelOutboundSessionRoute,
   DEFAULT_ACCOUNT_ID,
 } from "openclaw/plugin-sdk/core";
-import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk/core";
+import type {
+  AnyAgentTool,
+  ChannelPlugin,
+  OpenClawConfig,
+  OpenClawPluginToolContext,
+} from "openclaw/plugin-sdk/core";
 import type { ChannelSetupWizard } from "openclaw/plugin-sdk/channel-setup";
 import { Type } from "@sinclair/typebox";
 import { activeTrace } from "@synadia-ai/agents";
@@ -21,6 +26,145 @@ import { activeAgentTraceScope } from "./trace-scope.js";
 import type { ResolvedNatsAccount } from "./types.js";
 
 const outboundPrompts = new AsyncPromptManager();
+
+function promptCompletionNotice(
+  promptId: string,
+  state: "completed" | "error",
+): string {
+  return [
+    `Agent prompt ${promptId} ${state === "completed" ? "completed" : "finished with an error"}.`,
+    `Call wait_for_reply with prompt_ids [${JSON.stringify(promptId)}] and timeout_ms 0 to retrieve the result.`,
+  ].join(" ");
+}
+
+export function notifyPromptCompletion(
+  runtime: Pick<ReturnType<typeof getNatsRuntime>, "system">,
+  toolContext: OpenClawPluginToolContext,
+  event: { readonly prompt_id: string; readonly state: "completed" | "error" },
+): void {
+  if (!toolContext.sessionKey) {
+    console.warn(
+      `[nats] cannot notify prompt ${event.prompt_id}: OpenClaw tool context has no session key`,
+    );
+    return;
+  }
+  const accepted = runtime.system.enqueueSystemEvent(
+    promptCompletionNotice(event.prompt_id, event.state),
+    {
+      sessionKey: toolContext.sessionKey,
+      contextKey: `nats-prompt:${event.prompt_id}`,
+      ...(toolContext.deliveryContext
+        ? { deliveryContext: toolContext.deliveryContext }
+        : {}),
+    },
+  );
+  if (!accepted) {
+    console.warn(
+      `[nats] OpenClaw declined completion notification for prompt ${event.prompt_id}`,
+    );
+    return;
+  }
+  runtime.system.requestHeartbeat({
+    source: "background-task",
+    intent: "event",
+    reason: "nats-prompt-completed",
+    sessionKey: toolContext.sessionKey,
+    ...(toolContext.agentId ? { agentId: toolContext.agentId } : {}),
+  });
+}
+
+export function createNatsAgentTools(
+  toolContext: OpenClawPluginToolContext,
+): AnyAgentTool[] {
+  return [
+    {
+      name: "discover_agents",
+      label: "Discover agents",
+      description:
+        "Discover agents reachable on NATS. Returns instance_id values for prompt_agent. All filters are optional and AND-matched.",
+      parameters: Type.Object({
+        agent: Type.Optional(Type.String({ minLength: 1 })),
+        owner: Type.Optional(Type.String({ minLength: 1 })),
+        name: Type.Optional(Type.String({ minLength: 1 })),
+        session: Type.Optional(Type.String({ minLength: 1 })),
+        timeout_ms: Type.Optional(
+          Type.Integer({ minimum: 1, maximum: 30_000 }),
+        ),
+      }),
+      async execute(_toolCallId, params) {
+        const client = getActiveAgentClient();
+        if (!client) throw new Error("NATS is not connected");
+        const result = await discoverAgents(
+          client,
+          params as Parameters<typeof discoverAgents>[1],
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          details: result,
+        };
+      },
+    },
+    {
+      name: "prompt_agent",
+      label: "Prompt agent",
+      description:
+        "Start prompting one agent instance returned by discover_agents. Returns a pending prompt handle immediately; use wait_for_reply to collect the response. Interactive queries receive query_response, or a conservative denial when omitted.",
+      parameters: Type.Object({
+        instance_id: Type.String({ minLength: 1 }),
+        prompt: Type.String({ minLength: 1 }),
+        max_wait_ms: Type.Optional(
+          Type.Integer({ minimum: 1, maximum: 3_600_000 }),
+        ),
+        query_response: Type.Optional(Type.String()),
+      }),
+      async execute(toolCallId, params) {
+        const client = getActiveAgentClient();
+        if (!client) throw new Error("NATS is not connected");
+        const scope = activeTrace() ?? activeAgentTraceScope();
+        const result = await outboundPrompts.promptAgent(
+          client,
+          params as Parameters<AsyncPromptManager["promptAgent"]>[1],
+          {
+            toolCallId,
+            ...(scope ? { traceScope: scope } : {}),
+            ...(toolContext.sessionKey
+              ? {
+                  onSettled: (event) =>
+                    notifyPromptCompletion(getNatsRuntime(), toolContext, event),
+                }
+              : {}),
+          },
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          details: result,
+        };
+      },
+    },
+    {
+      name: "wait_for_reply",
+      label: "Wait for reply",
+      description:
+        "Wait for one or more prompt_agent handles until one finishes or timeout_ms elapses. Returns only the finished result, including its prompt_id. A timeout of 0 polls and does not cancel pending prompts.",
+      parameters: Type.Object({
+        prompt_ids: Type.Array(Type.String({ minLength: 1 }), {
+          minItems: 1,
+          uniqueItems: true,
+        }),
+        timeout_ms: Type.Integer({ minimum: 0, maximum: 3_600_000 }),
+      }),
+      async execute(_toolCallId, params) {
+        const result = await outboundPrompts.waitForReply(
+          params as Parameters<AsyncPromptManager["waitForReply"]>[0],
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          details: result,
+        };
+      },
+    },
+  ];
+}
 
 export const natsPlugin = createChatChannelPlugin<ResolvedNatsAccount>({
   base: {
@@ -343,88 +487,6 @@ export const natsPlugin = createChatChannelPlugin<ResolvedNatsAccount>({
           to: `nats:${(params.to as string) ?? "unknown"}`,
         }),
     },
-    agentTools: () => [
-      {
-        name: "discover_agents",
-        label: "Discover agents",
-        description:
-          "Discover agents reachable on NATS. Returns instance_id values for prompt_agent. All filters are optional and AND-matched.",
-        parameters: Type.Object({
-          agent: Type.Optional(Type.String({ minLength: 1 })),
-          owner: Type.Optional(Type.String({ minLength: 1 })),
-          name: Type.Optional(Type.String({ minLength: 1 })),
-          session: Type.Optional(Type.String({ minLength: 1 })),
-          timeout_ms: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: 30_000 }),
-          ),
-        }),
-        async execute(_toolCallId, params) {
-          const client = getActiveAgentClient();
-          if (!client) throw new Error("NATS is not connected");
-          const result = await discoverAgents(
-            client,
-            params as Parameters<typeof discoverAgents>[1],
-          );
-          return {
-            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-            details: result,
-          };
-        },
-      },
-      {
-        name: "prompt_agent",
-        label: "Prompt agent",
-        description:
-          "Start prompting one agent instance returned by discover_agents. Returns a pending prompt handle immediately; use wait_for_reply to collect the response. Interactive queries receive query_response, or a conservative denial when omitted.",
-        parameters: Type.Object({
-          instance_id: Type.String({ minLength: 1 }),
-          prompt: Type.String({ minLength: 1 }),
-          max_wait_ms: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: 3_600_000 }),
-          ),
-          query_response: Type.Optional(Type.String()),
-        }),
-        async execute(toolCallId, params) {
-          const client = getActiveAgentClient();
-          if (!client) throw new Error("NATS is not connected");
-          const scope = activeTrace() ?? activeAgentTraceScope();
-          const result = await outboundPrompts.promptAgent(
-            client,
-            params as Parameters<AsyncPromptManager["promptAgent"]>[1],
-            {
-              toolCallId,
-              ...(scope ? { traceScope: scope } : {}),
-            },
-          );
-          return {
-            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-            details: result,
-          };
-        },
-      },
-      {
-        name: "wait_for_reply",
-        label: "Wait for reply",
-        description:
-          "Wait for one or more prompt_agent handles until one finishes or timeout_ms elapses. Returns only the finished result, including its prompt_id. A timeout of 0 polls and does not cancel pending prompts.",
-        parameters: Type.Object({
-          prompt_ids: Type.Array(Type.String({ minLength: 1 }), {
-            minItems: 1,
-            uniqueItems: true,
-          }),
-          timeout_ms: Type.Integer({ minimum: 0, maximum: 3_600_000 }),
-        }),
-        async execute(_toolCallId, params) {
-          const result = await outboundPrompts.waitForReply(
-            params as Parameters<AsyncPromptManager["waitForReply"]>[0],
-          );
-          return {
-            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-            details: result,
-          };
-        },
-      },
-    ],
   },
   // OpenClaw's own direct-message policy remains open/no-pairing. Protocol
   // sender admission is independently enforced by AgentService.

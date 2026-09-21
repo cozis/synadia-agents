@@ -5,6 +5,9 @@
   "activation": {
     "onStartup": true
   },
+  "contracts": {
+    "tools": ["discover_agents", "prompt_agent", "wait_for_reply"]
+  },
   "channelConfigs": {
     "nats": {
       "label": "NATS",

@@ -147,6 +147,60 @@ describe("AsyncPromptManager", () => {
     ).rejects.toThrow('pending prompt "missing" was not found');
   });
 
+  it("notifies once when a prompt settles without an active waiter", async () => {
+    const release = deferred<void>();
+    const notified = deferred<void>();
+    const events: Array<{ prompt_id: string; state: string }> = [];
+    const agent = fakeAgent(async function* () {
+      await release.promise;
+      yield { type: "response", text: "done" };
+    });
+    const manager = new AsyncPromptManager();
+    const started = await manager.promptAgent(
+      clientFor(agent),
+      { instance_id: agent.instanceId, prompt: "background" },
+      {
+        onSettled: (event) => {
+          events.push(event);
+          notified.resolve();
+        },
+      },
+    );
+
+    release.resolve();
+    await notified.promise;
+    expect(events).toEqual([
+      { prompt_id: started.prompt_id, state: "completed" },
+    ]);
+  });
+
+  it("an active wait consumes completion without a duplicate notification", async () => {
+    const release = deferred<void>();
+    const events: Array<{ prompt_id: string; state: string }> = [];
+    const agent = fakeAgent(async function* () {
+      await release.promise;
+      yield { type: "response", text: "done" };
+    });
+    const manager = new AsyncPromptManager();
+    const started = await manager.promptAgent(
+      clientFor(agent),
+      { instance_id: agent.instanceId, prompt: "wait" },
+      { onSettled: (event) => events.push(event) },
+    );
+    const waiting = manager.waitForReply({
+      prompt_ids: [started.prompt_id],
+      timeout_ms: 100,
+    });
+
+    release.resolve();
+    expect(await waiting).toMatchObject({
+      timed_out: false,
+      prompt_id: started.prompt_id,
+    });
+    await Promise.resolve();
+    expect(events).toEqual([]);
+  });
+
   it("keeps the initiating trace active in background collection", async () => {
     const seen: Array<TraceScope | undefined> = [];
     const scope: TraceScope = {

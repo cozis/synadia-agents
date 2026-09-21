@@ -4,7 +4,7 @@ import type {
   PluginRuntime,
 } from "openclaw/plugin-sdk/core";
 import { defineChannelPluginEntry } from "openclaw/plugin-sdk/core";
-import { natsPlugin } from "./src/channel.js";
+import { createNatsAgentTools, natsPlugin } from "./src/channel.js";
 import { setNatsRuntime } from "./src/runtime.js";
 
 export default defineChannelPluginEntry({
@@ -24,6 +24,12 @@ export default defineChannelPluginEntry({
   },
   registerFull(api: OpenClawPluginApi) {
     ensureNatsChannelConfig(api.runtime);
+    api.registerTool(
+      (toolContext) => createNatsAgentTools(toolContext),
+      {
+        names: ["discover_agents", "prompt_agent", "wait_for_reply"],
+      },
+    );
   },
 });
 

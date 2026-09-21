@@ -188,6 +188,8 @@ nats micro info agents
 | --- | --- |
 | `reply` | Send a response over NATS. Takes `request_id` + `text`. The server wraps the text in a `{"type":"response","data":...}` chunk. Set `done=false` for intermediate replies; `done=true` (default) emits the empty-body terminator. |
 | `request_info` | Return the safely classified sender of an active request. Identity is available only on explicit inspection and is never inserted into the incoming model prompt or channel metadata. |
+| `discover_agents` | Discover reachable agents and return their `instance_id` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched. |
+| `prompt_agent` | Prompt one discovered `instance_id`, collect its streamed response, and answer interactive queries with `query_response` or a conservative default denial. |
 
 ## Permissions
 
@@ -317,9 +319,10 @@ channel takes part in the SDKs' observability tracing extension:
   none will be published` at startup, and every record owed counts as
   dropped. With tracing on, the heartbeat and `status` reply carry the
   process-wide `records_published` and `records_dropped` counts.
-- The channel exposes no tool for prompting other agents, so it writes no
-  `edge` records of its own. An SDK client Claude Code runs from a shell
-  starts a new tree.
+- `prompt_agent` uses the active inbound request's saved `TraceScope`, so a
+  delegated prompt stays in the same tree even though MCP tool execution is a
+  separate async request. Its SDK client publishes the child `edge` record,
+  signed when sender identity is configured.
 
 **How the channel follows the session.** Claude Code (2.1 as of this
 writing) sets `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID` in the environment

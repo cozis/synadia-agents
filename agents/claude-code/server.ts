@@ -20,6 +20,7 @@ import {
   withAgentReconnectDefaults,
   type NatsConnectionBundle,
   type RequestEnvelope,
+  type TraceScope,
 } from "@synadia-ai/agents";
 import {
   AgentService,
@@ -32,6 +33,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { discoverAgents, promptAgent } from "./src/agent-tools.js";
 import {
   loadConfig,
   resolveRuntimeSettings,
@@ -76,6 +78,8 @@ type PendingRequest = {
   readonly completion: Deferred;
   readonly handlerClosed: Deferred;
   readonly attachmentDir?: string;
+  /** The service scope to propagate if a model tool prompts another agent. */
+  readonly trace?: TraceScope;
   /** This prompt's served pair when tracing is on; `end` carries `outcome`. */
   readonly served?: ServedTurn;
   /** How the turn ended, for the served pair; `ok` until something else happens. */
@@ -263,6 +267,18 @@ function startupDescription(error: unknown): string {
   return `startup failed (${error instanceof Error ? error.name : "unknown error"})`;
 }
 
+function toolError(error: unknown) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: error instanceof Error ? error.message : String(error),
+      },
+    ],
+    isError: true,
+  };
+}
+
 async function closeConnectionBeforeWipe(
   nc: NatsConnection | undefined,
   bundle: NatsConnectionBundle,
@@ -313,6 +329,7 @@ async function run(): Promise<void> {
   if (settings.tracing === "on") sweepDeadSessions(stateDir);
   let bundle: NatsConnectionBundle | undefined;
   let nc: NatsConnection | undefined;
+  let agentClient: Agents | undefined;
   let service: AgentService | undefined;
   let mcp: Server | undefined;
 
@@ -333,6 +350,13 @@ async function run(): Promise<void> {
       );
     }
     nc = await connect(withAgentReconnectDefaults(bundle.connectionOptions));
+    agentClient = new Agents({
+      nc,
+      ...(settings.senderIdentity === "signed"
+        ? { identity: { signer: bundle.signer! } }
+        : {}),
+      ...(settings.tracing === "on" ? { trace: {} } : {}),
+    });
 
     const owner = resolveOwner(config);
     const sessionName = await resolveSessionName(
@@ -404,9 +428,8 @@ async function run(): Promise<void> {
         : {}),
       // Tracing: adopt the caller's thread and root, or mint them for an
       // envelope that carries none, exactly as an SDK-built agent does. The
-      // channel exposes no tool that prompts other agents, so it writes no
-      // edge record; the served pair below is its own record, and the
-      // service reports the process-wide record counts on its heartbeat.
+      // The served pair below is the host's own record. `prompt_agent` uses
+      // the separate SDK client above and publishes a child edge.
       ...(settings.tracing === "on" ? { trace: {} } : {}),
     });
 
@@ -431,12 +454,17 @@ async function run(): Promise<void> {
       // bound the prompt's trace scope as the ambient one for this handler;
       // the session id is read now, so a `/clear` during the turn does not
       // move the binding, and `start` goes out at once.
-      const servedTurn = served?.beginTurn(activeTrace());
+      const trace = activeTrace();
+      const servedTurn = served?.beginTurn(trace);
       servedTurn?.bind(resolveClaudeSessionId(sessionSource));
       const requestId = String(++requestCounter);
       let staged: StagedAttachment[];
       try {
-        staged = stageAttachments(attachmentRoot, requestId, envelope.attachments);
+        staged = stageAttachments(
+          attachmentRoot,
+          requestId,
+          envelope.attachments,
+        );
       } catch (error) {
         // The prompt fails before it is pending: close its window here.
         servedTurn?.settle("error");
@@ -454,6 +482,7 @@ async function run(): Promise<void> {
           ? { attachmentDir: join(attachmentRoot, requestId) }
           : {}),
         ...(servedTurn ? { served: servedTurn } : {}),
+        ...(trace ? { trace } : {}),
         outcome: "ok",
       };
       pendingRequests.set(requestId, pending);
@@ -596,11 +625,83 @@ async function run(): Promise<void> {
             required: ["request_id"],
           },
         },
+        {
+          name: "discover_agents",
+          description:
+            "Discover agents reachable on NATS. Returns instance_id values for prompt_agent. All filters are optional and AND-matched.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              agent: { type: "string", minLength: 1 },
+              owner: { type: "string", minLength: 1 },
+              name: { type: "string", minLength: 1 },
+              session: { type: "string", minLength: 1 },
+              timeout_ms: {
+                type: "integer",
+                minimum: 1,
+                maximum: 30_000,
+              },
+            },
+          },
+        },
+        {
+          name: "prompt_agent",
+          description:
+            "Prompt one agent instance returned by discover_agents and collect its streamed response. Interactive queries receive query_response, or a conservative denial when omitted.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              instance_id: { type: "string", minLength: 1 },
+              prompt: { type: "string", minLength: 1 },
+              max_wait_ms: {
+                type: "integer",
+                minimum: 1,
+                maximum: 3_600_000,
+              },
+              query_response: { type: "string" },
+            },
+            required: ["instance_id", "prompt"],
+          },
+        },
       ],
     }));
 
     mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       const args = (request.params.arguments ?? {}) as Record<string, unknown>;
+
+      if (request.params.name === "discover_agents") {
+        try {
+          if (!agentClient) throw new Error("NATS is not connected");
+          const result = await discoverAgents(agentClient, args);
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          };
+        } catch (error) {
+          return toolError(error);
+        }
+      }
+
+      if (request.params.name === "prompt_agent") {
+        try {
+          if (!agentClient) throw new Error("NATS is not connected");
+          const active = lastActiveRequestId
+            ? pendingRequests.get(lastActiveRequestId)
+            : undefined;
+          const result = await promptAgent(
+            agentClient,
+            args as unknown as Parameters<typeof promptAgent>[1],
+            {
+              ...(active?.trace ? { traceScope: active.trace } : {}),
+            },
+          );
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          };
+        } catch (error) {
+          return toolError(error);
+        }
+      }
+
       const requestId =
         typeof args.request_id === "string" ? args.request_id : "";
       const pending = pendingRequests.get(requestId);
@@ -703,6 +804,7 @@ async function run(): Promise<void> {
         for (const waiter of stopWaiters.keys()) waiter.cancel();
         await Promise.allSettled(stopWaiters.values());
         await served?.flush();
+        await agentClient?.close().catch(() => undefined);
         await nc!.flush().catch(() => undefined);
         await mcp!.close().catch(() => undefined);
         if (!(await closeConnectionBeforeWipe(nc, bundle!, true))) {
@@ -737,6 +839,7 @@ async function run(): Promise<void> {
     })();
   } catch (error) {
     await service?.stop().catch(() => undefined);
+    await agentClient?.close().catch(() => undefined);
     await mcp?.close().catch(() => undefined);
     if (bundle) await closeConnectionBeforeWipe(nc, bundle, false);
     throw error;

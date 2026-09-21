@@ -6,6 +6,10 @@ All notable changes to the Claude Code NATS channel are documented here.
 
 ### Added
 
+- `discover_agents` and `prompt_agent` MCP tools. The server keeps an SDK
+  client on its active NATS connection and stores each admitted request's
+  `TraceScope`, so a delegated prompt preserves the caller's lineage even
+  though MCP tool execution is a separate async request.
 - Optional connection-bound signed host identity through `senderIdentity` and independent inbound
   sender policy through `minSenderTrust`.
 - Safe, explicit `request_info` inspection for the classified sender of an active request.

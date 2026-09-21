@@ -17,12 +17,15 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { connect, type Msg, type NatsConnection } from '@nats-io/transport-node'
 import {
   Agents,
+  activeTrace,
   decodeHeartbeatPayload,
   parseSenderHeader,
   readSenderHeaderValue,
   resolveNatsConnectionBundle,
   verifySender,
+  type TraceScope,
 } from '@synadia-ai/agents'
+import { AgentService } from '@synadia-ai/agent-service'
 import { spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -54,6 +57,8 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
   let callerBundle: Awaited<ReturnType<typeof resolveNatsConnectionBundle>>
   let tracedCaller: Agents
   let untracedCaller: Agents
+  let targetService: AgentService
+  let targetTraceScope: TraceScope | undefined
 
   // The plugin's hook, run as Claude Code would run it for this test process.
   function runHook(payload: Record<string, unknown>) {
@@ -201,12 +206,26 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
       trace: {},
     })
     untracedCaller = new Agents({ nc })
+    targetService = new AgentService({
+      nc,
+      agent: 'trace-target',
+      owner: OWNER,
+      name: 'trace-target',
+      trace: { edgeSubject: null },
+    })
+    targetService.onPrompt(async (_envelope, response) => {
+      const scope = activeTrace()
+      targetTraceScope = scope === undefined ? undefined : { ...scope }
+      await response.send('target response')
+    })
+    await targetService.start()
   }, 30_000)
 
   afterAll(async () => {
     for (const mcp of plugins) await mcp.close().catch(() => undefined)
     await tracedCaller?.close().catch(() => undefined)
     await untracedCaller?.close().catch(() => undefined)
+    await targetService?.stop().catch(() => undefined)
     await nc?.drain().catch(() => undefined)
     callerBundle?.wipe()
     await server.stop().catch(() => undefined)
@@ -266,6 +285,56 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
     expect(end.phase).toBe('end')
     expect((end.ts as number) - (start.ts as number)).toBeGreaterThanOrEqual(1)
     expect(end.ts as number).toBeGreaterThanOrEqual(repliedAt + 1)
+  }, 30_000)
+
+  test('prompt_agent propagates the active service trace to its target', async () => {
+    const previousOnPrompt = onPrompt
+    let prompted = ''
+    onPrompt = async (mcp, requestId, content) => {
+      const result = await mcp.callTool({
+        name: 'prompt_agent',
+        arguments: {
+          instance_id: targetService.instanceId,
+          prompt: 'delegated prompt',
+        },
+      })
+      const text = result.content.find(item => item.type === 'text')
+      prompted = text?.type === 'text' ? text.text : ''
+      await mcp.callTool({
+        name: 'reply',
+        arguments: { request_id: requestId, text: `echo: ${content}` },
+      })
+      if (hooksInstalled) {
+        await Bun.sleep(1_100)
+        runHook({
+          session_id: SESSION_B,
+          hook_event_name: 'Stop',
+          stop_hook_active: false,
+        })
+      }
+    }
+
+    try {
+      targetTraceScope = undefined
+      const records = await promptAndCollect(tracedCaller, 'traced', 'delegate')
+      const edges = records.map(decode).filter(record => record.kind === 'edge')
+      expect(edges).toHaveLength(2)
+      const [rootEdge, childEdge] = edges
+      expect(childEdge).toMatchObject({
+        parent_id: rootEdge!.thread_id,
+        root_id: rootEdge!.root_id,
+      })
+      expect(targetTraceScope).toMatchObject({
+        threadId: childEdge!.thread_id,
+        rootId: rootEdge!.root_id,
+      })
+      expect(JSON.parse(prompted)).toMatchObject({
+        response: 'target response',
+        agent: { instance_id: targetService.instanceId },
+      })
+    } finally {
+      onPrompt = previousOnPrompt
+    }
   }, 30_000)
 
   test('an untraced caller gets a minted thread: a served pair and no edge', async () => {

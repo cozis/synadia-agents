@@ -7,7 +7,7 @@ import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk/core";
 import type { ChannelSetupWizard } from "openclaw/plugin-sdk/channel-setup";
 import { Type } from "@sinclair/typebox";
 import { activeTrace } from "@synadia-ai/agents";
-import { discoverAgents, promptAgent } from "./agent-tools.js";
+import { AsyncPromptManager, discoverAgents } from "./agent-tools.js";
 import { outboundSubject } from "./nats/index.js";
 import { listNatsAccountIds, resolveNatsAccount } from "./accounts.js";
 import { startNatsGateway, stopNatsGateway } from "./gateway.js";
@@ -19,6 +19,8 @@ import {
 } from "./runtime.js";
 import { activeAgentTraceScope } from "./trace-scope.js";
 import type { ResolvedNatsAccount } from "./types.js";
+
+const outboundPrompts = new AsyncPromptManager();
 
 export const natsPlugin = createChatChannelPlugin<ResolvedNatsAccount>({
   base: {
@@ -321,7 +323,10 @@ export const natsPlugin = createChatChannelPlugin<ResolvedNatsAccount>({
     },
     gateway: {
       startAccount: startNatsGateway,
-      stopAccount: stopNatsGateway,
+      stopAccount: async (ctx) => {
+        outboundPrompts.cancelAll();
+        await stopNatsGateway(ctx);
+      },
     },
     messaging: {
       normalizeTarget: (raw: string) => raw.replace(/^nats:/i, ""),
@@ -370,7 +375,7 @@ export const natsPlugin = createChatChannelPlugin<ResolvedNatsAccount>({
         name: "prompt_agent",
         label: "Prompt agent",
         description:
-          "Prompt one agent instance returned by discover_agents and collect its streamed response. Interactive queries receive query_response, or a conservative denial when omitted.",
+          "Start prompting one agent instance returned by discover_agents. Returns a pending prompt handle immediately; use wait_for_reply to collect the response. Interactive queries receive query_response, or a conservative denial when omitted.",
         parameters: Type.Object({
           instance_id: Type.String({ minLength: 1 }),
           prompt: Type.String({ minLength: 1 }),
@@ -379,18 +384,39 @@ export const natsPlugin = createChatChannelPlugin<ResolvedNatsAccount>({
           ),
           query_response: Type.Optional(Type.String()),
         }),
-        async execute(toolCallId, params, signal) {
+        async execute(toolCallId, params) {
           const client = getActiveAgentClient();
           if (!client) throw new Error("NATS is not connected");
           const scope = activeTrace() ?? activeAgentTraceScope();
-          const result = await promptAgent(
+          const result = await outboundPrompts.promptAgent(
             client,
-            params as Parameters<typeof promptAgent>[1],
+            params as Parameters<AsyncPromptManager["promptAgent"]>[1],
             {
-              signal,
               toolCallId,
               ...(scope ? { traceScope: scope } : {}),
             },
+          );
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+            details: result,
+          };
+        },
+      },
+      {
+        name: "wait_for_reply",
+        label: "Wait for reply",
+        description:
+          "Wait for one or more prompt_agent handles until one finishes or timeout_ms elapses. Returns only the finished result, including its prompt_id. A timeout of 0 polls and does not cancel pending prompts.",
+        parameters: Type.Object({
+          prompt_ids: Type.Array(Type.String({ minLength: 1 }), {
+            minItems: 1,
+            uniqueItems: true,
+          }),
+          timeout_ms: Type.Integer({ minimum: 0, maximum: 3_600_000 }),
+        }),
+        async execute(_toolCallId, params) {
+          const result = await outboundPrompts.waitForReply(
+            params as Parameters<AsyncPromptManager["waitForReply"]>[0],
           );
           return {
             content: [{ type: "text", text: JSON.stringify(result, null, 2) }],

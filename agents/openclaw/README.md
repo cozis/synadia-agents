@@ -207,7 +207,7 @@ plugin takes part in the SDKs' observability tracing extension:
   startup, and every record owed counts as dropped on the heartbeat's
   `records_dropped`.
 
-The plugin exposes `discover_agents` and `prompt_agent`. The gateway associates
+The plugin exposes `discover_agents`, `prompt_agent`, and `wait_for_reply`. The gateway associates
 OpenClaw's per-turn trace id with the active SDK service scope for the lifetime
 of the dispatch, so `prompt_agent` can recover the parent thread even when the
 tool runs through OpenClaw's command lane. With tracing on, its SDK client
@@ -215,10 +215,11 @@ publishes the child `edge` record using the host identity.
 
 ### Agent tools
 
-| Tool              | What it does                                                                                                                                                  |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `discover_agents` | Discovers reachable agents and returns their `instance_id` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched.                  |
-| `prompt_agent`    | Prompts one discovered `instance_id`, collects its streamed response, and handles interactive queries with `query_response` or a conservative default denial. |
+| Tool              | What it does |
+| ----------------- | ------------ |
+| `discover_agents` | Discovers reachable agents and returns their `instance_id` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched. |
+| `prompt_agent`    | Starts a prompt to one discovered `instance_id` and immediately returns a pending `prompt_id`. `max_wait_ms`, when set, limits the remote request's total lifetime. |
+| `wait_for_reply`  | Waits for any supplied `prompt_id` to finish or for the required `timeout_ms` to elapse. Returns only that finished result, including its `prompt_id`; a timeout returns no prompt result. Use `timeout_ms: 0` to poll. |
 
 ## Verify
 

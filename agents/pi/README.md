@@ -178,8 +178,8 @@ different filters, or one made after the cache expires, replaces that result.
 
 Up to 256 prompts are retained per session. At the limit, the oldest terminal
 result is evicted; a new prompt is rejected if every retained prompt is still
-pending. Response attachments are written to private temporary files and
-returned by path. A background completion injects an `agent_prompt_finished`
+pending. Response attachments are written beneath the operating system's
+temporary directory and returned by path. A background completion injects an `agent_prompt_finished`
 follow-up unless an active `wait_for_prompt` receives it.
 
 ### In-PI commands
@@ -291,7 +291,7 @@ await nc.close();
 When a request envelope carries `attachments`, each file is decoded and staged at:
 
 ```
-~/.pi/agent/attachments/<session>/<uuid>/<filename>
+${PI_CODING_AGENT_DIR:-~/.pi/agent}/attachments/<session>/<uuid>/<filename>
 ```
 
 The absolute paths are prepended to the prompt text so PI's model can open them with its file tools. Files staged earlier in a session stay on disk so follow-up turns can reference them; the whole `<session>/` directory is removed on session shutdown.
@@ -336,7 +336,7 @@ Deliberate deferrals:
 - **`nats req` hangs or returns nothing** — pass `--wait-for-empty`. The protocol ends streams with an empty-body message, not a single response.
 - **`400 attachment[N] has invalid base64 content`** — the caller emitted URL-safe base64 or unpadded output. `Buffer.from(bytes).toString("base64")` (Node) produces the right form.
 - **`400 attachment[N] has unsafe filename`** — send the basename only (`"report.pdf"`), not a path (`"./reports/report.pdf"`).
-- **Stale attachments piling up under `~/.pi/agent/attachments/`** — clean session shutdown removes the whole `<session>/` tree, but a force-quit or crash leaves the per-request UUID directories on disk. Safe to `rm -rf ~/.pi/agent/attachments/<session>/` between runs if you don't need to re-reference earlier attachments.
+- **Stale attachments piling up under the PI agent directory's `attachments/` folder** — clean session shutdown removes the whole `<session>/` tree, but a force-quit or crash leaves the per-request UUID directories on disk. It is safe to remove that session's folder between runs if you don't need to re-reference earlier attachments. The agent directory is `PI_CODING_AGENT_DIR` when set, otherwise `~/.pi/agent`.
 
 ## See also
 

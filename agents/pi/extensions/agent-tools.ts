@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, extname, join } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 import {
   StreamMaxWaitExceededError,
   bindActiveTrace,
@@ -71,6 +71,8 @@ export interface PromptAgentOptions {
 export interface AsyncPromptManagerOptions {
   readonly maxTrackedPrompts?: number;
   readonly discoveryCacheTtlMs?: number;
+  /** Harness-specific base directory for transient response attachments. */
+  readonly attachmentTempDir?: string;
 }
 
 export type PromptState =
@@ -128,6 +130,7 @@ export class AsyncPromptManager {
   readonly #startingControllers = new Set<AbortController>();
   readonly #maxTrackedPrompts: number;
   readonly #discoveryCacheTtlMs: number;
+  readonly #attachmentTempDir: string;
   #lastDiscovery:
     | {
         readonly filterKey: string;
@@ -155,6 +158,7 @@ export class AsyncPromptManager {
     }
     this.#maxTrackedPrompts = maximum;
     this.#discoveryCacheTtlMs = discoveryCacheTtlMs;
+    this.#attachmentTempDir = resolve(options.attachmentTempDir ?? tmpdir());
   }
 
   async discoverAgents(
@@ -508,8 +512,9 @@ export class AsyncPromptManager {
     base64: string,
     index: number,
   ): StoredAttachment {
+    mkdirSync(this.#attachmentTempDir, { recursive: true, mode: 0o700 });
     const root = (this.#attachmentRoot ??= mkdtempSync(
-      join(tmpdir(), "synadia-agent-prompts-"),
+      join(this.#attachmentTempDir, "synadia-agent-prompts-"),
     ));
     const directory = join(root, promptId);
     mkdirSync(directory, { recursive: true, mode: 0o700 });

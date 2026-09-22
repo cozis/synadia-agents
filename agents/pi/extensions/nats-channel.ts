@@ -26,7 +26,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -114,7 +114,11 @@ function promptCompletionNotice(
 // Config / paths
 // ─────────────────────────────────────────────────────────────────────────────
 
-const STATE_DIR = join(homedir(), ".pi", "agent");
+// Pi 0.86+ exposes this as getAgentDir(). Keep the extension compatible with
+// its currently supported 0.84 peer while honoring the same environment
+// override instead of assuming ~/.pi/agent.
+const STATE_DIR =
+  process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const CONFIG_FILE = join(STATE_DIR, "nats-channel.json");
 const ATTACHMENTS_ROOT = join(STATE_DIR, "attachments");
 const DEFAULT_NATS_URL = "demo.nats.io";
@@ -317,7 +321,9 @@ export default function (pi: ExtensionAPI) {
   let shuttingDown = false;
 
   const promptQueue = new PiPromptQueue();
-  const outboundPrompts = new AsyncPromptManager();
+  const outboundPrompts = new AsyncPromptManager({
+    attachmentTempDir: tmpdir(),
+  });
 
   // Expiration rejects the deferred handler. AgentService then emits the
   // error and mandatory terminator; a request is never silently forgotten.

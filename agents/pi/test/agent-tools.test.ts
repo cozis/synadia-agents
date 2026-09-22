@@ -439,6 +439,7 @@ describe("AsyncPromptManager", () => {
 
   test("loads request attachments and materializes response attachments", async () => {
     const sourceDir = mkdtempSync(join(tmpdir(), "prompt-input-"));
+    const attachmentTempDir = mkdtempSync(join(tmpdir(), "prompt-output-"));
     const sourcePath = join(sourceDir, "input.txt");
     writeFileSync(sourcePath, "request bytes");
     let promptOptions: any;
@@ -460,7 +461,7 @@ describe("AsyncPromptManager", () => {
         promptOptions = options;
       },
     );
-    const manager = new AsyncPromptManager();
+    const manager = new AsyncPromptManager({ attachmentTempDir });
     try {
       await manager.discoverAgents(clientFor(agent));
       const started = await manager.promptAgent({
@@ -485,9 +486,13 @@ describe("AsyncPromptManager", () => {
         "response bytes",
       );
       expect(result.attachments[0].path).toContain("/p1/");
+      expect(result.attachments[0].path.startsWith(attachmentTempDir)).toBe(
+        true,
+      );
     } finally {
       manager.cancelAll();
       rmSync(sourceDir, { recursive: true, force: true });
+      rmSync(attachmentTempDir, { recursive: true, force: true });
     }
   });
 

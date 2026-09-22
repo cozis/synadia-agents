@@ -97,7 +97,6 @@ export class PromptToolError extends Error {
 }
 
 type StoredAttachment = {
-  readonly filename: string;
   readonly path: string;
   readonly size_bytes: number;
 };
@@ -521,7 +520,7 @@ export class AsyncPromptManager {
     const bytes = decodeStrictBase64(base64);
     const path = join(directory, filename);
     writeFileSync(path, bytes, { flag: "wx", mode: 0o600 });
-    return { filename, path, size_bytes: bytes.byteLength };
+    return { path, size_bytes: bytes.byteLength };
   }
 
   #removePromptFiles(promptId: string): void {

@@ -474,8 +474,8 @@ describe("AsyncPromptManager", () => {
         prompt_ids: [started.prompt_id],
         timeout_ms: 100,
       });
-      expect(result.attachments[0]).toMatchObject({
-        filename: "answer.txt",
+      expect(result.attachments[0]).toEqual({
+        path: expect.any(String),
         size_bytes: 14,
       });
       expect(readFileSync(result.attachments[0].path, "utf8")).toBe(

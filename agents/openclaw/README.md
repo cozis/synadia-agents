@@ -230,8 +230,8 @@ different filters, or one made after the cache expires, replaces that result.
 
 Each OpenClaw session retains up to 256 prompts independently. At the limit,
 the oldest terminal result is evicted; a new prompt is rejected if every
-retained prompt is still pending. Response attachments are written to private
-temporary files and returned by path. A background completion queues an
+retained prompt is still pending. Response attachments are written beneath
+OpenClaw's preferred secure temporary directory and returned by path. A background completion queues an
 `agent_prompt_finished` event for the originating session unless an active
 `wait_for_prompt` receives it.
 

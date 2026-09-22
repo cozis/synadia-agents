@@ -10,6 +10,7 @@ import type {
   OpenClawPluginToolContext,
 } from "openclaw/plugin-sdk/core";
 import type { ChannelSetupWizard } from "openclaw/plugin-sdk/channel-setup";
+import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtime";
 import { Type } from "@sinclair/typebox";
 import { activeTrace } from "@synadia-ai/agents";
 import {
@@ -44,7 +45,9 @@ function promptManagerFor(
   }
   let manager = outboundPromptsBySession.get(sessionKey);
   if (!manager) {
-    manager = new AsyncPromptManager();
+    manager = new AsyncPromptManager({
+      attachmentTempDir: resolvePreferredOpenClawTmpDir(),
+    });
     outboundPromptsBySession.set(sessionKey, manager);
   }
   return manager;

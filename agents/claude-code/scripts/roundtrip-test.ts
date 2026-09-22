@@ -29,6 +29,7 @@ const MAX_PAYLOAD = 1024 * 1024
 const sourceRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 const cacheRoot = mkdtempSync(join(tmpdir(), 'claude-plugin-cache-'))
 const stateDir = mkdtempSync(join(tmpdir(), 'claude-channel-state-'))
+const attachmentTempDir = mkdtempSync(join(tmpdir(), 'claude-channel-attachments-'))
 
 mkdirSync(join(cacheRoot, '.claude-plugin'), { recursive: true })
 mkdirSync(join(cacheRoot, 'runtime'), { recursive: true })
@@ -50,6 +51,7 @@ for (const [key, value] of Object.entries(process.env)) {
 }
 Object.assign(childEnv, {
   CLAUDE_CWD: '/tmp/rt-test',
+  CLAUDE_CODE_TMPDIR: attachmentTempDir,
   NATS_URL,
   NATS_SESSION_NAME: NAME,
   NATS_STATE_DIR: stateDir,
@@ -209,6 +211,9 @@ console.log('\n[case 2] attachment staging and completion cleanup')
   if (chunks.length !== 3) fail(`expected ack + response + terminator, got ${chunks.length}`)
   assertAck(chunks[0])
   if (preReplyContents !== 'hello-attachment-contents\n') fail('staged attachment contents differ')
+  if (stagedPath && !stagedPath.startsWith(attachmentTempDir)) {
+    fail('staged attachment was not written beneath CLAUDE_CODE_TMPDIR')
+  }
   await Bun.sleep(50)
   if (stagedPath && existsSync(stagedPath)) fail('staged attachment was not cleaned up')
 }
@@ -288,6 +293,7 @@ await discovery.close()
 await nc.drain()
 rmSync(stateDir, { recursive: true, force: true })
 rmSync(cacheRoot, { recursive: true, force: true })
+rmSync(attachmentTempDir, { recursive: true, force: true })
 
 if (failures > 0) {
   console.error(`\n${failures} FAILURE(S)`)

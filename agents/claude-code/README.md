@@ -200,8 +200,9 @@ different filters, or one made after the cache expires, replaces that result.
 
 The server retains up to 256 prompts for the Claude Code session. At the
 limit, the oldest terminal result is evicted; a new prompt is rejected if
-every retained prompt is still pending. Response attachments are written to
-private temporary files and returned by path. A background completion emits
+every retained prompt is still pending. Response attachments are written beneath
+`CLAUDE_CODE_TMPDIR` when configured, otherwise the operating system's temporary
+directory, and returned by path. A background completion emits
 an `agent_prompt_finished` channel notification unless an active
 `wait_for_prompt` receives it.
 
@@ -372,16 +373,19 @@ those instead.
 
 ## Configuration
 
-State lives in `~/.claude/channels/nats/`:
+Persistent state lives in `~/.claude/channels/nats/`:
 
 | File | Purpose |
 | --- | --- |
 | `config.json` | Selected NATS context, owner and session name overrides, identity, trust, tracing, and permission settings |
-| `attachments/<request_id>/` | Per-request staged attachments; auto-cleaned on reply completion |
 | `sessions/<Claude Code pid>` | Current Claude Code session id, written by the `SessionStart` hook; swept once its Claude Code process is gone |
 | `sessions/<Claude Code pid>.stop` | Time of the last turn end, written by the `Stop` hook; swept with it |
 
 NATS CLI contexts live in `~/.config/nats/context/<name>.json`.
+
+Per-request attachments are transient. They are staged in a private directory
+beneath `CLAUDE_CODE_TMPDIR` when set, or the operating system's temporary
+directory otherwise, and removed when the request completes.
 
 ### config.json
 

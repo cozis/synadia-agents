@@ -27,7 +27,7 @@ import {
 } from '@synadia-ai/agents'
 import { AgentService } from '@synadia-ai/agent-service'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -51,6 +51,7 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
   const server = new NatsServerProcess()
   const cacheRoot = mkdtempSync(join(tmpdir(), 'claude-plugin-tracing-cache-'))
   const stateDir = mkdtempSync(join(tmpdir(), 'claude-channel-tracing-state-'))
+  const attachmentTempDir = mkdtempSync(join(tmpdir(), 'claude-channel-tracing-attachments-'))
   const testHome = mkdtempSync(join(tmpdir(), 'claude-channel-tracing-home-'))
   const plugins: Client[] = []
   let nc: NatsConnection
@@ -104,6 +105,7 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
         CLAUDE_PID: String(process.pid),
         HOME: testHome,
         CLAUDE_CWD: '/tmp/tracing-host',
+        CLAUDE_CODE_TMPDIR: attachmentTempDir,
         NATS_CONFIG_HOME: join(testHome, '.config', 'nats'),
         NATS_CONTEXT: 'alice',
         NATS_SESSION_NAME: name,
@@ -239,6 +241,7 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
     callerBundle?.wipe()
     await server.stop().catch(() => undefined)
     rmSync(stateDir, { recursive: true, force: true })
+    rmSync(attachmentTempDir, { recursive: true, force: true })
     rmSync(cacheRoot, { recursive: true, force: true })
     rmSync(testHome, { recursive: true, force: true })
   })
@@ -459,9 +462,14 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
   }, 30_000)
 
   test('a prompt that fails before Claude sees it closes its window with error', async () => {
-    // Staging an attachment needs a writable attachments dir; take it away.
-    const attachments = join(stateDir, 'attachments')
-    chmodSync(attachments, 0o500)
+    // Staging an attachment needs a writable per-process temp root; take the
+    // roots created beneath CLAUDE_CODE_TMPDIR away.
+    const attachmentRoots = readdirSync(attachmentTempDir, {
+      withFileTypes: true,
+    })
+      .filter(entry => entry.isDirectory() && entry.name.startsWith('synadia-claude-channel-'))
+      .map(entry => join(attachmentTempDir, entry.name))
+    for (const root of attachmentRoots) chmodSync(root, 0o500)
     try {
       const records = await collectRecords(async () => {
         const host = await discoverHost(tracedCaller, 'traced')
@@ -482,7 +490,7 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
       expect(served.map(r => r.phase)).toEqual(['start', 'end'])
       expect(served[1]!.status).toBe('error')
     } finally {
-      chmodSync(attachments, 0o700)
+      for (const root of attachmentRoots) chmodSync(root, 0o700)
     }
   }, 30_000)
 

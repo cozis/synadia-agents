@@ -28,8 +28,8 @@ import {
   PromptResponse,
   splitResponseText,
 } from "@synadia-ai/agent-service";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -224,6 +224,11 @@ function cleanupAttachments(root: string, requestId: string): void {
   }
 }
 
+function resolveClaudeTempDir(env: NodeJS.ProcessEnv): string {
+  const configured = env.CLAUDE_CODE_TMPDIR?.trim();
+  return configured || tmpdir();
+}
+
 function interpretPermissionReply(raw: string): "allow" | "deny" {
   const text = raw.trim();
   if (/^(y|yes|allow)$/i.test(text)) return "allow";
@@ -332,8 +337,6 @@ async function run(): Promise<void> {
   const stateDir =
     process.env.NATS_STATE_DIR ??
     join(homedir(), ".claude", "channels", "nats");
-  const attachmentRoot = join(stateDir, "attachments");
-  mkdirSync(attachmentRoot, { recursive: true });
 
   const config = loadConfig(join(stateDir, "config.json"));
   const settings = resolveRuntimeSettings(config, process.env);
@@ -353,7 +356,12 @@ async function run(): Promise<void> {
   let agentClient: Agents | undefined;
   let service: AgentService | undefined;
   let mcp: Server | undefined;
-  const outboundPrompts = new AsyncPromptManager();
+  const attachmentTempDir = resolveClaudeTempDir(process.env);
+  mkdirSync(attachmentTempDir, { recursive: true, mode: 0o700 });
+  const attachmentRoot = mkdtempSync(
+    join(attachmentTempDir, "synadia-claude-channel-"),
+  );
+  const outboundPrompts = new AsyncPromptManager({ attachmentTempDir });
 
   try {
     bundle = await resolveNatsConnectionBundle(settings.connectionSource, {
@@ -962,6 +970,7 @@ async function run(): Promise<void> {
         await agentClient?.close().catch(() => undefined);
         await nc!.flush().catch(() => undefined);
         await mcp!.close().catch(() => undefined);
+        rmSync(attachmentRoot, { recursive: true, force: true });
         if (!(await closeConnectionBeforeWipe(nc, bundle!, true))) {
           throw new Error(
             "NATS connection did not close; retained credentials were not wiped",
@@ -994,6 +1003,7 @@ async function run(): Promise<void> {
     })();
   } catch (error) {
     outboundPrompts.cancelAll();
+    rmSync(attachmentRoot, { recursive: true, force: true });
     await service?.stop().catch(() => undefined);
     await agentClient?.close().catch(() => undefined);
     await mcp?.close().catch(() => undefined);

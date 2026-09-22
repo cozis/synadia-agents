@@ -16,7 +16,7 @@ import { activeTrace } from "@synadia-ai/agents";
 import {
   AsyncPromptManager,
   PromptToolError,
-  type PromptSettledEvent,
+  type PromptStateEvent,
 } from "./agent-tools.js";
 import { outboundSubject } from "./nats/index.js";
 import { listNatsAccountIds, resolveNatsAccount } from "./accounts.js";
@@ -58,10 +58,16 @@ function cancelAllOutboundPrompts(): void {
   outboundPromptsBySession.clear();
 }
 
-function promptCompletionNotice(
+function promptStateNotice(
   promptId: string,
-  state: PromptSettledEvent["state"],
+  state: PromptStateEvent["state"],
 ): string {
+  if (state === "input_required") {
+    return [
+      `Agent prompt ${promptId} requires input.`,
+      `Call wait_for_prompt with prompt_ids [${JSON.stringify(promptId)}] and timeout_ms 0 to read the question, then call answer_agent.`,
+    ].join(" ");
+  }
   return [
     `Agent prompt ${promptId} finished with state ${state}.`,
     `Call wait_for_prompt with prompt_ids [${JSON.stringify(promptId)}] and timeout_ms 0 to retrieve the result.`,
@@ -71,7 +77,7 @@ function promptCompletionNotice(
 export function notifyPromptCompletion(
   runtime: Pick<ReturnType<typeof getNatsRuntime>, "system">,
   toolContext: OpenClawPluginToolContext,
-  event: PromptSettledEvent,
+  event: PromptStateEvent,
 ): void {
   if (!toolContext.sessionKey) {
     console.warn(
@@ -80,7 +86,7 @@ export function notifyPromptCompletion(
     return;
   }
   const accepted = runtime.system.enqueueSystemEvent(
-    promptCompletionNotice(event.prompt_id, event.state),
+    promptStateNotice(event.prompt_id, event.state),
     {
       sessionKey: toolContext.sessionKey,
       contextKey: `nats-prompt:${event.prompt_id}`,
@@ -98,7 +104,10 @@ export function notifyPromptCompletion(
   runtime.system.requestHeartbeat({
     source: "background-task",
     intent: "event",
-    reason: "nats-prompt-completed",
+    reason:
+      event.state === "input_required"
+        ? "nats-prompt-input-required"
+        : "nats-prompt-completed",
     sessionKey: toolContext.sessionKey,
     ...(toolContext.agentId ? { agentId: toolContext.agentId } : {}),
   });
@@ -178,7 +187,7 @@ export function createNatsAgentTools(
             ...(scope ? { traceScope: scope } : {}),
             ...(toolContext.sessionKey
               ? {
-                  onSettled: (event) =>
+                  onStateChanged: (event) =>
                     notifyPromptCompletion(
                       getNatsRuntime(),
                       toolContext,
@@ -212,7 +221,7 @@ export function createNatsAgentTools(
       name: "wait_for_prompt",
       label: "Wait for an agent prompt",
       description:
-        "Wait until the first supplied prompt reaches a terminal state or timeout_ms elapses. Returns exactly one result and does not consume it. A timeout of 0 polls.",
+        "Wait until the first supplied prompt requires input, reaches a terminal state, or timeout_ms elapses. Returns exactly one result and does not consume it. A timeout of 0 polls.",
       parameters: Type.Object({
         prompt_ids: Type.Array(Type.String({ minLength: 1 }), {
           minItems: 1,
@@ -224,6 +233,33 @@ export function createNatsAgentTools(
         const manager = promptManagerFor(toolContext);
         const result = await manager.waitForPrompt(
           params as Parameters<AsyncPromptManager["waitForPrompt"]>[0],
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          details: result,
+        };
+      },
+    },
+    {
+      name: "answer_agent",
+      label: "Answer agent",
+      description:
+        "Answer the question from a prompt in input_required state. The prompt returns to pending after the answer is sent.",
+      parameters: Type.Object({
+        prompt_id: Type.String({ minLength: 1 }),
+        text: Type.String({ minLength: 1 }),
+        attachments: Type.Optional(
+          Type.Array(
+            Type.Object({
+              path: Type.String({ minLength: 1 }),
+              filename: Type.Optional(Type.String({ minLength: 1 })),
+            }),
+          ),
+        ),
+      }),
+      async execute(_toolCallId, params) {
+        const result = await promptManagerFor(toolContext).answerAgent(
+          params as Parameters<AsyncPromptManager["answerAgent"]>[0],
         );
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],

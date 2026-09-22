@@ -65,6 +65,31 @@ describe("OpenClaw prompt completion notifications", () => {
 
     expect(requestHeartbeat).not.toHaveBeenCalled();
   });
+
+  it("wakes the originating session when a prompt requires input", () => {
+    const enqueueSystemEvent = vi.fn(() => true);
+    const requestHeartbeat = vi.fn();
+    const runtime = {
+      system: { enqueueSystemEvent, requestHeartbeat },
+    } as unknown as Pick<ReturnType<typeof getNatsRuntime>, "system">;
+    const context = {
+      sessionKey: "agent:main:conversation-1",
+    } as OpenClawPluginToolContext;
+
+    notifyPromptCompletion(runtime, context, {
+      event: "agent_prompt_input_required",
+      prompt_id: "prompt-3",
+      state: "input_required",
+    });
+
+    expect(enqueueSystemEvent).toHaveBeenCalledWith(
+      expect.stringContaining("Agent prompt prompt-3 requires input"),
+      expect.objectContaining({ sessionKey: "agent:main:conversation-1" }),
+    );
+    expect(requestHeartbeat).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "nats-prompt-input-required" }),
+    );
+  });
 });
 
 describe("OpenClaw agent tool registration", () => {
@@ -78,6 +103,7 @@ describe("OpenClaw agent tool registration", () => {
       "prompt_agent",
       "list_pending_prompts",
       "wait_for_prompt",
+      "answer_agent",
       "cancel_prompts",
     ]);
   });

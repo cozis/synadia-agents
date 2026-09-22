@@ -168,9 +168,10 @@ cases where a local action shares the turn with a remote prompt.
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `discover_agents`      | Discovers reachable agents and returns their `prompt_endpoint` values. Optional `agent`, `owner`, `name`, and `session` filters are AND-matched.                                                |
 | `prompt_agent`         | Starts a labeled prompt to one discovered `prompt_endpoint`, with optional file-path attachments, and returns a short session-scoped `prompt_id` after acceptance. `max_runtime_ms` limits its lifetime. |
-| `list_pending_prompts` | Lists this session's prompts that have not reached a terminal state.                                                                                                                           |
-| `wait_for_prompt`      | Waits for the first supplied `prompt_id` to finish or for required `timeout_ms` to elapse. Returns exactly one non-consuming result; use `timeout_ms: 0` to poll.                              |
-| `cancel_prompts`       | Cancels one or more pending prompts.                                                                                                                                                           |
+| `list_pending_prompts` | Lists this session's prompts that are pending or waiting for caller input.                                                                                                                     |
+| `wait_for_prompt`      | Waits for the first supplied `prompt_id` to require input, finish, or reach required `timeout_ms`. Returns exactly one non-consuming result; use `timeout_ms: 0` to poll.                      |
+| `answer_agent`         | Answers the current question from a prompt in `input_required`, with optional file-path attachments, and returns it to `pending`.                                                             |
+| `cancel_prompts`       | Cancels one or more non-terminal prompts.                                                                                                                                                      |
 
 Only the latest successful discovery is cached, for five seconds. A call with
 different filters, or one made after the cache expires, replaces that result.
@@ -178,9 +179,10 @@ different filters, or one made after the cache expires, replaces that result.
 
 Up to 256 prompts are retained per session. At the limit, the oldest terminal
 result is evicted; a new prompt is rejected if every retained prompt is still
-pending. Response attachments are written beneath the operating system's
-temporary directory and returned by path. A background completion injects an `agent_prompt_finished`
-follow-up unless an active `wait_for_prompt` receives it.
+active. Response and question attachments are written beneath the operating
+system's temporary directory and returned by path. A background transition to
+`input_required` or a terminal state injects an `agent_prompt_input_required` or
+`agent_prompt_finished` follow-up unless an active `wait_for_prompt` receives it.
 
 ### In-PI commands
 

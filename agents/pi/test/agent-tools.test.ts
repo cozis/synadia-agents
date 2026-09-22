@@ -193,8 +193,9 @@ describe("AsyncPromptManager", () => {
     });
   });
 
-  test("resolves the exact prompt endpoint and denies interactive queries", async () => {
-    let queryReply = "";
+  test("returns input-required questions and resumes them through answer_agent", async () => {
+    const answered = deferred<void>();
+    let queryReply: any;
     let discoveryOptions: unknown;
     const agent = fakeAgent(async function* () {
       yield { type: "status", status: "ack" };
@@ -202,10 +203,19 @@ describe("AsyncPromptManager", () => {
         type: "query",
         id: "q1",
         prompt: "May I continue?",
-        reply: async (answer: string) => {
+        attachments: [
+          {
+            filename: "context.txt",
+            content: Buffer.from("question context").toString("base64"),
+          },
+        ],
+        reply: async (answer) => {
           queryReply = answer;
+          answered.resolve();
         },
       };
+      await answered.promise;
+      yield { type: "response", text: "continued" };
     });
     const client = {
       discover: async (options: unknown) => {
@@ -220,15 +230,62 @@ describe("AsyncPromptManager", () => {
       label: "query",
       text: "ask",
     });
-    await manager.waitForPrompt({
+    const question: any = await manager.waitForPrompt({
       prompt_ids: [started.prompt_id],
       timeout_ms: 100,
     });
+    const questionAttachmentPath = question.question.attachments[0].path;
 
     expect(discoveryOptions).toEqual({});
-    expect(queryReply).toBe(
-      "This caller cannot answer interactive queries; deny or continue without approval.",
+    expect(question).toMatchObject({
+      type: "prompt_result",
+      prompt_id: "p1",
+      state: "input_required",
+      question: {
+        text: "May I continue?",
+        attachments: [{ path: expect.any(String), size_bytes: 16 }],
+      },
+    });
+    expect(readFileSync(questionAttachmentPath, "utf8")).toBe(
+      "question context",
     );
+    expect(manager.listPendingPrompts()).toEqual([
+      expect.objectContaining({ prompt_id: "p1", state: "input_required" }),
+    ]);
+    expect(
+      await manager.waitForPrompt({ prompt_ids: ["p1"], timeout_ms: 0 }),
+    ).toEqual(question);
+
+    const sourceDir = mkdtempSync(join(tmpdir(), "prompt-answer-"));
+    const sourcePath = join(sourceDir, "answer.txt");
+    writeFileSync(sourcePath, "answer attachment");
+    try {
+      expect(
+        await manager.answerAgent({
+          prompt_id: "p1",
+          text: "Yes, continue",
+          attachments: [{ path: sourcePath }],
+        }),
+      ).toMatchObject({ prompt_id: "p1", state: "pending" });
+      expect(queryReply.prompt).toBe("Yes, continue");
+      expect(queryReply.attachments[0].filename).toBe("answer.txt");
+      expect(Buffer.from(queryReply.attachments[0].content).toString()).toBe(
+        "answer attachment",
+      );
+      expect(
+        await manager.waitForPrompt({ prompt_ids: ["p1"], timeout_ms: 100 }),
+      ).toMatchObject({
+        prompt_id: "p1",
+        state: "completed",
+        response_text: "continued",
+      });
+      await expect(
+        manager.answerAgent({ prompt_id: "p1", text: "too late" }),
+      ).rejects.toMatchObject({ code: "input_not_required" });
+    } finally {
+      manager.cancelAll();
+      rmSync(sourceDir, { recursive: true, force: true });
+    }
     await expect(
       new AsyncPromptManager().promptAgent({
         prompt_endpoint: agent.promptSubject,
@@ -328,7 +385,7 @@ describe("AsyncPromptManager", () => {
     const background = await manager.promptAgent(
       { prompt_endpoint: agent.promptSubject, label: "background", text: "go" },
       {
-        onSettled: (event) => {
+        onStateChanged: (event) => {
           events.push(event);
           notified.resolve();
         },
@@ -358,7 +415,7 @@ describe("AsyncPromptManager", () => {
         text: "go",
       },
       {
-        onSettled: (event) => {
+        onStateChanged: (event) => {
           waitedEvents.push(event);
         },
       },
@@ -371,6 +428,50 @@ describe("AsyncPromptManager", () => {
     await waiting;
     await Promise.resolve();
     expect(waitedEvents).toEqual([]);
+
+    const inputNotice = deferred<void>();
+    const inputAnswered = deferred<void>();
+    const inputEvents: unknown[] = [];
+    const inputAgent = fakeAgent(async function* () {
+      yield { type: "status", status: "ack" };
+      yield {
+        type: "query",
+        id: "q-notify",
+        prompt: "Which option?",
+        reply: async () => inputAnswered.resolve(),
+      };
+      await inputAnswered.promise;
+    });
+    await manager.discoverAgents(clientFor(inputAgent));
+    const inputPrompt = await manager.promptAgent(
+      {
+        prompt_endpoint: inputAgent.promptSubject,
+        label: "needs input",
+        text: "ask",
+      },
+      {
+        onStateChanged: (event) => {
+          inputEvents.push(event);
+          inputNotice.resolve();
+        },
+      },
+    );
+    await inputNotice.promise;
+    expect(inputEvents).toEqual([
+      {
+        event: "agent_prompt_input_required",
+        prompt_id: inputPrompt.prompt_id,
+        state: "input_required",
+      },
+    ]);
+    await manager.answerAgent({
+      prompt_id: inputPrompt.prompt_id,
+      text: "Option A",
+    });
+    await manager.waitForPrompt({
+      prompt_ids: [inputPrompt.prompt_id],
+      timeout_ms: 100,
+    });
   });
 
   test("cancels prompts, evicts terminal results, and rejects an all-pending limit", async () => {

@@ -310,6 +310,7 @@ await step("registers the complete non-SDK prompt tool contract", async () => {
     "prompt_agent",
     "list_pending_prompts",
     "wait_for_prompt",
+    "answer_agent",
     "cancel_prompts",
   ]);
 })();

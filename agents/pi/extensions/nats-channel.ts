@@ -65,6 +65,7 @@ import { Type } from "typebox";
 import {
   AsyncPromptManager,
   PromptToolError,
+  type PromptStateEvent,
 } from "./agent-tools.ts";
 import { PiPromptQueue, type QueuedPiPrompt } from "./prompt-queue.ts";
 import { resolveOwner, sanitizeSubjectToken } from "./subject.ts";
@@ -100,10 +101,16 @@ const KEEPALIVE_INTERVAL_S = 20;
 
 const QUEUED_PROMPT_TTL_MS = 30 * 60 * 1000;
 
-function promptCompletionNotice(
+function promptStateNotice(
   promptId: string,
-  state: "completed" | "failed" | "cancelled" | "expired",
+  state: PromptStateEvent["state"],
 ): string {
+  if (state === "input_required") {
+    return [
+      `Agent prompt ${promptId} requires input.`,
+      `Call wait_for_prompt with prompt_ids [${JSON.stringify(promptId)}] and timeout_ms 0 to read the question, then call answer_agent.`,
+    ].join(" ");
+  }
   return [
     `Agent prompt ${promptId} finished with state ${state}.`,
     `Call wait_for_prompt with prompt_ids [${JSON.stringify(promptId)}] and timeout_ms 0 to retrieve the result.`,
@@ -944,12 +951,15 @@ export default function (pi: ExtensionAPI) {
       const result = await outboundPrompts.promptAgent(params, {
         toolCallId,
         ...(scope ? { traceScope: scope } : {}),
-        onSettled: (event) => {
-          const content = promptCompletionNotice(event.prompt_id, event.state);
+        onStateChanged: (event) => {
+          const content = promptStateNotice(event.prompt_id, event.state);
           injectInScope(scope, () =>
             pi.sendMessage(
               {
-                customType: "nats-prompt-completed",
+                customType:
+                  event.state === "input_required"
+                    ? "nats-prompt-input-required"
+                    : "nats-prompt-completed",
                 content,
                 display: true,
                 details: event,
@@ -985,7 +995,7 @@ export default function (pi: ExtensionAPI) {
     name: "wait_for_prompt",
     label: "Wait for an agent prompt",
     description:
-      "Wait until the first supplied prompt reaches a terminal state or timeout_ms elapses. Returns exactly one result and does not consume it. timeout_ms is required; use 0 to poll.",
+      "Wait until the first supplied prompt requires input, reaches a terminal state, or timeout_ms elapses. Returns exactly one result and does not consume it. timeout_ms is required; use 0 to poll.",
     parameters: Type.Object({
       prompt_ids: Type.Array(Type.String({ minLength: 1 }), {
         minItems: 1,
@@ -995,6 +1005,32 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params) {
       const result = await outboundPrompts.waitForPrompt(params);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        details: result,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "answer_agent",
+    label: "Answer agent",
+    description:
+      "Answer the question from a prompt in input_required state. The prompt returns to pending after the answer is sent.",
+    parameters: Type.Object({
+      prompt_id: Type.String({ minLength: 1 }),
+      text: Type.String({ minLength: 1 }),
+      attachments: Type.Optional(
+        Type.Array(
+          Type.Object({
+            path: Type.String({ minLength: 1 }),
+            filename: Type.Optional(Type.String({ minLength: 1 })),
+          }),
+        ),
+      ),
+    }),
+    async execute(_toolCallId, params) {
+      const result = await outboundPrompts.answerAgent(params);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         details: result,

@@ -1,5 +1,6 @@
 // PI-local implementation of the discover_agents, prompt_agent,
-// list_pending_prompts, wait_for_prompt, and cancel_prompts tools. Model-tool
+// list_pending_prompts, wait_for_prompt, answer_agent, and cancel_prompts
+// tools. Model-tool
 // policy deliberately stays out of the public SDK.
 
 import {
@@ -19,13 +20,11 @@ import {
   parseAgentSubject,
   type Agent,
   type Agents,
-  type AttachmentInput,
+  type RequestAttachment,
   type StreamMessage,
   type TraceScope,
 } from "@synadia-ai/agents";
 
-const NON_INTERACTIVE_QUERY_RESPONSE =
-  "This caller cannot answer interactive queries; deny or continue without approval.";
 export const DEFAULT_MAX_TRACKED_PROMPTS = 256;
 export const DEFAULT_DISCOVERY_CACHE_TTL_MS = 5_000;
 
@@ -57,6 +56,12 @@ export interface WaitForPromptInput {
   readonly timeout_ms: number;
 }
 
+export interface AnswerAgentInput {
+  readonly prompt_id: string;
+  readonly text: string;
+  readonly attachments?: readonly PromptAttachmentInput[];
+}
+
 export interface CancelPromptsInput {
   readonly prompt_ids: readonly string[];
 }
@@ -64,8 +69,10 @@ export interface CancelPromptsInput {
 export interface PromptAgentOptions {
   readonly toolCallId?: string;
   readonly traceScope?: TraceScope;
-  /** Called once when background work settles and no active waiter receives it. */
-  readonly onSettled?: (event: PromptSettledEvent) => void | Promise<void>;
+  /** Called when background work needs input or settles without an active waiter. */
+  readonly onStateChanged?:
+    | ((event: PromptStateEvent) => void | Promise<void>)
+    | undefined;
 }
 
 export interface AsyncPromptManagerOptions {
@@ -76,10 +83,15 @@ export interface AsyncPromptManagerOptions {
 }
 
 export type PromptState =
-  "pending" | "completed" | "failed" | "cancelled" | "expired";
+  | "pending"
+  | "input_required"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "expired";
 
-export interface PromptSettledEvent {
-  readonly event: "agent_prompt_finished";
+export interface PromptStateEvent {
+  readonly event: "agent_prompt_input_required" | "agent_prompt_finished";
   readonly prompt_id: string;
   readonly state: Exclude<PromptState, "pending">;
 }
@@ -105,21 +117,36 @@ type StoredAttachment = {
 
 type PromptError = { readonly code: string; readonly message: string };
 
+type ChangeSignal = {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+};
+
+type ActiveQuestion = {
+  readonly text: string;
+  readonly attachments: StoredAttachment[];
+  readonly reply: Extract<StreamMessage, { type: "query" }>["reply"];
+  answering: boolean;
+};
+
 type ManagedPrompt = {
   readonly promptId: string;
   readonly label: string;
   readonly promptEndpoint: string;
   readonly createdAt: number;
   readonly controller: AbortController;
-  readonly completion: Promise<void>;
-  readonly finish: () => void;
   readonly attachments: StoredAttachment[];
-  readonly onSettled?: (event: PromptSettledEvent) => void | Promise<void>;
+  readonly onStateChanged?:
+    | ((event: PromptStateEvent) => void | Promise<void>)
+    | undefined;
   state: PromptState;
+  change: ChangeSignal;
   responseText: string;
   waiterCount: number;
   notificationDeferred: boolean;
-  notifyOnSettle: boolean;
+  notificationsEnabled: boolean;
+  question?: ActiveQuestion;
+  stateChangedAt?: number;
   error?: PromptError;
   finishedAt?: number;
 };
@@ -220,7 +247,7 @@ export class AsyncPromptManager {
 
   listPendingPrompts() {
     return [...this.#prompts.values()]
-      .filter((prompt) => prompt.state === "pending")
+      .filter(isActive)
       .sort((left, right) => left.createdAt - right.createdAt)
       .map(promptDescriptor);
   }
@@ -235,9 +262,9 @@ export class AsyncPromptManager {
     }
 
     const prompts = input.prompt_ids.map((id) => this.#requirePrompt(id));
-    const alreadyFinished = oldestTerminal(prompts);
-    if (alreadyFinished) {
-      return promptResult(alreadyFinished, input.prompt_ids);
+    const alreadyReady = oldestReportable(prompts);
+    if (alreadyReady) {
+      return promptResult(alreadyReady, input.prompt_ids);
     }
     if (input.timeout_ms === 0) {
       return {
@@ -249,14 +276,14 @@ export class AsyncPromptManager {
     for (const prompt of prompts) prompt.waiterCount += 1;
     let returned: ManagedPrompt | undefined;
     try {
-      await waitUntilOneSettles(prompts, input.timeout_ms);
-      returned = oldestTerminal(prompts);
+      await waitUntilOneIsReportable(prompts, input.timeout_ms);
+      returned = oldestReportable(prompts);
     } finally {
       for (const prompt of prompts) prompt.waiterCount -= 1;
       for (const prompt of prompts) {
         if (!prompt.notificationDeferred || prompt.waiterCount > 0) continue;
         if (prompt === returned) prompt.notificationDeferred = false;
-        else this.#notifySettled(prompt);
+        else this.#notifyState(prompt);
       }
     }
 
@@ -268,12 +295,57 @@ export class AsyncPromptManager {
         };
   }
 
+  async answerAgent(input: AnswerAgentInput) {
+    validateAnswerInput(input);
+    const prompt = this.#requirePrompt(input.prompt_id);
+    const question = prompt.question;
+    if (prompt.state !== "input_required" || !question) {
+      throw new PromptToolError(
+        "input_not_required",
+        `Prompt ${input.prompt_id} is not waiting for input`,
+      );
+    }
+    if (question.answering) {
+      throw new PromptToolError(
+        "answer_in_progress",
+        `Prompt ${input.prompt_id} is already being answered`,
+      );
+    }
+
+    const attachments = loadInputAttachments(input.attachments);
+    question.answering = true;
+    try {
+      await question.reply(
+        attachments ? { prompt: input.text, attachments } : input.text,
+      );
+    } catch (error) {
+      question.answering = false;
+      this.#settle(prompt, "failed", {
+        code: "answer_failed",
+        message: errorMessage(error),
+      });
+      throw new PromptToolError(
+        "answer_failed",
+        `Could not answer prompt ${input.prompt_id}: ${errorMessage(error)}`,
+      );
+    }
+
+    if (prompt.state === "input_required" && prompt.question === question) {
+      delete prompt.question;
+      prompt.state = "pending";
+      delete prompt.stateChangedAt;
+      prompt.notificationDeferred = false;
+      prompt.change = createChangeSignal();
+    }
+    return promptDescriptor(prompt);
+  }
+
   cancelPrompts(input: CancelPromptsInput) {
     validatePromptIds(input.prompt_ids);
     return input.prompt_ids.map((id) => {
       const prompt = this.#prompts.get(id);
       if (!prompt) return { prompt_id: id, outcome: "not_found" as const };
-      if (prompt.state !== "pending") {
+      if (!isActive(prompt)) {
         return {
           prompt_id: id,
           outcome: "already_terminal" as const,
@@ -281,11 +353,13 @@ export class AsyncPromptManager {
         };
       }
 
-      prompt.notifyOnSettle = false;
+      prompt.notificationsEnabled = false;
       prompt.state = "cancelled";
       prompt.finishedAt = Date.now();
+      prompt.stateChangedAt = prompt.finishedAt;
       prompt.controller.abort(new Error("Prompt cancelled"));
-      prompt.finish();
+      delete prompt.question;
+      prompt.change.resolve();
       return { prompt_id: id, outcome: "cancelled" as const };
     });
   }
@@ -297,12 +371,14 @@ export class AsyncPromptManager {
       controller.abort(new Error("NATS channel shutting down"));
     }
     for (const prompt of this.#prompts.values()) {
-      prompt.notifyOnSettle = false;
-      if (prompt.state === "pending") {
-        prompt.state = "cancelled";
-        prompt.finishedAt = Date.now();
-        prompt.controller.abort(new Error("NATS channel shutting down"));
-        prompt.finish();
+        prompt.notificationsEnabled = false;
+        if (isActive(prompt)) {
+          prompt.state = "cancelled";
+          prompt.finishedAt = Date.now();
+          prompt.stateChangedAt = prompt.finishedAt;
+          prompt.controller.abort(new Error("NATS channel shutting down"));
+        delete prompt.question;
+        prompt.change.resolve();
       }
     }
     this.#prompts.clear();
@@ -351,7 +427,7 @@ export class AsyncPromptManager {
         `p${this.#nextPromptNumber++}`,
         input,
         controller,
-        options.onSettled,
+        options.onStateChanged,
       );
       const iterator = stream[Symbol.asyncIterator]();
 
@@ -371,7 +447,7 @@ export class AsyncPromptManager {
       this.#startingPrompts -= 1;
       reserved = false;
       this.#prompts.set(prompt.promptId, prompt);
-      if (prompt.state === "pending") {
+      if (isActive(prompt)) {
         void this.#collect(prompt, iterator);
       }
       return promptDescriptor(prompt);
@@ -394,12 +470,12 @@ export class AsyncPromptManager {
     try {
       for (;;) {
         const next = await iterator.next();
-        if (next.done || prompt.state !== "pending") break;
+        if (next.done || !isActive(prompt)) break;
         await this.#handleMessage(prompt, next.value);
       }
-      if (prompt.state === "pending") this.#settle(prompt, "completed");
+      if (isActive(prompt)) this.#settle(prompt, "completed");
     } catch (error) {
-      if (prompt.state !== "pending") return;
+      if (!isActive(prompt)) return;
       if (error instanceof StreamMaxWaitExceededError) {
         this.#settle(prompt, "expired", {
           code: "deadline_exceeded",
@@ -433,7 +509,29 @@ export class AsyncPromptManager {
         }
         break;
       case "query":
-        await message.reply(NON_INTERACTIVE_QUERY_RESPONSE);
+        if (prompt.question) {
+          await message.reply(
+            "This caller is already answering an earlier question; continue without this input.",
+          );
+          break;
+        }
+        prompt.question = {
+          text: message.prompt,
+          attachments: (message.attachments ?? []).map((attachment, index) =>
+            this.#storeAttachment(
+              prompt.promptId,
+              attachment.filename,
+              attachment.content,
+              prompt.attachments.length + index,
+            ),
+          ),
+          reply: message.reply,
+          answering: false,
+        };
+        prompt.state = "input_required";
+        prompt.stateChangedAt = Date.now();
+        prompt.change.resolve();
+        this.#announceState(prompt);
         break;
       case "status":
         break;
@@ -442,36 +540,44 @@ export class AsyncPromptManager {
 
   #settle(
     prompt: ManagedPrompt,
-    state: Exclude<PromptState, "pending">,
+    state: Exclude<PromptState, "pending" | "input_required">,
     error?: PromptError,
   ): void {
-    if (prompt.state !== "pending") return;
+    if (!isActive(prompt)) return;
     prompt.state = state;
     prompt.finishedAt = Date.now();
+    prompt.stateChangedAt = prompt.finishedAt;
+    delete prompt.question;
     if (error) prompt.error = error;
-    prompt.finish();
-    if (!prompt.notifyOnSettle || !prompt.onSettled) return;
-    if (prompt.waiterCount > 0) prompt.notificationDeferred = true;
-    else this.#notifySettled(prompt);
+    prompt.change.resolve();
+    this.#announceState(prompt);
   }
 
-  #notifySettled(prompt: ManagedPrompt): void {
+  #announceState(prompt: ManagedPrompt): void {
+    if (!prompt.notificationsEnabled || !prompt.onStateChanged) return;
+    if (prompt.waiterCount > 0) prompt.notificationDeferred = true;
+    else this.#notifyState(prompt);
+  }
+
+  #notifyState(prompt: ManagedPrompt): void {
     if (
-      !prompt.onSettled ||
-      !prompt.notifyOnSettle ||
+      !prompt.onStateChanged ||
+      !prompt.notificationsEnabled ||
       prompt.state === "pending"
     ) {
       return;
     }
     prompt.notificationDeferred = false;
-    prompt.notifyOnSettle = false;
-    const event: PromptSettledEvent = {
-      event: "agent_prompt_finished",
+    const event: PromptStateEvent = {
+      event:
+        prompt.state === "input_required"
+          ? "agent_prompt_input_required"
+          : "agent_prompt_finished",
       prompt_id: prompt.promptId,
       state: prompt.state,
     };
     try {
-      void Promise.resolve(prompt.onSettled(event)).catch(() => undefined);
+      void Promise.resolve(prompt.onStateChanged(event)).catch(() => undefined);
     } catch {
       // Host notifications are best-effort and never alter the stored result.
     }
@@ -486,7 +592,7 @@ export class AsyncPromptManager {
       if (!oldest) {
         throw new PromptToolError(
           "prompt_limit_reached",
-          `The session is already tracking ${this.#maxTrackedPrompts} pending prompts`,
+          `The session is already tracking ${this.#maxTrackedPrompts} active prompts`,
         );
       }
       this.#prompts.delete(oldest.promptId);
@@ -541,27 +647,22 @@ function createManagedPrompt(
   promptId: string,
   input: PromptAgentInput,
   controller: AbortController,
-  onSettled?: (event: PromptSettledEvent) => void | Promise<void>,
+  onStateChanged?: (event: PromptStateEvent) => void | Promise<void>,
 ): ManagedPrompt {
-  let finish!: () => void;
-  const completion = new Promise<void>((resolve) => {
-    finish = resolve;
-  });
   return {
     promptId,
     label: input.label,
     promptEndpoint: input.prompt_endpoint,
     createdAt: Date.now(),
     controller,
-    completion,
-    finish,
+    change: createChangeSignal(),
     state: "pending",
     responseText: "",
     attachments: [],
-    ...(onSettled ? { onSettled } : {}),
+    ...(onStateChanged ? { onStateChanged } : {}),
     waiterCount: 0,
     notificationDeferred: false,
-    notifyOnSettle: true,
+    notificationsEnabled: true,
   };
 }
 
@@ -585,10 +686,41 @@ function promptResult(prompt: ManagedPrompt, requestedIds: readonly string[]) {
     response_text: prompt.responseText,
     attachments: [...prompt.attachments],
     created_at_ms: prompt.createdAt,
-    finished_at_ms: prompt.finishedAt!,
     remaining_prompt_ids: requestedIds.filter((id) => id !== prompt.promptId),
+    ...(prompt.state === "input_required" && prompt.question
+      ? {
+          question: {
+            text: prompt.question.text,
+            attachments: [...prompt.question.attachments],
+          },
+        }
+      : {}),
+    ...(prompt.finishedAt !== undefined
+      ? { finished_at_ms: prompt.finishedAt }
+      : {}),
     ...(prompt.error ? { error: prompt.error } : {}),
   };
+}
+
+function validateAnswerInput(input: AnswerAgentInput): void {
+  if (typeof input.prompt_id !== "string" || input.prompt_id.length === 0) {
+    throw new PromptToolError(
+      "invalid_argument",
+      "prompt_id must be a non-empty string",
+    );
+  }
+  if (typeof input.text !== "string" || input.text.length === 0) {
+    throw new PromptToolError(
+      "invalid_argument",
+      "text must be a non-empty string",
+    );
+  }
+  if (input.attachments !== undefined && !Array.isArray(input.attachments)) {
+    throw new PromptToolError(
+      "invalid_argument",
+      "attachments must be an array",
+    );
+  }
 }
 
 function validatePromptInput(input: PromptAgentInput): void {
@@ -659,7 +791,7 @@ function validatePromptIds(ids: readonly string[]): void {
 
 function loadInputAttachments(
   inputs: readonly PromptAttachmentInput[] | undefined,
-): readonly AttachmentInput[] | undefined {
+): readonly RequestAttachment[] | undefined {
   if (!inputs || inputs.length === 0) return undefined;
   return inputs.map((input, index) => {
     if (!input || typeof input.path !== "string" || input.path.length === 0) {
@@ -736,7 +868,7 @@ function oldestTerminal(
   prompts: readonly ManagedPrompt[],
 ): ManagedPrompt | undefined {
   return prompts
-    .filter((prompt) => prompt.state !== "pending")
+    .filter((prompt) => !isActive(prompt))
     .sort((left, right) => {
       const finished = left.finishedAt! - right.finishedAt!;
       if (finished !== 0) return finished;
@@ -746,7 +878,31 @@ function oldestTerminal(
     })[0];
 }
 
-async function waitUntilOneSettles(
+function oldestReportable(
+  prompts: readonly ManagedPrompt[],
+): ManagedPrompt | undefined {
+  return prompts
+    .filter((prompt) => prompt.state !== "pending")
+    .sort((left, right) => {
+      const changed = left.stateChangedAt! - right.stateChangedAt!;
+      if (changed !== 0) return changed;
+      return left.promptId.localeCompare(right.promptId);
+    })[0];
+}
+
+function isActive(prompt: ManagedPrompt): boolean {
+  return prompt.state === "pending" || prompt.state === "input_required";
+}
+
+function createChangeSignal(): ChangeSignal {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+async function waitUntilOneIsReportable(
   prompts: readonly ManagedPrompt[],
   timeoutMs: number,
 ): Promise<void> {
@@ -760,7 +916,9 @@ async function waitUntilOneSettles(
     };
     const timer = setTimeout(finish, timeoutMs);
     timer.unref?.();
-    void Promise.race(prompts.map((prompt) => prompt.completion)).then(finish);
+    void Promise.race(prompts.map((prompt) => prompt.change.promise)).then(
+      finish,
+    );
   });
 }
 

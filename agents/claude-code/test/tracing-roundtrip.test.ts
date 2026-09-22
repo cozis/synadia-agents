@@ -27,7 +27,7 @@ import {
 } from '@synadia-ai/agents'
 import { AgentService } from '@synadia-ai/agent-service'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -62,6 +62,10 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
   let targetTraceScope: TraceScope | undefined
   let tracedPlugin: Client
   let onPromptCompletion: (
+    content: string,
+    meta: Record<string, unknown>,
+  ) => void = () => undefined
+  let onPromptInputRequired: (
     content: string,
     meta: Record<string, unknown>,
   ) => void = () => undefined
@@ -127,6 +131,10 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
       const params = notification.params as { content: string; meta: Record<string, unknown> }
       if (params.meta.event === 'agent_prompt_finished') {
         onPromptCompletion(params.content, params.meta)
+        return
+      }
+      if (params.meta.event === 'agent_prompt_input_required') {
+        onPromptInputRequired(params.content, params.meta)
         return
       }
       // Trace ids must never become model-visible channel attributes.
@@ -224,9 +232,25 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
       name: 'trace-target',
       trace: { edgeSubject: null },
     })
-    targetService.onPrompt(async (_envelope, response) => {
+    targetService.onPrompt(async (envelope, response) => {
       const scope = activeTrace()
       targetTraceScope = scope === undefined ? undefined : { ...scope }
+      if (envelope.prompt === 'input-required roundtrip') {
+        const answer = await response.ask(
+          {
+            prompt: 'Which option should I use?',
+            attachments: [
+              {
+                filename: 'options.txt',
+                content: new TextEncoder().encode('blue\ngreen\n'),
+              },
+            ],
+          },
+          { timeoutMs: 5_000 },
+        )
+        await response.send(`target received: ${answer.prompt}`)
+        return
+      }
       await response.send('target response')
     })
     await targetService.start()
@@ -438,6 +462,95 @@ describe.skipIf(!hasNatsServer)('tracing roundtrip', () => {
       })
     } finally {
       onPromptCompletion = () => undefined
+    }
+  }, 30_000)
+
+  test('a target query becomes input_required and answer_agent resumes the same prompt', async () => {
+    let resolveInputRequired!: (value: {
+      content: string
+      meta: Record<string, unknown>
+    }) => void
+    const inputRequired = new Promise<{
+      content: string
+      meta: Record<string, unknown>
+    }>(resolve => {
+      resolveInputRequired = resolve
+    })
+    onPromptInputRequired = (content, meta) => resolveInputRequired({ content, meta })
+
+    try {
+      await tracedPlugin.callTool({
+        name: 'discover_agents',
+        arguments: { agent: 'trace-target', owner: OWNER, name: 'trace-target' },
+      })
+      const startedResult = await tracedPlugin.callTool({
+        name: 'prompt_agent',
+        arguments: {
+          prompt_endpoint: targetService.subject.prompt,
+          label: 'query roundtrip',
+          text: 'input-required roundtrip',
+        },
+      })
+      const startedText = startedResult.content.find(item => item.type === 'text')
+      const started = JSON.parse(
+        startedText?.type === 'text' ? startedText.text : '',
+      ) as { prompt_id: string; state: string }
+      expect(started.state).toBe('pending')
+
+      const notified = await Promise.race([
+        inputRequired,
+        Bun.sleep(2_000).then(() => {
+          throw new Error('prompt input-required notification timed out')
+        }),
+      ])
+      expect(notified.content).toContain(
+        `Agent prompt ${started.prompt_id} requires input`,
+      )
+      expect(notified.meta).toEqual({
+        event: 'agent_prompt_input_required',
+        prompt_id: started.prompt_id,
+        state: 'input_required',
+      })
+
+      const questionResult = await tracedPlugin.callTool({
+        name: 'wait_for_prompt',
+        arguments: { prompt_ids: [started.prompt_id], timeout_ms: 0 },
+      })
+      const questionText = questionResult.content.find(item => item.type === 'text')
+      const question = JSON.parse(
+        questionText?.type === 'text' ? questionText.text : '',
+      ) as {
+        state: string
+        question: { text: string; attachments: Array<{ path: string }> }
+      }
+      expect(question.state).toBe('input_required')
+      expect(question.question.text).toBe('Which option should I use?')
+      expect(readFileSync(question.question.attachments[0]!.path, 'utf8')).toBe(
+        'blue\ngreen\n',
+      )
+
+      const answeredResult = await tracedPlugin.callTool({
+        name: 'answer_agent',
+        arguments: { prompt_id: started.prompt_id, text: 'blue' },
+      })
+      const answeredText = answeredResult.content.find(item => item.type === 'text')
+      expect(JSON.parse(answeredText?.type === 'text' ? answeredText.text : '')).toMatchObject({
+        prompt_id: started.prompt_id,
+        state: 'pending',
+      })
+
+      const completedResult = await tracedPlugin.callTool({
+        name: 'wait_for_prompt',
+        arguments: { prompt_ids: [started.prompt_id], timeout_ms: 2_000 },
+      })
+      const completedText = completedResult.content.find(item => item.type === 'text')
+      expect(JSON.parse(completedText?.type === 'text' ? completedText.text : '')).toMatchObject({
+        prompt_id: started.prompt_id,
+        state: 'completed',
+        response_text: 'target received: blue',
+      })
+    } finally {
+      onPromptInputRequired = () => undefined
     }
   }, 30_000)
 

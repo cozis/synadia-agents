@@ -96,6 +96,7 @@ for (const expected of [
   'prompt_agent',
   'list_pending_prompts',
   'wait_for_prompt',
+  'answer_agent',
   'cancel_prompts',
 ]) {
   if (!toolNames.has(expected)) throw new Error(`missing MCP tool: ${expected}`)

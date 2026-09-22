@@ -36,7 +36,7 @@ import { z } from "zod";
 import {
   AsyncPromptManager,
   PromptToolError,
-  type PromptSettledEvent,
+  type PromptStateEvent,
 } from "./src/agent-tools.js";
 import {
   loadConfig,
@@ -276,10 +276,16 @@ function startupDescription(error: unknown): string {
   return `startup failed (${error instanceof Error ? error.name : "unknown error"})`;
 }
 
-function promptCompletionNotice(
+function promptStateNotice(
   promptId: string,
-  state: PromptSettledEvent["state"],
+  state: PromptStateEvent["state"],
 ): string {
+  if (state === "input_required") {
+    return [
+      `Agent prompt ${promptId} requires input.`,
+      `Call wait_for_prompt with prompt_ids [${JSON.stringify(promptId)}] and timeout_ms 0 to read the question, then call answer_agent.`,
+    ].join(" ");
+  }
   return [
     `Agent prompt ${promptId} finished with state ${state}.`,
     `Call wait_for_prompt with prompt_ids [${JSON.stringify(promptId)}] and timeout_ms 0 to retrieve the result.`,
@@ -718,7 +724,7 @@ async function run(): Promise<void> {
         {
           name: "wait_for_prompt",
           description:
-            "Wait until the first supplied prompt reaches a terminal state or timeout_ms elapses. Returns exactly one result and does not consume it. A timeout of 0 polls.",
+            "Wait until the first supplied prompt requires input, reaches a terminal state, or timeout_ms elapses. Returns exactly one result and does not consume it. A timeout of 0 polls.",
           inputSchema: {
             type: "object",
             properties: {
@@ -735,6 +741,31 @@ async function run(): Promise<void> {
               },
             },
             required: ["prompt_ids", "timeout_ms"],
+          },
+        },
+        {
+          name: "answer_agent",
+          description:
+            "Answer the question from a prompt in input_required state. The prompt returns to pending after the answer is sent.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              prompt_id: { type: "string", minLength: 1 },
+              text: { type: "string", minLength: 1 },
+              attachments: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    path: { type: "string", minLength: 1 },
+                    filename: { type: "string", minLength: 1 },
+                  },
+                  required: ["path"],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ["prompt_id", "text"],
           },
         },
         {
@@ -795,12 +826,12 @@ async function run(): Promise<void> {
             args as unknown as Parameters<AsyncPromptManager["promptAgent"]>[0],
             {
               ...(active?.trace ? { traceScope: active.trace } : {}),
-              onSettled: (event) => {
+              onStateChanged: (event) => {
                 void mcp!
                   .notification({
                     method: "notifications/claude/channel",
                     params: {
-                      content: promptCompletionNotice(
+                      content: promptStateNotice(
                         event.prompt_id,
                         event.state,
                       ),
@@ -839,6 +870,21 @@ async function run(): Promise<void> {
           const result = await outboundPrompts.waitForPrompt(
             args as unknown as Parameters<
               AsyncPromptManager["waitForPrompt"]
+            >[0],
+          );
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          };
+        } catch (error) {
+          return toolError(error);
+        }
+      }
+
+      if (request.params.name === "answer_agent") {
+        try {
+          const result = await outboundPrompts.answerAgent(
+            args as unknown as Parameters<
+              AsyncPromptManager["answerAgent"]
             >[0],
           );
           return {
